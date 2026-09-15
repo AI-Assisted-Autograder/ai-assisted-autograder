@@ -1,0 +1,258 @@
+@startuml 07-interfaces
+' =====================================================================
+' Key interfaces and extension points
+' Traces to: FR-23, FR-24, FR-37..FR-40, NFR-3, NFR-4, NFR-11
+'
+' Changes from the previous revision:
+'   ILearningPlatform shrank a lot. We never pull submissions out of
+'   the platform any more, because the autograder script already has
+'   the student's files. It now only needs login plus "trigger a
+'   rerun", which is the whole job of the nightly runner.
+'
+'   + IGradingClient: the boundary the autograder container talks to.
+'     It runs on Gradescope infrastructure, so this is the only surface
+'     it gets, and it is how credentials stay on our side (OQ-11).
+' =====================================================================
+
+title Key Interfaces and Extension Points
+
+skinparam shadowing false
+skinparam defaultFontName Helvetica
+skinparam classAttributeIconSize 0
+
+' ---------------------------------------------------------------------
+' Platform abstraction -- Student C
+' ---------------------------------------------------------------------
+package "Platform Integration (Student C)" #FBE6D4 {
+
+  interface ILearningPlatform <<abstract>> {
+    +authenticate() : None
+    +list_assignments() : PlatformAssignment[]
+    +trigger_rerun(platform_assignment_id) : RerunResult
+    +rerun_is_bulk() : bool
+  }
+
+  class GradescopePlatform {
+    -page : playwright.Page
+    -selectors : SelectorMap
+    --
+    +authenticate()
+    +list_assignments()
+    +trigger_rerun(...)
+    +rerun_is_bulk() -> True
+  }
+
+  class FakePlatform {
+    Records rerun calls. Lets the
+    nightly trigger be tested with
+    no browser and no account.
+  }
+
+  class SelectorMap {
+    +login_email : str
+    +login_password : str
+    +assignment_rows : str
+    +manage_submissions_link : str
+    +rerun_autograder_button : str
+    +rerun_confirm_button : str
+    --
+    Every CSS selector in one file.
+    When Gradescope reskins, this is
+    the only thing that changes.
+  }
+
+  class NightlyTrigger {
+    -platform : ILearningPlatform
+    -client : IGradingClient
+    --
+    +run() : TriggerRunSummary
+    --
+    Thin on purpose. Finds nightly-mode
+    assignments with pending tasks and
+    clicks rerun. Never calls an LLM.
+  }
+
+  class AutograderEntrypoint {
+    -client : IGradingClient
+    -runner : ITestRunner
+    -grader : AIGradingComponent
+    --
+    +main() : int
+    --
+    Ships inside the platform
+    autograder zip. Decides from
+    grading_mode whether to invoke
+    the AI component now.
+  }
+
+  interface ITestRunner <<abstract>> {
+    +run(targets, submission_dir) : TestOutcome[]
+  }
+
+  class JUnitRunner
+  class PytestRunner
+
+  ILearningPlatform <|.. GradescopePlatform
+  ILearningPlatform <|.. FakePlatform
+  GradescopePlatform --> SelectorMap
+  NightlyTrigger ..> ILearningPlatform
+  ITestRunner <|.. JUnitRunner
+  ITestRunner <|.. PytestRunner
+  AutograderEntrypoint ..> ITestRunner
+}
+
+' ---------------------------------------------------------------------
+' AI grading -- Student A. Runs INSIDE the autograder container.
+' ---------------------------------------------------------------------
+package "AI Grading (Student A)" #D6E4F0 {
+
+  class AIGradingComponent {
+    -providers : ILLMProvider[]
+    -builder : PromptBuilder
+    -comparator : ResponseComparator
+    -estimator : ConfidenceEstimator
+    -client : IGradingClient
+    --
+    +grade(task_id) : FeedbackItem
+    --
+    Same code in both modes. The only
+    difference is who calls it.
+  }
+
+  interface ILLMProvider <<abstract>> {
+    +name : str
+    +model : str
+    +generate_feedback(req : FeedbackRequest) : FeedbackResponse
+    +estimated_cost(req) : float
+  }
+
+  class ClaudeProvider
+  class OpenAIProvider
+  class GeminiProvider
+  class FakeProvider {
+    Deterministic canned responses.
+    Required so the test suite runs
+    in CI with no API key and no bill.
+  }
+
+  class PromptBuilder {
+    +build(rubric, guidance,\n outcomes, files) : str
+    +version : str
+  }
+
+  class ResponseComparator {
+    +compare(responses) : Comparison
+    +select(responses) : FeedbackResponse
+  }
+
+  class ConfidenceEstimator {
+    +estimate(responses) : float
+  }
+
+  ILLMProvider <|.. ClaudeProvider
+  ILLMProvider <|.. OpenAIProvider
+  ILLMProvider <|.. GeminiProvider
+  ILLMProvider <|.. FakeProvider
+
+  AIGradingComponent o--> "1..*" ILLMProvider
+  AIGradingComponent --> PromptBuilder
+  AIGradingComponent --> ResponseComparator
+  AIGradingComponent --> ConfidenceEstimator
+}
+
+AutograderEntrypoint --> AIGradingComponent
+
+' ---------------------------------------------------------------------
+' The container's only window onto our data -- Student B
+' ---------------------------------------------------------------------
+package "Service Boundary (Student B)" #DCEFD9 {
+
+  interface IGradingClient <<abstract>> {
+    +get_config(platform_assignment_id) : AssignmentConfig
+    +post_submission(ref, outcomes, files) : SubmissionResult
+    +get_pending_tasks(submission_id) : GradingTaskRef[]
+    +claim_task(task_id) : FeedbackRequest | None
+    +post_feedback(task_id, result) : None
+    +get_selected_feedback(submission_id) : FeedbackPackage
+    +list_assignments_with_pending(mode) : PlatformAssignment[]
+  }
+
+  class HttpGradingClient {
+    -base_url : str
+    -assignment_token : str
+    --
+    Per-assignment bearer token,
+    scoped to one assignment's rows.
+    Never a DB credential.
+  }
+
+  class FakeGradingClient {
+    In-memory. Lets the whole
+    autograder script be tested
+    offline.
+  }
+
+  interface IGradingRepository <<abstract>> {
+    +get_assignment_config(...) : AssignmentConfig
+    +upsert_submission(ref) : str
+    +record_outcomes(...) : None
+    +create_pending_tasks(...) : GradingTaskRef[]
+    +claim_task(task_id) : bool
+    +build_feedback_request(task_id) : FeedbackRequest
+    +save_feedback(task_id, result) : None
+    +get_selected_feedback(...) : FeedbackPackage
+    +expire_stale_claims(older_than) : int
+  }
+
+  class SqlGradingRepository
+  class InMemoryRepository
+
+  IGradingClient <|.. HttpGradingClient
+  IGradingClient <|.. FakeGradingClient
+  IGradingRepository <|.. SqlGradingRepository
+  IGradingRepository <|.. InMemoryRepository
+}
+
+AIGradingComponent ..> IGradingClient
+AutograderEntrypoint ..> IGradingClient
+NightlyTrigger ..> IGradingClient
+
+note as N1 #FFF8DC
+  **Why IGradingClient and IGradingRepository
+  are separate interfaces.**
+  The repository is in-process SQL on our cloud
+  host. The client is HTTPS from someone else's
+  container. Collapsing them would mean shipping
+  database credentials inside the autograder
+  zip, which is OQ-11 option (a).
+
+  The Web API implements the client surface on
+  top of the repository. Keeping the two
+  interfaces distinct is what makes the
+  credential boundary visible in code rather
+  than a deployment convention nobody remembers.
+end note
+
+note as N2 #FFF8DC
+  **Every interface ships with a fake.**
+  FakePlatform, FakeProvider, FakeGradingClient
+  and InMemoryRepository are not extras. They
+  are what lets four people work in parallel in
+  week two rather than week six, and what makes
+  TR-2 and TR-8 achievable with no Gradescope
+  account and no API bill.
+
+  Rule: adding an abstract method means adding
+  it to the fake in the same commit.
+end note
+
+note as N3 #FFF8DC
+  **ITestRunner exists so the system is not
+  Java-only.** The SRS names JUnit, but a
+  generic autograder for CS courses will meet
+  pytest and others. Same shape as
+  ILearningPlatform: one interface, one
+  implementation to start.
+end note
+
+@enduml

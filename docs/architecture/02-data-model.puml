@@ -3,23 +3,26 @@
 ' Automated Code Feedback -- Logical Data Model
 ' Traces to: FR-6, FR-12..FR-18, FR-25, FR-26, FR-28, FR-30, NFR-6
 '
-' This is the most important diagram in the set. Every module reads or
-' writes this schema, so it is the contract all four students share.
-' Logical model: types are indicative, not a DDL commitment (the DB
-' technology is out of scope per SRS section 10).
+' Changes from the previous revision:
+'   + assignment.grading_mode (IMMEDIATE | NIGHTLY)
+'   + grading_task: the (submission x target) pair that carries the
+'     "needs AI grading" mark the nightly rerun queries
+'   - delivery: gone. Feedback is written to results.json in the same
+'     autograder run that generates it, so there is no separate
+'     delivery step to track.
 ' =====================================================================
 
-title Automated Code Feedback -- Logical Data Model
+title Logical Data Model
 
 hide circle
-' NOTE: do not add "hide methods" here. PlantUML treats any member
-' containing parentheses as a method, which would hide constraint lines.
+' Do NOT add "hide methods" here. PlantUML treats any member containing
+' parentheses as a method, which would hide the constraint lines.
 skinparam shadowing false
 skinparam defaultFontName Helvetica
 skinparam linetype ortho
 
 ' ---------------------------------------------------------------------
-' Instructor configuration (written by Web App, read by everything)
+' Instructor configuration
 ' ---------------------------------------------------------------------
 entity "course" as course #DCEFD9 {
   * id : uuid <<PK>>
@@ -34,11 +37,19 @@ entity "assignment" as assignment #DCEFD9 {
   * course_id : uuid <<FK>>
   * platform : text <<GRADESCOPE>>
   * platform_assignment_id : text
+  * grading_mode : text <<IMMEDIATE|NIGHTLY>>
   name : text
   is_active : boolean
   created_at : timestamptz
   --
   unique: platform, platform_assignment_id
+  --
+  grading_mode is the instructor's
+  choice per assignment. It is read
+  by the autograder script to decide
+  whether to run AI grading inline,
+  and by the nightly trigger to
+  decide which assignments to rerun.
 }
 
 entity "grading_target" as target #DCEFD9 {
@@ -47,10 +58,16 @@ entity "grading_target" as target #DCEFD9 {
   * assignment_id : uuid <<FK>>
   * identifier : text
   * kind : text <<METHOD|CLASS|FILE>>
+  * needs_ai_grading : boolean
   max_score : numeric
   display_order : integer
   --
-  FR-2, FR-3
+  FR-2, FR-3.
+  needs_ai_grading is the instructor's
+  static choice: does this target get
+  AI feedback at all. Distinct from
+  grading_task.ai_status, which is the
+  per-submission runtime mark.
 }
 
 entity "target_file_pattern" as tfile #DCEFD9 {
@@ -59,8 +76,7 @@ entity "target_file_pattern" as tfile #DCEFD9 {
   * grading_target_id : uuid <<FK>>
   * path_glob : text
   --
-  FR-7: which student files
-  are relevant to this target
+  FR-7
 }
 
 entity "rubric" as rubric #DCEFD9 {
@@ -74,9 +90,8 @@ entity "rubric" as rubric #DCEFD9 {
   created_at : timestamptz
   --
   FR-4, FR-5, FR-13.
-  Versioned so old feedback
-  stays explainable after a
-  rubric is edited.
+  Versioned so feedback stays
+  explainable after a rubric edit.
 }
 
 entity "llm_provider_config" as pcfg #DCEFD9 {
@@ -88,12 +103,12 @@ entity "llm_provider_config" as pcfg #DCEFD9 {
   is_primary : boolean
   --
   FR-23, NFR-11.
-  Secrets live in the secret
-  store, never in this table.
+  Secrets live in the secret store,
+  never in this table.
 }
 
 ' ---------------------------------------------------------------------
-' Submission state (written by Platform Integration)
+' Runtime: written by the autograder script
 ' ---------------------------------------------------------------------
 entity "submission" as sub #FBE6D4 {
   * id : uuid <<PK>>
@@ -102,17 +117,17 @@ entity "submission" as sub #FBE6D4 {
   * platform_submission_id : text
   student_identifier : text
   submitted_at : timestamptz
-  * state : text <<see state diagram>>
-  attempt_count : integer
-  last_error : text
-  updated_at : timestamptz
+  is_active_attempt : boolean
+  first_seen_at : timestamptz
+  last_autograder_run_at : timestamptz
   --
   unique: assignment_id,
           platform_submission_id
   --
-  FR-18, FR-29, FR-30, NFR-6.
-  The unique key IS the
-  idempotency guarantee.
+  FR-18, FR-29, FR-30.
+  The unique key IS the idempotency
+  guarantee. The autograder script
+  upserts on it every run.
 }
 
 entity "submission_file" as subfile #FBE6D4 {
@@ -139,14 +154,39 @@ entity "test_outcome" as outcome #FBE6D4 {
   FR-14, FR-33
 }
 
-' ---------------------------------------------------------------------
-' Generated feedback (written by LLM Feedback Module)
-' ---------------------------------------------------------------------
-entity "feedback" as fb #D6E4F0 {
+entity "grading_task" as task #FBE6D4 {
   * id : uuid <<PK>>
   --
   * submission_id : uuid <<FK>>
   * grading_target_id : uuid <<FK>>
+  * ai_status : text <<see 06 state diagram>>
+  attempt_count : integer
+  claimed_at : timestamptz
+  completed_at : timestamptz
+  last_error : text
+  --
+  unique: submission_id,
+          grading_target_id
+  --
+  **The work queue.** One row per
+  submission-and-target pair. The
+  autograder marks rows PENDING in
+  nightly mode, and the nightly rerun
+  queries for PENDING rows only.
+  --
+  This unique key is what stops a
+  bulk "Rerun Autograder" from
+  re-billing already-completed
+  targets. See the note below.
+}
+
+' ---------------------------------------------------------------------
+' Generated feedback
+' ---------------------------------------------------------------------
+entity "feedback" as fb #D6E4F0 {
+  * id : uuid <<PK>>
+  --
+  * grading_task_id : uuid <<FK>>
   * rubric_id : uuid <<FK>>
   * provider : text
   * model_name : text
@@ -160,18 +200,16 @@ entity "feedback" as fb #D6E4F0 {
   generated_at : timestamptz
   --
   FR-15, FR-16, FR-25, FR-26.
-  One row PER PROVIDER so
-  FR-27 comparison is a query,
-  not a re-run. is_selected
-  marks the row delivered to
-  the student.
+  One row PER PROVIDER so FR-27
+  comparison is a query, not a re-run.
+  is_selected marks the row written
+  into results.json.
 }
 
 entity "feedback_comparison" as cmp #D6E4F0 {
   * id : uuid <<PK>>
   --
-  * submission_id : uuid <<FK>>
-  * grading_target_id : uuid <<FK>>
+  * grading_task_id : uuid <<FK>>
   agreement_score : numeric
   score_spread : numeric
   selection_reason : text
@@ -189,41 +227,27 @@ entity "feedback_review" as review #DCEFD9 {
   instructor_comment : text
   reviewed_at : timestamptz
   --
-  FR-11: lets the instructor
-  judge feedback quality, and
-  gives you data to improve
-  prompts later.
+  FR-11
 }
 
 ' ---------------------------------------------------------------------
-' Delivery + audit (written by Orchestrator / Platform Integration)
+' Audit
 ' ---------------------------------------------------------------------
-entity "delivery" as deliver #FBE6D4 {
-  * id : uuid <<PK>>
-  --
-  * submission_id : uuid <<FK>>
-  * status : text <<PENDING|SENT|FAILED>>
-  payload_sha256 : char_64
-  requested_at : timestamptz
-  delivered_at : timestamptz
-  error_detail : text
-  --
-  FR-34, FR-35, FR-36
-}
-
-entity "workflow_run" as run #EDE0F0 {
+entity "trigger_run" as run #EDE0F0 {
   * id : uuid <<PK>>
   --
   * trigger : text <<SCHEDULE|MANUAL>>
   started_at : timestamptz
   finished_at : timestamptz
   status : text
-  submissions_seen : integer
-  submissions_processed : integer
+  assignments_rerun : integer
+  tasks_pending_at_start : integer
   log_uri : text
   --
-  CI-3. Makes a failed night
-  diagnosable after the fact.
+  CI-3. Records what the nightly job
+  clicked, not what it graded. The
+  grading itself is logged per
+  grading_task.
 }
 
 ' ---------------------------------------------------------------------
@@ -235,50 +259,54 @@ assignment ||--o{ sub
 target ||--o{ tfile
 target ||--o{ rubric
 target ||--o{ outcome
-target ||--o{ fb
-target ||--o{ cmp
+target ||--o{ task
 sub ||--o{ subfile
 sub ||--o{ outcome
-sub ||--o{ fb
-sub ||--o{ cmp
-sub ||--o| deliver
+sub ||--o{ task
+task ||--o{ fb
+task ||--o| cmp
 rubric ||--o{ fb
 fb ||--o{ review
 
 note as N1 #FFF8DC
-  **Open decision: "deduction" (FR-10)**
-  SRS section 10 leaves this undefined. Do not
-  add a boolean column for it. Derive it as a
-  view, so changing the definition is one
-  migration and not a backfill:
+  **Why grading_task exists**
+  Gradescope's "Rerun Autograder" is a bulk
+  action over the whole assignment, so a nightly
+  rerun re-executes the container for every
+  submission, including ones already graded.
 
-  has_deduction :=
-    EXISTS(test_outcome WHERE status IN ('FAIL','ERROR'))
-    OR feedback.suggested_score < grading_target.max_score
-
-  Ratify the definition in the team meeting and
-  record it here before Student B writes the view.
+  Without a per-target completion mark, every
+  night would re-bill every submission in the
+  course. The autograder script must therefore
+  query for ai_status = 'PENDING' and skip
+  everything else, and it must claim a row
+  before working on it.
 end note
 
 note as N2 #FFF8DC
-  **Open decision: confidence (FR-28)**
-  Also undefined in SRS section 10. The column
-  exists, its semantics do not yet. Candidates:
-  self-reported score from the model, agreement
-  across providers, or score variance on repeat
-  sampling. Student A should pick one, write it
-  down, and keep the units stable, because the
-  web app will render it.
+  **Open decisions still outstanding**
+  OQ-1  "deduction" (FR-10) is undefined. Derive
+        it as a view, not a column:
+        EXISTS failing test_outcome
+        OR feedback.suggested_score < max_score
+  OQ-2  confidence (FR-28) has a column but no
+        agreed semantics.
+  OQ-4  resubmissions. As drawn, every attempt
+        gets its own submission row and its own
+        grading_task rows, so all attempts are
+        graded. is_active_attempt exists to
+        support a latest-only policy if chosen.
 end note
 
 note as N3 #FFF8DC
   **Student code and FERPA**
   submission_file holds student source code and
-  student identifiers. Privacy and retention are
-  listed as out of scope in the SRS, which is
-  fine for a design doc but not for a deployment.
-  Raise with Pitt before this holds real student
-  work from a live course.
+  identifiers, and in immediate mode that code
+  is sent to a third-party LLM within seconds of
+  submission. Privacy, retention and consent are
+  out of scope in the SRS, which is fine for a
+  design doc and not for a live course. Raise
+  with Pitt before real submissions land here.
 end note
 
 @enduml

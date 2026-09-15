@@ -1,0 +1,121 @@
+@startuml 05-sequence-instructor
+' =====================================================================
+' Instructor configuration and review
+' Traces to: FR-1..FR-11, NFR-9, NFR-10, DR-1..DR-3
+' =====================================================================
+
+title Instructor Configuration and Review
+
+skinparam shadowing false
+skinparam defaultFontName Helvetica
+skinparam sequenceMessageAlign left
+skinparam maxMessageSize 200
+
+actor Instructor as instr
+participant "Web\nFrontend" as fe #DCEFD9
+participant "Web Backend\n/ REST API" as be #DCEFD9
+participant "Repository\nLayer" as repo #DCEFD9
+database "Grading DB" as db #DCEFD9
+
+== Configure an assignment and pick a mode [FR-1, FR-6] ==
+
+instr -> fe : create assignment,\nchoose IMMEDIATE or NIGHTLY
+fe -> be : POST /assignments\n{platform_assignment_id, name,\ngrading_mode}
+be -> repo : create_assignment()
+repo -> db : INSERT assignment
+be --> fe : 201 {assignment_id}
+
+note right of instr #FFF8DC
+  Mode is per assignment and changeable later.
+  It lives in the database, so switching modes
+  does not require re-uploading the autograder
+  zip to Gradescope.
+
+  Rough guidance for the instructor guide:
+  IMMEDIATE suits small classes and formative
+  work where fast feedback is the point.
+  NIGHTLY suits large classes, deadline spikes,
+  and multi-provider comparison.
+end note
+
+== Define grading targets [FR-2, FR-3, FR-7] ==
+
+loop for each method or class to grade
+  instr -> fe : add target\n(identifier, kind, max_score,\nneeds_ai_grading)
+  fe -> be : POST /assignments/{id}/targets
+  be -> repo : create_target()
+  repo -> db : INSERT grading_target
+
+  instr -> fe : designate relevant files (globs)
+  fe -> be : POST /targets/{id}/file-patterns
+  be -> repo : set_file_patterns()
+  repo -> db : INSERT target_file_pattern
+end
+
+== Attach rubric and feedback guidance [FR-4, FR-5, FR-13] ==
+
+instr -> fe : write criteria +\nfeedback guidance
+fe -> be : PUT /targets/{id}/rubric
+be -> repo : upsert_rubric()
+repo -> db : INSERT rubric\n(version = n+1, is_current = true)
+repo -> db : UPDATE prior rubric\nSET is_current = false
+
+note right of repo #FFF8DC
+  Rubrics are versioned, not overwritten.
+  feedback rows reference rubric_id, so feedback
+  generated last week stays explainable after an
+  edit this week.
+end note
+
+== Review results [FR-8, FR-9, FR-10, NFR-10] ==
+
+instr -> fe : open results dashboard
+fe -> be : GET /assignments/{id}/results\n?filter=has_deduction
+be -> repo : list_results()
+repo -> db : SELECT joining submission,\ntest_outcome, grading_task, feedback
+db --> repo : rows
+be --> fe : 200 {results}
+fe --> instr : submissions needing attention
+
+instr -> fe : drill into one submission
+fe -> be : GET /submissions/{id}
+be -> repo : get_submission_detail()
+repo -> db : SELECT outcomes, all feedback rows\n(every provider), comparison,\ngrading_task.ai_status
+db --> repo : detail
+be --> fe : 200 {detail}
+fe --> instr : side-by-side provider feedback,\nconfidence, and AI status\n[FR-27, NFR-12]
+
+note right of fe #FFF8DC
+  Surfacing grading_task.ai_status matters
+  operationally: in nightly mode the instructor
+  needs to see which targets are still PENDING
+  or stuck in FAILED, or a silent trigger
+  failure looks identical to "no feedback
+  needed."
+end note
+
+== Rate feedback quality [FR-11] ==
+
+instr -> fe : rate feedback (1-5 + comment)
+fe -> be : POST /feedback/{id}/review
+be -> repo : create_review()
+repo -> db : INSERT feedback_review
+
+note over instr, db #FFF8DC
+  **OQ-3, open:** can the instructor EDIT
+  generated feedback before the student sees it?
+
+  This is now mode-dependent, which makes it
+  harder than before. In nightly mode an
+  approval gate is possible between PENDING and
+  the rerun. In immediate mode there is no
+  window: feedback reaches the student in the
+  same autograder run that generates it.
+
+  If review-before-release is required, it is an
+  argument against offering immediate mode at
+  all. Decide before Student B builds the
+  dashboard.
+end note
+
+@enduml

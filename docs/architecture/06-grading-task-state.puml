@@ -1,0 +1,102 @@
+@startuml 06-grading-task-state
+' =====================================================================
+' grading_task.ai_status lifecycle
+' Traces to: FR-18, FR-29, FR-30, FR-42, NFR-6
+'
+' The unit with a lifecycle is the (submission x grading target) pair,
+' not the submission, because the autograder marks individual targets
+' as needing AI grading.
+'
+' Both modes share this machine. The only difference is WHO advances
+' PENDING -> IN_PROGRESS: the same autograder run in immediate mode,
+' a later triggered rerun in nightly mode.
+' =====================================================================
+
+title grading_task.ai_status
+
+skinparam shadowing false
+skinparam defaultFontName Helvetica
+
+[*] --> PENDING : autograder records test outcomes\nand creates a task for each target\nwith needs_ai_grading = true
+
+PENDING : Functional test outcomes exist.
+PENDING : AI grading not yet done.
+PENDING : **This is the work queue.**
+
+PENDING --> IN_PROGRESS : IMMEDIATE mode:\nsame autograder run\nclaims it at once
+PENDING --> IN_PROGRESS : NIGHTLY mode:\na triggered rerun\nclaims it later
+
+IN_PROGRESS : Claimed by one AI component.
+IN_PROGRESS : claimed_at is set.
+
+IN_PROGRESS --> COMPLETE : feedback rows written,\none marked is_selected
+IN_PROGRESS --> FAILED : LLM or API error\nafter retries
+IN_PROGRESS --> PENDING : claim timed out\n(container died mid-run)
+
+COMPLETE : Feedback is in the database and
+COMPLETE : has been written to results.json.
+COMPLETE : Subsequent reruns SKIP this task.
+
+COMPLETE --> [*]
+
+FAILED : attempt_count incremented.
+FAILED : last_error recorded.
+
+FAILED --> PENDING : next nightly run,\nattempt_count < 3
+FAILED --> ABANDONED : attempt_count >= 3
+
+ABANDONED : Surfaced on the instructor dashboard
+ABANDONED : for manual handling. Never retried
+ABANDONED : automatically.
+
+ABANDONED --> [*]
+
+' Instructor-driven re-grade, e.g. after a rubric fix
+COMPLETE --> PENDING : instructor requests\nre-grade of this target
+ABANDONED --> PENDING : instructor requests\nretry
+
+note right of PENDING #FFF8DC
+  **Claiming must be atomic.**
+  A bulk "Rerun Autograder" starts many
+  containers at once, and a retried night can
+  overlap a slow previous one. Claim by
+  transitioning, in one conditional UPDATE:
+
+  UPDATE grading_task
+     SET ai_status = 'IN_PROGRESS',
+         claimed_at = now()
+   WHERE id = :id
+     AND ai_status = 'PENDING'
+
+  Zero rows updated means someone else has it.
+  Skip. A read-then-write version will double
+  bill.
+end note
+
+note as N2 #FFF8DC
+  **Why COMPLETE must be sticky**
+  Gradescope's rerun is a bulk action over the
+  whole assignment, so every nightly trigger
+  re-executes the container for every submission
+  ever made, including ones graded weeks ago.
+
+  If COMPLETE tasks were re-queued, cost would
+  grow with the square of the term. The skip
+  branch in 04-sequence-nightly.puml is not an
+  optimisation, it is load-bearing.
+end note
+
+note as N3 #FFF8DC
+  **IN_PROGRESS needs a timeout, OQ-5**
+  If a container is killed between claim and
+  write, the task sits in IN_PROGRESS forever
+  and no later run will pick it up, because
+  claiming only matches PENDING.
+
+  Simplest fix: a task in IN_PROGRESS with
+  claimed_at older than the autograder timeout
+  is treated as PENDING. Whoever implements
+  claiming owns this.
+end note
+
+@enduml

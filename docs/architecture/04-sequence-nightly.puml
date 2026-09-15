@@ -1,0 +1,147 @@
+@startuml 04-sequence-nightly
+' =====================================================================
+' Nightly mode: functional tests on submission, AI grading on rerun.
+' Traces to: FR-29..FR-36, FR-41..FR-47, CI-3, CI-4
+'
+' The nightly job runner ONLY triggers reruns. It does not call an LLM
+' and does not write feedback. The same AI component as immediate mode
+' does the work, inside the container, during the rerun.
+' =====================================================================
+
+title Nightly Mode -- AI grading deferred to a triggered rerun
+
+skinparam shadowing false
+skinparam defaultFontName Helvetica
+skinparam sequenceMessageAlign left
+skinparam maxMessageSize 220
+
+actor Student as stud
+participant "Scheduled\nWorkflow (cron)" as cron #EDE0F0
+participant "Nightly Trigger\n(Playwright)" as trig #FBE6D4
+participant "Gradescope" as gs #E8E8E8
+box "Autograder Container" #F7F7F7
+  participant "Autograder\nEntrypoint" as ag #FBE6D4
+  participant "Test Runner" as junit #FBE6D4
+  participant "AI Grading\nComponent" as ai #D6E4F0
+end box
+participant "Web API" as api #DCEFD9
+database "Grading DB" as db #DCEFD9
+participant "LLM\nProviders" as llm #E8E8E8
+
+== Phase 1: on submission -- tests only, mark the work ==
+
+stud -> gs : submit code
+gs -> ag : run autograder
+ag -> api : GET /assignments/{platform_id}/config
+api --> ag : 200 {grading_mode: NIGHTLY, targets[]}
+ag -> junit : run tests
+junit --> ag : TestOutcome[]
+ag -> api : POST /submissions\n{outcomes[], source_files[]}
+api -> db : upsert submission,\ninsert test_outcome rows
+api -> db : insert grading_task rows\nai_status = PENDING
+api --> ag : 200
+
+note over ag #FFF8DC
+  grading_mode is NIGHTLY, so the AI component
+  is NOT invoked. The PENDING grading_task rows
+  are the marks the nightly rerun will look for.
+end note
+
+ag -> ag : package results.json\n(test results only)
+ag -> gs : write results.json
+gs --> stud : test results now,\nfeedback tomorrow
+
+== Phase 2: nightly -- trigger reruns ==
+
+cron -> trig : invoke
+trig -> api : GET /assignments?mode=NIGHTLY\n&has_pending_tasks=true
+api -> db : SELECT assignment JOIN grading_task\nWHERE ai_status = 'PENDING'
+db --> api : assignment list
+api --> trig : 200 {assignments[]}
+trig -> api : POST /trigger-runs (start)
+
+loop for each assignment with pending tasks
+  trig -> gs : log in, open Manage Submissions
+  trig -> gs : click "Rerun Autograder"
+  note right of trig #FFF8DC
+    This is the only fragile step in the whole
+    design. Gradescope has no public API, so it
+    is UI automation and WILL break when they
+    reskin. Keep every selector in one file.
+
+    It is also a BULK action over the entire
+    assignment, which is why phase 3 must skip
+    already-completed tasks.
+  end note
+end
+
+trig -> api : POST /trigger-runs/{id}/finish
+api -> db : update trigger_run
+
+== Phase 3: the rerun -- AI grading for marked targets only ==
+
+gs -> ag : re-run container\n(for EVERY submission in the assignment)
+ag -> api : GET /assignments/{platform_id}/config
+api --> ag : 200 {grading_mode: NIGHTLY, targets[]}
+ag -> junit : run tests again
+junit --> ag : TestOutcome[]
+ag -> api : POST /submissions (upsert, idempotent)
+
+ag -> api : GET /submissions/{id}/pending-tasks
+api -> db : SELECT grading_task\nWHERE ai_status = 'PENDING'
+db --> api : rows (may be empty)
+api --> ag : 200 {tasks[]}
+
+alt tasks pending
+  loop for each PENDING grading_task
+    ag -> ai : grade(task)
+    ai -> api : POST /tasks/{id}/claim
+    api -> db : UPDATE grading_task\nSET ai_status = IN_PROGRESS\nWHERE ai_status = 'PENDING'
+    api --> ai : 200 {claimed: true, request}
+    ai -> ai : build prompt
+    group Multi-provider fan-out [FR-23, FR-27]
+      par
+        ai -> llm : Claude: generate
+        llm --> ai : response
+      else
+        ai -> llm : ChatGPT: generate
+        llm --> ai : response
+      end
+      ai -> ai : compare, estimate confidence
+    end
+    ai -> api : POST /tasks/{id}/feedback
+    api -> db : insert feedback rows,\nUPDATE ai_status = COMPLETE
+    api --> ai : 201
+    ai --> ag : FeedbackItem
+  end
+else no tasks pending
+  note right of ag #FFF8DC
+    Already graded on a previous night. Skip the
+    AI component entirely and re-emit the stored
+    feedback. Without this branch, every nightly
+    bulk rerun re-bills every submission in the
+    course.
+  end note
+  ag -> api : GET /submissions/{id}/feedback
+  api --> ag : 200 {stored feedback}
+end
+
+ag -> ag : package results.json
+ag -> gs : write results.json\n(tests + AI feedback)
+gs --> stud : feedback now visible
+
+note over trig, db #FFF8DC
+  **OQ-5, still open: failure policy.**
+  Minimum rules to ratify before A and C write
+  two different retry mechanisms:
+  1. A failed task goes to FAILED and increments
+     attempt_count. The next night retries it
+     while attempt_count < 3.
+  2. LLM calls retry with backoff on 429 and 5xx
+     only, never on 400.
+  3. A claimed task that never completes must
+     time out back to PENDING, or a crashed
+     container strands it in IN_PROGRESS forever.
+end note
+
+@enduml

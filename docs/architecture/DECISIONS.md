@@ -1,118 +1,140 @@
 # Architecture decisions and open questions
 
-Two sections. The first records a choice that is already baked into the
-diagrams and should be ratified or overturned in the next team meeting.
-The second lists questions the diagrams cannot answer, each of which
-will otherwise be answered differently by two different students.
-
 ---
 
-## AD-1. How functional test outcomes and feedback move through Gradescope
+## AD-1. How functional test outcomes and AI feedback move through the LMS
 
-**Status:** proposed, needs team ratification.
+**Status: DECIDED** by the instructor, 2026. Supersedes the earlier
+two-pass proposal, and supersedes SRS section 3.4, which was ambiguous
+on this point and should be rewritten to match.
 
-The SRS supports more than one reading. FR-31 and FR-32 suggest the
-nightly job pulls submissions out of Gradescope and tests them in our
-own environment. The discussion notes instead describe a Gradescope
-autograder script that reads feedback from the database and packages it
-to JSON, which implies something quite different. These are not
-compatible, and the diagrams had to pick one.
+The instructor chooses a grading mode per assignment.
 
-### Option A: two-pass regrade (diagrammed in `03-sequence-nightly.puml`)
+**Immediate mode.** The AI grading component runs as part of the
+autograder script that the LMS executes on student submission. One
+pass: functional tests, AI feedback, `results.json`, done. No nightly
+job is involved.
 
-Our autograder client runs inside Gradescope's container on submit,
-executes the functional tests, and posts outcomes plus source files to
-our Web API. Overnight, the feedback module generates feedback into the
-database. The nightly job then browser-automates a regrade, the
-autograder client runs a second time, fetches the finished feedback, and
-writes it into `results.json`.
+**Nightly mode.** The autograder script on submission runs functional
+tests only, and marks in the database which grading targets need AI
+grading. Every night a job runner uses browser automation to log in and
+click "Rerun Autograder". During that rerun, the same autograder script
+queries the database for marked targets and runs the AI component only
+on those.
 
-- Works with how Gradescope actually delivers autograder output, so no
-  reverse-engineering of the manual comment UI.
-- The test harness runs where Gradescope already provides the language
-  runtime and the student's files, which is much less work than
-  reproducing that environment.
-- Nightly batching keeps LLM cost controllable and leaves room to call
-  several providers and compare them without a student waiting.
-- Costs a regrade trigger per submission through browser automation,
-  which is the most fragile part of the system.
-- Students see test results immediately and feedback the next day. Two
-  separate notifications for one submission may confuse them.
+### What this means structurally
 
-### Option B: pull and test in our environment
+The AI grading component lives **inside the autograder container in
+both modes**. Only the timing differs. Three consequences that shaped
+the diagrams:
 
-The nightly job scrapes submission files with Playwright, runs the
-functional tests on our own infrastructure, generates feedback, then
-pushes everything back.
+1. **The nightly job runner is thin.** It logs in, finds nightly-mode
+   assignments with pending work, and clicks a button. It does not call
+   an LLM and does not write feedback. Anything more belongs in the
+   autograder script.
 
-- No autograder client to write, and no network calls out of
-  Gradescope's container.
-- We must reproduce the full build and test environment for every
-  language an assignment uses, which is most of what Gradescope's
-  autograder already does for us.
-- Delivering feedback without the autograder means automating
-  Gradescope's per-question comment UI, which is considerably more
-  fragile than triggering a regrade.
+2. **There is no separate delivery step.** Feedback is written into
+   `results.json` in the same run that generates it, so the `delivery`
+   table and the delivery states from the earlier revision are gone.
 
-### Option C: single-pass synchronous
+3. **The marks are per-target, so the unit with a lifecycle is the
+   submission-and-target pair.** That is the new `grading_task` entity.
+   It is the work queue the nightly rerun queries.
 
-The autograder client runs the tests, posts outcomes, then calls our API
-synchronously to generate feedback, waits, and writes one `results.json`
-containing both.
+### The load-bearing detail
 
-- Simplest control flow by a wide margin. No regrade trigger, no
-  browser automation on the delivery path, one notification, feedback
-  arrives in minutes.
-- Directly contradicts FR-41 and CI-3, which specify a scheduled
-  workflow. Those requirements would need rewriting.
-- Puts LLM latency inside Gradescope's autograder timeout, and makes
-  multi-provider comparison expensive at submission peaks, which for a
-  course assignment means the hour before the deadline.
-- Loses the nightly batch window that makes cost and rate limits
-  manageable.
+Gradescope's "Rerun Autograder" is a **bulk action over the entire
+assignment**. A nightly trigger therefore re-executes the container for
+every submission ever made in that assignment, including ones graded
+weeks ago.
 
-### Recommendation
+So the autograder script must skip tasks already marked COMPLETE. This
+is not an optimisation. Without it, nightly cost grows with the square
+of the term, and by week ten a single night re-grades the whole course.
+See `06-grading-task-state.puml`.
 
-Go with Option A, because it matches what is written in the SRS and in
-the discussion notes, and because it puts the functional tests where the
-runtime already exists.
+### Trade-offs to communicate in the instructor guide
 
-Worth a deliberate look at Option C first, though. It is a much simpler
-system, and if the team decides feedback latency matters more than the
-scheduled-workflow requirement, changing the SRS now is far cheaper than
-discovering it in November. The deciding question is whether you want
-students to get feedback in minutes or the next morning, which is a
-pedagogical call, not a technical one.
+Immediate mode gives fast feedback but puts LLM latency inside the LMS
+autograder timeout, and submissions spike before a deadline. Multiple
+providers times multiple targets may not fit. Consider capping immediate
+mode to one provider.
+
+Nightly mode absorbs the spike, makes multi-provider comparison cheap,
+and leaves a window for instructor review before release. Students wait
+until morning and see two separate result postings for one submission.
 
 ---
 
 ## Open questions
 
-Each of these is listed as out of scope or not yet specified in SRS
-section 10. That is reasonable for a requirements document and not
-survivable for four people implementing in parallel. Assign an owner and
-a date to each.
+Each is out of scope or unspecified in the SRS. Fine for a requirements
+document, not survivable for four people implementing in parallel.
 
-| ID | Question | Blocks | Suggested owner |
+| ID | Question | Blocks | Owner |
 | --- | --- | --- | --- |
+| OQ-11 | Where do LLM API keys and DB credentials live, given the AI component runs on Gradescope's infrastructure? | A and C both; the service API surface | A + C |
 | OQ-1 | What exactly is a "deduction" (FR-10)? | B's dashboard query | Instructor |
-| OQ-2 | How is confidence defined and computed (FR-28)? | A's engine, B's UI rendering | A |
-| OQ-3 | Can an instructor edit generated feedback before delivery, or only rate it after? | state machine, B's dashboard, nightly job blocking on a human | Instructor |
-| OQ-4 | Are all submission attempts graded, or only the latest? | LLM cost, A's estimates, C's discovery logic | Instructor + A |
-| OQ-5 | What is the retry and failure policy? | A and C will otherwise write two different ones | D |
-| OQ-6 | Exact Gradescope autograder JSON schema | C's packager, D's integration tests | C |
-| OQ-7 | Gradescope authentication mechanism, and where the credential lives | C's adapter, deployment secrets | C |
-| OQ-8 | Web framework, database technology, cloud host | B cannot start without these | B |
-| OQ-9 | Instructor authentication and authorization | B's backend; currently the app has no access control at all | B |
-| OQ-10 | Student code retention, privacy, FERPA posture | deployment against a live course | Instructor |
+| OQ-2 | How is confidence defined and computed (FR-28)? | A's engine, B's UI | A |
+| OQ-3 | Can the instructor edit feedback before release? Now mode-dependent. | state machine, B's dashboard | Instructor |
+| OQ-4 | Are all submission attempts graded, or only the latest? | cost, C's task creation | Instructor + A |
+| OQ-5 | Retry policy, including the IN_PROGRESS claim timeout | A and C will otherwise write two | D |
+| OQ-6 | Exact Gradescope autograder JSON schema | C's packager, D's tests | C |
+| OQ-7 | Gradescope authentication, and where that credential lives | C's trigger job | C |
+| OQ-8 | Web framework, database, cloud host | B cannot start | B |
+| OQ-9 | Instructor authentication and authorization | B's backend | B |
+| OQ-10 | Student code retention, privacy, FERPA | deployment | Instructor |
 
-OQ-1 through OQ-4 need an instructor ruling rather than a student
-decision, so they are the ones to settle in the first meeting.
+### OQ-11 is the new one and it is the most urgent
 
-OQ-9 and OQ-10 deserve a flag. As specified, the system stores student
-source code and identifiers in a cloud-hosted database behind a web app
-with no stated authentication requirement. That is fine for a prototype
-with synthetic data. Before it holds real work from a real course, the
-access control story and the university's position on student data both
-need to exist. Pitt has people whose job this is, and asking early costs
-an email.
+The AI grading component executes inside the LMS autograder container,
+which is not your infrastructure. Two options:
+
+**(a) Credentials in the container.** It holds an LLM API key and talks
+to the database directly. Simplest code. But every adopting instructor
+must paste their own API key into Gradescope's autograder settings,
+where any TA with assignment access can read it, and a database
+credential would be sitting in a third party's container.
+
+**(b) Credentials on our side.** The container holds only a scoped
+per-assignment token and calls the service through `IGradingClient`.
+The service does the LLM work. Keys never leave our infrastructure.
+Costs a synchronous generate-feedback endpoint.
+
+**Recommend (b)**, and the diagrams show (b). For an OER this matters
+more than usual: an adopting instructor at another institution should be
+able to use this without handling provider keys, and the separation of
+`IGradingClient` from `IGradingRepository` in `07-interfaces.puml` is
+what makes the credential boundary visible in code rather than a
+deployment convention nobody remembers.
+
+Switching to (a) is local to the AI grading package, so this is
+reversible, but it needs deciding before A and C agree the API surface.
+
+### Two that deserve a flag
+
+**OQ-9.** The SRS specifies no instructor authentication at all. Fine
+for a prototype on synthetic data.
+
+**OQ-10.** In immediate mode, student source code is sent to a
+third-party LLM within seconds of submission. Retention, access and
+consent all need answers before this touches a live section. Pitt has
+people whose job this is.
+
+---
+
+## Changes to make in the SRS
+
+Student D should revise section 3.4, which predates AD-1 and describes
+a workflow that pulls submissions out of Gradescope and tests them
+elsewhere. Specifically:
+
+- FR-31 ("retrieve new submissions through the GradeScope integration")
+  no longer applies. Nothing pulls submissions; the autograder script
+  already has the student's files.
+- FR-34 to FR-36 collapse. There is no separate step that fetches
+  feedback and routes it back, because the run that generates feedback
+  writes it.
+- Add requirements for the mode selection itself, the per-target marks,
+  and the skip-if-complete rule, which are currently undocumented and
+  are load-bearing.

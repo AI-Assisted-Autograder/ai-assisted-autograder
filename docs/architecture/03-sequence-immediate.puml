@@ -1,0 +1,114 @@
+@startuml 03-sequence-immediate
+' =====================================================================
+' Immediate mode: AI grading runs inline, on student submission.
+' Traces to: FR-19..FR-28, FR-32..FR-36
+'
+' One pass. The student gets test results and AI feedback together.
+' No nightly job is involved at all.
+' =====================================================================
+
+title Immediate Mode -- AI grading inline on submission
+
+skinparam shadowing false
+skinparam defaultFontName Helvetica
+skinparam sequenceMessageAlign left
+skinparam maxMessageSize 220
+
+actor Student as stud
+participant "Gradescope" as gs #E8E8E8
+box "Autograder Container\n(Gradescope infrastructure)" #F7F7F7
+  participant "Autograder\nEntrypoint" as ag #FBE6D4
+  participant "Test Runner\n(JUnit)" as junit #FBE6D4
+  participant "AI Grading\nComponent" as ai #D6E4F0
+end box
+participant "Web API" as api #DCEFD9
+database "Grading DB" as db #DCEFD9
+participant "LLM\nProviders" as llm #E8E8E8
+
+stud -> gs : submit code
+gs -> ag : run autograder
+
+== Configuration and functional testing ==
+
+ag -> api : GET /assignments/{platform_id}/config
+api -> db : SELECT assignment, grading_target,\nrubric WHERE is_current
+db --> api : config
+api --> ag : 200 {grading_mode: IMMEDIATE,\ntargets[], rubrics[]}
+
+note right of ag #FFF8DC
+  grading_mode comes from the database, not
+  from the autograder zip. The instructor can
+  switch an assignment between modes in the web
+  app without re-uploading anything.
+end note
+
+ag -> junit : run tests for configured targets
+junit --> ag : TestOutcome[]
+
+ag -> api : POST /submissions\n{platform_submission_id, student_id,\n outcomes[], source_files[]}
+api -> db : upsert submission\n(idempotent on platform_submission_id)
+api -> db : insert test_outcome rows
+api -> db : insert grading_task rows\nai_status = PENDING\nfor targets with needs_ai_grading
+api --> ag : 200 {submission_id, tasks[]}
+
+== AI grading, inline ==
+
+note over ag #FFF8DC
+  grading_mode is IMMEDIATE, so the entrypoint
+  invokes the AI component now rather than
+  leaving the tasks for a nightly rerun.
+end note
+
+loop for each PENDING grading_task
+  ag -> ai : grade(task)
+  ai -> api : POST /tasks/{id}/claim
+  api -> db : UPDATE grading_task\nSET ai_status = IN_PROGRESS\nWHERE ai_status = 'PENDING'
+  api --> ai : 200 {claimed: true, request}
+
+  ai -> ai : build prompt\n(rubric + guidance +\noutcomes + code)
+
+  group Multi-provider fan-out [FR-23, FR-27]
+    par
+      ai -> llm : Claude: generate
+      llm --> ai : text, suggested_score
+    else
+      ai -> llm : ChatGPT: generate
+      llm --> ai : text, suggested_score
+    end
+    ai -> ai : compare, estimate confidence,\nselect one
+  end
+
+  ai -> api : POST /tasks/{id}/feedback\n{responses[], comparison, selected}
+  api -> db : insert feedback (one row per provider)
+  api -> db : insert feedback_comparison
+  api -> db : UPDATE grading_task\nSET ai_status = COMPLETE
+  api --> ai : 201
+  ai --> ag : FeedbackItem
+end
+
+== Deliver ==
+
+ag -> api : GET /submissions/{id}/feedback
+api -> db : SELECT feedback WHERE is_selected
+db --> api : rows
+api --> ag : 200 {items[], total_score}
+ag -> ag : package results.json [FR-35]
+ag -> gs : write results.json\n(tests + AI feedback)
+gs --> stud : test results and feedback
+
+note over ag, llm #FFF8DC
+  **Constraint specific to this mode.** All of
+  this happens inside Gradescope's autograder
+  timeout. Several targets times several
+  providers times LLM latency adds up, and
+  submissions arrive in a spike before the
+  deadline.
+
+  Before choosing immediate mode for a large
+  course, measure the worst case and consider
+  capping to a single provider here, using
+  multi-provider comparison only in nightly
+  mode.
+end note
+
+@enduml
