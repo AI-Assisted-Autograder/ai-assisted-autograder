@@ -45,11 +45,11 @@ end note
 ag -> junit : run tests for configured targets
 junit --> ag : TestOutcome[]
 
-ag -> api : POST /submissions\n{platform_submission_id, student_id,\n outcomes[], source_files[]}
+ag -> api : POST /submissions\n{platform_submission_id, submitted_at,\n outcomes[], source_files[]}
 api -> db : upsert submission\n(idempotent on platform_submission_id)
 api -> db : insert test_outcome rows
-api -> db : insert grading_task rows\nai_status = PENDING\nfor targets with needs_ai_grading
-api --> ag : 200 {submission_id, tasks[]}
+api -> db : insert grading_task rows.\nai_needed set per target from\nai_feedback_policy + test result\n(see 06)
+api --> ag : 200 {submission_id,\ntasks needing AI}
 
 == AI grading, inline ==
 
@@ -59,11 +59,11 @@ note over ag #FFF8DC
   leaving the tasks for a nightly rerun.
 end note
 
-loop for each PENDING grading_task
+loop for each task with ai_needed
   ag -> ai : grade(task)
-  ai -> api : POST /tasks/{id}/claim
-  api -> db : UPDATE grading_task\nSET ai_status = IN_PROGRESS\nWHERE ai_status = 'PENDING'
-  api --> ai : 200 {claimed: true, request}
+  ai -> api : GET /tasks/{id}/request
+  api -> db : SELECT rubric, guidance,\ntest_outcome, submission_file
+  api --> ai : 200 {FeedbackRequest}
 
   ai -> ai : build prompt\n(rubric + guidance +\noutcomes + code)
 
@@ -81,12 +81,22 @@ loop for each PENDING grading_task
   ai -> api : POST /tasks/{id}/feedback\n{responses[], comparison, selected}
   api -> db : insert feedback (one row per provider)
   api -> db : insert feedback_comparison
-  api -> db : UPDATE grading_task\nSET ai_status = COMPLETE
+  api -> db : UPDATE grading_task\nSET ai_status = DONE
   api --> ai : 201
   ai --> ag : FeedbackItem
 end
 
 == Deliver ==
+
+ag -> api : POST /submissions/{id}/ai-complete
+api -> db : UPDATE submission\nSET ai_graded_submitted_at = submitted_at\nWHERE NO task is still NEEDED
+api --> ag : 200
+
+note right of api #FFF8DC
+  Immediate mode sets the same guard. An
+  instructor or TA re-running the autograder
+  later must not re-bill the LLM.
+end note
 
 ag -> api : GET /submissions/{id}/feedback
 api -> db : SELECT feedback WHERE is_selected

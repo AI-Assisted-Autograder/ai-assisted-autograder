@@ -41,7 +41,7 @@ end note
 == Define grading targets [FR-2, FR-3, FR-7] ==
 
 loop for each method or class to grade
-  instr -> fe : add target\n(identifier, kind, max_score,\nneeds_ai_grading)
+  instr -> fe : add target\n(identifier, kind, max_score,\nai_feedback_policy)
   fe -> be : POST /assignments/{id}/targets
   be -> repo : create_target()
   repo -> db : INSERT grading_target
@@ -51,6 +51,21 @@ loop for each method or class to grade
   be -> repo : set_file_patterns()
   repo -> db : INSERT target_file_pattern
 end
+
+note right of instr #FFF8DC
+  ai_feedback_policy is the instructor's control
+  over token spend. ON_FAILURE is the default and
+  means correct code costs nothing. ALWAYS is for
+  style or design feedback no test can detect.
+  NEVER is for targets graded purely by tests.
+  AUTOGRADER delegates to the instructor's own
+  autograder logic.
+
+  This is the only lever. It is applied during
+  the submission autograder run, and there is no
+  post-hoc path to request feedback on a
+  submission that has already been AI-graded.
+end note
 
 == Attach rubric and feedback guidance [FR-4, FR-5, FR-13] ==
 
@@ -80,18 +95,17 @@ fe --> instr : submissions needing attention
 instr -> fe : drill into one submission
 fe -> be : GET /submissions/{id}
 be -> repo : get_submission_detail()
-repo -> db : SELECT outcomes, all feedback rows\n(every provider), comparison,\ngrading_task.ai_status
+repo -> db : SELECT outcomes, all feedback rows\n(every provider), comparison,\nai_needed, ai_needed_reason, ai_status
 db --> repo : detail
 be --> fe : 200 {detail}
 fe --> instr : side-by-side provider feedback,\nconfidence, and AI status\n[FR-27, NFR-12]
 
 note right of fe #FFF8DC
-  Surfacing grading_task.ai_status matters
-  operationally: in nightly mode the instructor
-  needs to see which targets are still PENDING
-  or stuck in FAILED, or a silent trigger
-  failure looks identical to "no feedback
-  needed."
+  Surfacing ai_needed_reason alongside ai_status
+  matters: it is how the instructor tells
+  "correct code, nothing to say" from "feedback
+  is late" from "this target gave up". Without
+  the reason, all three render as a blank cell.
 end note
 
 == Rate feedback quality [FR-11] ==

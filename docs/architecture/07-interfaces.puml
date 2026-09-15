@@ -3,11 +3,18 @@
 ' Key interfaces and extension points
 ' Traces to: FR-23, FR-24, FR-37..FR-40, NFR-3, NFR-4, NFR-11
 '
-' Changes from the previous revision:
-'   ILearningPlatform shrank a lot. We never pull submissions out of
-'   the platform any more, because the autograder script already has
-'   the student's files. It now only needs login plus "trigger a
-'   rerun", which is the whole job of the nightly runner.
+' Changes in this revision:
+'   Rerun is PER SUBMISSION, so ILearningPlatform needs to locate an
+'   individual submission before clicking its rerun button. It no
+'   longer pulls submission files at all: the autograder script
+'   already has them.
+'
+'   No claim step. Rerun is per submission, so one container works on
+'   a submission at a time and there is nothing to race against.
+'
+'   AiNeedMarker is new: it applies the instructor's per-target
+'   ai_feedback_policy to the functional test outcomes to decide which
+'   targets need AI feedback at all.
 '
 '   + IGradingClient: the boundary the autograder container talks to.
 '     It runs on Gradescope infrastructure, so this is the only surface
@@ -27,9 +34,8 @@ package "Platform Integration (Student C)" #FBE6D4 {
 
   interface ILearningPlatform <<abstract>> {
     +authenticate() : None
-    +list_assignments() : PlatformAssignment[]
-    +trigger_rerun(platform_assignment_id) : RerunResult
-    +rerun_is_bulk() : bool
+    +find_submission(platform_assignment_id,\n platform_submission_id) : SubmissionLocator
+    +trigger_rerun(locator) : RerunResult
   }
 
   class GradescopePlatform {
@@ -37,9 +43,8 @@ package "Platform Integration (Student C)" #FBE6D4 {
     -selectors : SelectorMap
     --
     +authenticate()
-    +list_assignments()
+    +find_submission(...)
     +trigger_rerun(...)
-    +rerun_is_bulk() -> True
   }
 
   class FakePlatform {
@@ -53,6 +58,8 @@ package "Platform Integration (Student C)" #FBE6D4 {
     +login_password : str
     +assignment_rows : str
     +manage_submissions_link : str
+    +submission_rows : str
+    +submission_id_attr : str
     +rerun_autograder_button : str
     +rerun_confirm_button : str
     --
@@ -67,14 +74,16 @@ package "Platform Integration (Student C)" #FBE6D4 {
     --
     +run() : TriggerRunSummary
     --
-    Thin on purpose. Finds nightly-mode
-    assignments with pending tasks and
-    clicks rerun. Never calls an LLM.
+    Thin on purpose. Asks the service
+    which submissions still have
+    PENDING tasks, then clicks rerun on
+    each. Never calls an LLM.
   }
 
   class AutograderEntrypoint {
     -client : IGradingClient
     -runner : ITestRunner
+    -marker : AiNeedMarker
     -grader : AIGradingComponent
     --
     +main() : int
@@ -84,6 +93,20 @@ package "Platform Integration (Student C)" #FBE6D4 {
     grading_mode whether to invoke
     the AI component now.
   }
+
+  class AiNeedMarker {
+    +mark(targets, outcomes) : AiMark[]
+    --
+    Applies each target's
+    ai_feedback_policy to its test
+    outcomes. The AUTOGRADER policy
+    delegates to instructor-supplied
+    logic. Pure function of its
+    inputs, so it is the easiest
+    thing in the system to test.
+  }
+
+  AutograderEntrypoint --> AiNeedMarker
 
   interface ITestRunner <<abstract>> {
     +run(targets, submission_dir) : TestOutcome[]
@@ -170,11 +193,13 @@ package "Service Boundary (Student B)" #DCEFD9 {
   interface IGradingClient <<abstract>> {
     +get_config(platform_assignment_id) : AssignmentConfig
     +post_submission(ref, outcomes, files) : SubmissionResult
+    +get_submission_state(platform_submission_id) : SubmissionState
     +get_pending_tasks(submission_id) : GradingTaskRef[]
-    +claim_task(task_id) : FeedbackRequest | None
+    +get_feedback_request(task_id) : FeedbackRequest
     +post_feedback(task_id, result) : None
+    +mark_ai_complete(submission_id) : bool
     +get_selected_feedback(submission_id) : FeedbackPackage
-    +list_assignments_with_pending(mode) : PlatformAssignment[]
+    +list_submissions_pending_ai(mode) : SubmissionLocator[]
   }
 
   class HttpGradingClient {
@@ -197,11 +222,12 @@ package "Service Boundary (Student B)" #DCEFD9 {
     +upsert_submission(ref) : str
     +record_outcomes(...) : None
     +create_pending_tasks(...) : GradingTaskRef[]
-    +claim_task(task_id) : bool
+    +create_tasks(submission_id, marks) : GradingTaskRef[]
     +build_feedback_request(task_id) : FeedbackRequest
     +save_feedback(task_id, result) : None
+    +mark_ai_complete_if_all_done(submission_id) : bool
     +get_selected_feedback(...) : FeedbackPackage
-    +expire_stale_claims(older_than) : int
+    +list_submissions_pending_ai(mode) : SubmissionLocator[]
   }
 
   class SqlGradingRepository
@@ -247,6 +273,16 @@ note as N2 #FFF8DC
 end note
 
 note as N3 #FFF8DC
+  **mark_ai_complete is conditional on purpose.**
+  It sets ai_graded_submitted_at only when no
+  task is still NEEDED, and returns whether it
+  did. Setting it unconditionally would strand
+  failed targets permanently ungraded, because
+  the guard short-circuits before the task query
+  ever runs.
+end note
+
+note as N4 #FFF8DC
   **ITestRunner exists so the system is not
   Java-only.** The SRS names JUnit, but a
   generic autograder for CS courses will meet

@@ -3,13 +3,13 @@
 ' Automated Code Feedback -- Logical Data Model
 ' Traces to: FR-6, FR-12..FR-18, FR-25, FR-26, FR-28, FR-30, NFR-6
 '
-' Changes from the previous revision:
-'   + assignment.grading_mode (IMMEDIATE | NIGHTLY)
-'   + grading_task: the (submission x target) pair that carries the
-'     "needs AI grading" mark the nightly rerun queries
-'   - delivery: gone. Feedback is written to results.json in the same
-'     autograder run that generates it, so there is no separate
-'     delivery step to track.
+' Changes in this revision:
+'   grading_target.ai_feedback_policy -- the instructor's static
+'     per-target default, set in the web app.
+'   grading_task.ai_needed + ai_needed_reason -- the per-submission
+'     marker. Set by the submission autograder from the functional test
+'     result, from the policy, or from instructor-controlled rules.
+'     Also settable by the instructor from the dashboard.
 ' =====================================================================
 
 title Logical Data Model
@@ -58,16 +58,30 @@ entity "grading_target" as target #DCEFD9 {
   * assignment_id : uuid <<FK>>
   * identifier : text
   * kind : text <<METHOD|CLASS|FILE>>
-  * needs_ai_grading : boolean
+  * ai_feedback_policy : text
   max_score : numeric
   display_order : integer
   --
   FR-2, FR-3.
-  needs_ai_grading is the instructor's
-  static choice: does this target get
-  AI feedback at all. Distinct from
-  grading_task.ai_status, which is the
-  per-submission runtime mark.
+  ai_feedback_policy is the
+  instructor's static default for this
+  target, chosen in the web app:
+    ON_FAILURE -- mark only when this
+      target's functional tests fail.
+      The usual case.
+    ALWAYS -- mark every submission,
+      including passing code, for
+      style or design feedback that no
+      test can detect.
+    NEVER -- never mark. For targets
+      graded purely by tests.
+    AUTOGRADER -- the instructor's own
+      autograder logic decides.
+  --
+  This is only the default. The
+  submission autograder writes the
+  actual per-submission marker onto
+  grading_task.ai_needed.
 }
 
 entity "target_file_pattern" as tfile #DCEFD9 {
@@ -116,7 +130,8 @@ entity "submission" as sub #FBE6D4 {
   * assignment_id : uuid <<FK>>
   * platform_submission_id : text
   student_identifier : text
-  submitted_at : timestamptz
+  * submitted_at : timestamptz
+  * ai_graded_submitted_at : timestamptz
   is_active_attempt : boolean
   first_seen_at : timestamptz
   last_autograder_run_at : timestamptz
@@ -124,10 +139,8 @@ entity "submission" as sub #FBE6D4 {
   unique: assignment_id,
           platform_submission_id
   --
-  FR-18, FR-29, FR-30.
-  The unique key IS the idempotency
-  guarantee. The autograder script
-  upserts on it every run.
+  FR-18, FR-29, FR-30, NFR-6.
+  See the guard note below.
 }
 
 entity "submission_file" as subfile #FBE6D4 {
@@ -159,25 +172,30 @@ entity "grading_task" as task #FBE6D4 {
   --
   * submission_id : uuid <<FK>>
   * grading_target_id : uuid <<FK>>
-  * ai_status : text <<see 06 state diagram>>
+  * ai_needed : boolean
+  * ai_status : text <<see 06>>
+  ai_needed_reason : text
   attempt_count : integer
-  claimed_at : timestamptz
   completed_at : timestamptz
   last_error : text
   --
   unique: submission_id,
           grading_target_id
   --
-  **The work queue.** One row per
-  submission-and-target pair. The
-  autograder marks rows PENDING in
-  nightly mode, and the nightly rerun
-  queries for PENDING rows only.
+  **ai_needed is the marker.** Written
+  by the submission autograder after
+  functional testing. See the note
+  below for who sets it and why.
   --
-  This unique key is what stops a
-  bulk "Rerun Autograder" from
-  re-billing already-completed
-  targets. See the note below.
+  ai_needed_reason records WHICH rule
+  fired:
+    TEST_FAILURE
+    POLICY_ALWAYS
+    AUTOGRADER_RULE
+  Worth storing. Without it nobody can
+  explain why a passing target got
+  feedback, or audit the marking rules
+  against real submissions.
 }
 
 ' ---------------------------------------------------------------------
@@ -240,13 +258,13 @@ entity "trigger_run" as run #EDE0F0 {
   started_at : timestamptz
   finished_at : timestamptz
   status : text
-  assignments_rerun : integer
-  tasks_pending_at_start : integer
+  submissions_rerun : integer
+  submissions_failed_to_trigger : integer
   log_uri : text
   --
-  CI-3. Records what the nightly job
-  clicked, not what it graded. The
-  grading itself is logged per
+  CI-3. Records which submissions the
+  job clicked rerun on, not what was
+  graded. Grading is logged per
   grading_task.
 }
 
@@ -269,18 +287,63 @@ rubric ||--o{ fb
 fb ||--o{ review
 
 note as N1 #FFF8DC
-  **Why grading_task exists**
-  Gradescope's "Rerun Autograder" is a bulk
-  action over the whole assignment, so a nightly
-  rerun re-executes the container for every
-  submission, including ones already graded.
+  **ai_graded_submitted_at: the token guard**
+  A rerun re-executes the container against the
+  same submitted files, so submitted_at does not
+  change on rerun. That makes it a reliable
+  marker of exactly which submission was graded.
 
-  Without a per-target completion mark, every
-  night would re-bill every submission in the
-  course. The autograder script must therefore
-  query for ai_status = 'PENDING' and skip
-  everything else, and it must claim a row
-  before working on it.
+  First thing the autograder does, before any
+  task query and before any LLM call:
+
+    if ai_graded_submitted_at IS NOT NULL
+       AND ai_graded_submitted_at = submitted_at:
+       skip AI grading, re-emit stored feedback
+
+  Set it only once every PENDING task for the
+  submission reaches COMPLETE. Setting it on
+  partial success would strand the failed
+  targets permanently ungraded.
+
+  A new student attempt gets a new
+  platform_submission_id and its own row, so it
+  is graded normally. The guard suppresses only
+  re-grading of an already-graded attempt.
+
+  Once set, it is never cleared. An AI-graded
+  submission is finished: the nightly trigger
+  stops selecting it, and the autograder skips
+  the AI component if invoked for any other
+  reason.
+end note
+
+note as N1b #FFF8DC
+  **Who sets grading_task.ai_needed**
+  The submission autograder writes it after
+  functional testing, applying the target's
+  ai_feedback_policy:
+
+  ON_FAILURE  failing test_outcome exists
+              -> true, reason TEST_FAILURE
+              otherwise false
+  ALWAYS      -> true, reason POLICY_ALWAYS
+  NEVER       -> false
+  AUTOGRADER  the instructor's own logic decides
+              -> reason AUTOGRADER_RULE
+
+  All of this happens during the submission
+  autograder run, which is the instructor's only
+  lever. There is no later "grade it after all"
+  path.
+
+  Why a stored column rather than a query over
+  test_outcome: the rule is not always
+  "any test failed". It may be a partial-credit
+  threshold, a target-specific condition in the
+  instructor's autograder, or a manual decision.
+  Storing the decision and its reason makes the
+  marking auditable, which matters because every
+  true costs tokens.
 end note
 
 note as N2 #FFF8DC
@@ -291,11 +354,12 @@ note as N2 #FFF8DC
         OR feedback.suggested_score < max_score
   OQ-2  confidence (FR-28) has a column but no
         agreed semantics.
-  OQ-4  resubmissions. As drawn, every attempt
-        gets its own submission row and its own
-        grading_task rows, so all attempts are
-        graded. is_active_attempt exists to
-        support a latest-only policy if chosen.
+  OQ-4  resubmissions. As drawn every attempt is
+        graded. is_active_attempt exists if a
+        latest-only policy is chosen.
+  OQ-11 where LLM keys and DB credentials live,
+        given the AI component runs inside the
+        platform's container.
 end note
 
 note as N3 #FFF8DC

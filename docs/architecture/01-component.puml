@@ -52,7 +52,7 @@ cloud "Gradescope (or other LMS)" as gs #E8E8E8 {
 
   [Submission UI] as gs_ui #E8E8E8
   [Feedback / Results View] as gs_fb #E8E8E8
-  [Manage Submissions\n(Rerun Autograder)] as gs_rerun #E8E8E8
+  [Submission view\n(Rerun Autograder)] as gs_rerun #E8E8E8
 
   package "Autograder Container" as agbox #E8E8E8 {
     [Autograder Entrypoint] as ag #FBE6D4
@@ -102,7 +102,7 @@ repo --> db : SQL
 
 stud --> gs_ui : submits code
 ag --> junit : run functional tests
-ag --> aigrade : invoke ONLY in immediate mode,\nor on nightly rerun for\nmarked targets
+ag --> aigrade : invoke in immediate mode, or on\nrerun when the submission is\nnot already AI-graded
 ag --> packager
 packager --> gs_fb : results.json
 gs_fb --> stud : feedback
@@ -114,7 +114,7 @@ p_openai <-- aigrade
 p_gemini <-- aigrade
 
 cron --> trigger : nightly
-trigger --> gs_rerun : login, click\n"Rerun Autograder"\nfor nightly-mode assignments
+trigger --> gs_rerun : login, click\n"Rerun Autograder"\nper submission needing AI
 gs_rerun --> agbox : re-runs the container
 
 ci --> tests
@@ -144,10 +144,11 @@ note bottom of agbox #FFF8DC
 end note
 
 note right of trigger #FFF8DC
-  Deliberately thin: log in, find assignments in
-  nightly mode, click Rerun Autograder. It does
-  NOT call an LLM and does NOT write feedback.
-  Everything else happens inside the container.
+  Deliberately thin: log in, then click Rerun
+  Autograder once per submission that still has
+  PENDING tasks. It does NOT call an LLM and
+  does NOT write feedback. Everything else
+  happens inside the container.
 end note
 
 note right of repo
