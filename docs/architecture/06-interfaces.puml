@@ -1,0 +1,253 @@
+@startuml 06-interfaces
+' =====================================================================
+' Automated Code Feedback -- Key Interfaces and Extension Points
+' Traces to: FR-23, FR-24, FR-37..FR-40, NFR-3, NFR-4, NFR-11
+'
+' These four interfaces are the seams between students. Agree the
+' signatures first; each student can then build and unit-test against
+' fakes without waiting on anyone else.
+' =====================================================================
+
+title Key Interfaces and Extension Points
+
+skinparam shadowing false
+skinparam defaultFontName Helvetica
+skinparam classAttributeIconSize 0
+
+' ---------------------------------------------------------------------
+' Learning platform abstraction -- Student C
+' ---------------------------------------------------------------------
+package "Platform Integration (Student C)" #FBE6D4 {
+
+  interface ILearningPlatform <<abstract>> {
+    +authenticate() : None
+    +list_submissions(assignment_ref, since) : SubmissionRef[]
+    +fetch_submission(ref) : SubmissionBundle
+    +trigger_regrade(ref) : None
+    +supports_direct_feedback() : bool
+  }
+
+  class GradescopePlatform {
+    -page : playwright.Page
+    -selectors : SelectorMap
+    --
+    +authenticate()
+    +list_submissions(...)
+    +fetch_submission(...)
+    +trigger_regrade(...)
+  }
+
+  class FakePlatform {
+    -fixtures : dict
+    --
+    For unit tests. Lets A, B and D
+    run the whole workflow with no
+    network and no Gradescope account.
+  }
+
+  class SelectorMap {
+    +login_email : str
+    +login_password : str
+    +submission_rows : str
+    +regrade_button : str
+    --
+    Every CSS selector in one place.
+    When Gradescope reskins, this
+    is the only file that changes.
+  }
+
+  class AutograderClient {
+    +run_tests() : TestOutcome[]
+    +post_outcomes(...) : SubmissionId
+    +fetch_feedback(id) : FeedbackPackage
+    +write_results_json(pkg) : None
+  }
+
+  ILearningPlatform <|.. GradescopePlatform
+  ILearningPlatform <|.. FakePlatform
+  GradescopePlatform --> SelectorMap
+}
+
+' ---------------------------------------------------------------------
+' LLM provider abstraction -- Student A
+' ---------------------------------------------------------------------
+package "Feedback Generation (Student A)" #D6E4F0 {
+
+  interface ILLMProvider <<abstract>> {
+    +name : str
+    +model : str
+    +generate_feedback(req : FeedbackRequest) : FeedbackResponse
+    +estimated_cost(req) : float
+  }
+
+  class ClaudeProvider
+  class OpenAIProvider
+  class GeminiProvider
+
+  class FakeProvider {
+    Deterministic canned responses
+    keyed by prompt hash. Required
+    so Student D's integration tests
+    do not spend money.
+  }
+
+  class FeedbackEngine {
+    -providers : ILLMProvider[]
+    -builder : PromptBuilder
+    -comparator : ResponseComparator
+    -estimator : ConfidenceEstimator
+    --
+    +generate(req) : FeedbackResult
+  }
+
+  class PromptBuilder {
+    +build(rubric, guidance,\n outcomes, files) : str
+    +version : str
+  }
+
+  class ResponseComparator {
+    +compare(responses) : Comparison
+    +select(responses) : FeedbackResponse
+  }
+
+  class ConfidenceEstimator {
+    +estimate(responses) : float
+  }
+
+  ILLMProvider <|.. ClaudeProvider
+  ILLMProvider <|.. OpenAIProvider
+  ILLMProvider <|.. GeminiProvider
+  ILLMProvider <|.. FakeProvider
+
+  FeedbackEngine o--> "1..*" ILLMProvider
+  FeedbackEngine --> PromptBuilder
+  FeedbackEngine --> ResponseComparator
+  FeedbackEngine --> ConfidenceEstimator
+}
+
+' ---------------------------------------------------------------------
+' Data access -- Student B
+' ---------------------------------------------------------------------
+package "Shared Data Layer (Student B)" #DCEFD9 {
+
+  interface IGradingRepository <<abstract>> {
+    +get_active_assignments() : Assignment[]
+    +get_targets(assignment_id) : GradingTarget[]
+    +get_current_rubric(target_id) : Rubric
+    +upsert_submission(ref) : SubmissionId
+    +claim_for_generation(id) : bool
+    +record_outcomes(id, outcomes) : None
+    +save_feedback(rows) : None
+    +get_selected_feedback(id) : FeedbackPackage
+    +set_state(id, state) : None
+    +list_pending(state) : Submission[]
+  }
+
+  class SqlGradingRepository
+  class InMemoryRepository {
+    For tests. Same interface,
+    dict-backed.
+  }
+
+  IGradingRepository <|.. SqlGradingRepository
+  IGradingRepository <|.. InMemoryRepository
+}
+
+' ---------------------------------------------------------------------
+' Orchestration -- shared, invoked by Student D's workflow
+' ---------------------------------------------------------------------
+package "Orchestration" #EDE0F0 {
+  class NightlyOrchestrator {
+    -repo : IGradingRepository
+    -platform : ILearningPlatform
+    -engine : FeedbackEngine
+    --
+    +run() : WorkflowRunSummary
+    -discover()
+    -generate()
+    -deliver()
+  }
+}
+
+' ---------------------------------------------------------------------
+' Shared data transfer objects -- the wire format between students
+' ---------------------------------------------------------------------
+package "Shared DTOs" #F5F5F5 {
+  class FeedbackRequest {
+    +submission_id : uuid
+    +target_identifier : str
+    +target_kind : str
+    +max_score : float
+    +rubric_criteria : str
+    +feedback_guidance : str
+    +outcomes : TestOutcome[]
+    +files : SourceFile[]
+  }
+
+  class FeedbackResponse {
+    +provider : str
+    +model : str
+    +feedback_text : str
+    +suggested_score : float
+    +self_reported_confidence : float
+    +input_tokens : int
+    +output_tokens : int
+  }
+
+  class SubmissionRef {
+    +platform : str
+    +platform_assignment_id : str
+    +platform_submission_id : str
+    +student_identifier : str
+    +submitted_at : datetime
+  }
+
+  class TestOutcome {
+    +target_identifier : str
+    +test_name : str
+    +status : str
+    +earned_score : float
+    +raw_output : str
+  }
+
+  class FeedbackPackage {
+    +items : FeedbackItem[]
+    +total_score : float
+    --
+    +to_gradescope_json() : dict
+  }
+}
+
+NightlyOrchestrator ..> IGradingRepository
+NightlyOrchestrator ..> ILearningPlatform
+NightlyOrchestrator ..> FeedbackEngine
+FeedbackEngine ..> FeedbackRequest
+FeedbackEngine ..> FeedbackResponse
+AutograderClient ..> FeedbackPackage
+AutograderClient ..> TestOutcome
+GradescopePlatform ..> SubmissionRef
+
+note as N1 #FFF8DC
+  **Every interface ships with a fake.**
+  FakePlatform, FakeProvider and
+  InMemoryRepository are not optional extras.
+  They are what let four students work in
+  parallel in week two instead of week six,
+  and they are what makes TR-2 and TR-8
+  achievable without a Gradescope account
+  or an API bill.
+
+  Rule: if you add a method to an interface,
+  you add it to the fake in the same commit.
+end note
+
+note as N2 #FFF8DC
+  **FeedbackPackage.to_gradescope_json()
+  is the only Gradescope-shaped code allowed
+  outside Student C's package.** The exact
+  autograder JSON schema is out of scope in
+  the SRS, so pin it here once Student C has
+  confirmed it against a real submission.
+end note
+
+@enduml

@@ -1,0 +1,166 @@
+@startuml 01-component
+' =====================================================================
+' Automated Code Feedback -- Component Architecture
+' Traces to: NFR-3, NFR-4, NFR-11, FR-37, FR-38, FR-39
+'
+' Colour = owning student. The interfaces between coloured regions are
+' the contracts that must be agreed BEFORE implementation starts.
+' =====================================================================
+
+title Automated Code Feedback -- Component Architecture
+
+skinparam componentStyle rectangle
+skinparam shadowing false
+skinparam defaultFontName Helvetica
+skinparam ArrowColor #444444
+skinparam InterfaceBackgroundColor #FFFFFF
+
+legend top right
+  |= Colour |= Owner |= Stream |
+  |<#D6E4F0>| Student A | LLM feedback module |
+  |<#DCEFD9>| Student B | Web app, DB schema, repository layer |
+  |<#FBE6D4>| Student C | Platform integration, autograder client |
+  |<#EDE0F0>| Student D | Requirements, tests, CI/CD, docs |
+  |<#E8E8E8>| -- | External, not built by us |
+endlegend
+
+' ---------------------------------------------------------------------
+' External systems
+' ---------------------------------------------------------------------
+actor Instructor as instr
+actor Student as stud
+
+cloud "Gradescope" as gs #E8E8E8 {
+  [Submission UI] as gs_ui #E8E8E8
+  [Autograder Container] as gs_box #E8E8E8
+  [Feedback / Results View] as gs_fb #E8E8E8
+}
+
+cloud "LLM Providers" as llms #E8E8E8 {
+  [Anthropic API] as p_claude #E8E8E8
+  [OpenAI API] as p_openai #E8E8E8
+  [Google Gemini API] as p_gemini #E8E8E8
+}
+
+' ---------------------------------------------------------------------
+' Our deployed system
+' ---------------------------------------------------------------------
+package "Cloud-hosted Service (NFR-1)" {
+
+  package "Instructor Web Application" as webpkg #DCEFD9 {
+    [Web Frontend] as fe #DCEFD9
+    [Web Backend / REST API] as be #DCEFD9
+  }
+
+  package "Shared Data Layer" as datapkg #DCEFD9 {
+    [Repository Layer] as repo #DCEFD9
+    database "Grading Database" as db #DCEFD9
+  }
+
+  package "Feedback Generation" as fbpkg #D6E4F0 {
+    [Feedback Engine] as engine #D6E4F0
+    [Prompt Builder] as prompt #D6E4F0
+    [Response Comparator] as compare #D6E4F0
+    [Confidence Estimator] as conf #D6E4F0
+    [Claude Adapter] as a_claude #D6E4F0
+    [OpenAI Adapter] as a_openai #D6E4F0
+    [Gemini Adapter] as a_gemini #D6E4F0
+  }
+
+  package "Platform Integration" as intpkg #FBE6D4 {
+    [Gradescope Adapter\n(Playwright)] as gs_ad #FBE6D4
+    [Autograder Client\n(runs inside Gradescope)] as ag_client #FBE6D4
+    [results.json Packager] as packager #FBE6D4
+  }
+
+  [Nightly Orchestrator] as orch #EDE0F0
+}
+
+package "Repository / CI-CD" as cipkg #EDE0F0 {
+  [Test Suite\n(unit + integration)] as tests #EDE0F0
+  [CI Workflow\n(on commit)] as ci #EDE0F0
+  [Scheduled Workflow\n(nightly cron)] as cron #EDE0F0
+  [Instructor + Technical Docs] as docs #EDE0F0
+}
+
+' ---------------------------------------------------------------------
+' Published interfaces -- THE CONTRACTS
+' ---------------------------------------------------------------------
+interface "IGradingRepository" as IRepo
+interface "ILearningPlatform" as IPlat
+interface "ILLMProvider" as ILLM
+interface "IFeedbackEngine" as IEngine
+
+' Provider side of each interface
+repo -up- IRepo
+gs_ad -up- IPlat
+engine -up- IEngine
+a_claude -up- ILLM
+a_openai -up- ILLM
+a_gemini -up- ILLM
+
+' ---------------------------------------------------------------------
+' Wiring
+' ---------------------------------------------------------------------
+instr --> fe : configures assignments,\nreviews feedback quality
+fe --> be : HTTPS / JSON
+be ..> IRepo
+
+engine ..> IRepo
+orch ..> IRepo
+orch ..> IPlat
+orch ..> IEngine
+ag_client ..> IRepo : over Web API,\nnot direct DB
+
+repo --> db : SQL
+
+engine --> prompt
+engine --> compare
+engine --> conf
+engine ..> ILLM
+
+a_claude --> p_claude : HTTPS
+a_openai --> p_openai : HTTPS
+a_gemini --> p_gemini : HTTPS
+
+gs_ad --> gs_ui : browser automation\n(login, list, trigger regrade)
+ag_client --> packager
+packager --> gs_box : writes results.json
+gs_box --> gs_fb
+stud --> gs_ui : submits code
+gs_fb --> stud : receives feedback
+
+cron --> orch : invokes entrypoint
+ci --> tests
+tests ..> be
+tests ..> engine
+tests ..> gs_ad
+tests ..> orch
+
+note right of repo
+  **Single writer to the schema.**
+  Student B owns the schema and
+  migrations. A, C and D consume
+  the repository layer rather than
+  writing raw SQL, so a schema
+  change is one PR, not four.
+end note
+
+note bottom of ag_client
+  Runs inside the Gradescope
+  autograder container, not on
+  our host. Reaches our Web API
+  over the network. Must be a
+  thin client: no DB credentials
+  ever leave our infrastructure.
+end note
+
+note right of orch
+  Plain Python entrypoint
+  (python -m acf.orchestrate).
+  Student D's cron workflow only
+  invokes it. Keeps orchestration
+  testable without GitHub Actions.
+end note
+
+@enduml

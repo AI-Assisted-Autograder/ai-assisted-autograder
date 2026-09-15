@@ -1,0 +1,110 @@
+name: Render UML
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - 'docs/architecture/**.puml'
+      - '.github/workflows/render-uml.yml'
+  pull_request:
+    paths:
+      - 'docs/architecture/**.puml'
+      - '.github/workflows/render-uml.yml'
+  workflow_dispatch:
+
+# Pin the PlantUML version so a diagram does not silently change
+# appearance because upstream shipped a new layout engine.
+env:
+  PLANTUML_VERSION: '1.2025.4'
+
+jobs:
+  render:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+
+      - name: Install Graphviz
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends graphviz
+
+      - name: Set up Java
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '21'
+
+      - name: Cache PlantUML jar
+        id: cache-plantuml
+        uses: actions/cache@v4
+        with:
+          path: ~/.plantuml
+          key: plantuml-${{ env.PLANTUML_VERSION }}
+
+      - name: Download PlantUML
+        if: steps.cache-plantuml.outputs.cache-hit != 'true'
+        run: |
+          mkdir -p ~/.plantuml
+          curl -fsSL \
+            "https://github.com/plantuml/plantuml/releases/download/v${PLANTUML_VERSION}/plantuml-${PLANTUML_VERSION}.jar" \
+            -o ~/.plantuml/plantuml.jar
+
+      - name: Verify diagram syntax
+        run: |
+          java -jar ~/.plantuml/plantuml.jar -checkonly -failfast2 \
+            docs/architecture/*.puml
+
+      - name: Render SVG and PNG
+        run: |
+          mkdir -p docs/architecture/rendered
+          java -Djava.awt.headless=true -jar ~/.plantuml/plantuml.jar \
+            -tsvg -failfast2 \
+            -o "$(pwd)/docs/architecture/rendered" \
+            docs/architecture/*.puml
+          java -Djava.awt.headless=true -jar ~/.plantuml/plantuml.jar \
+            -tpng -failfast2 -DPLANTUML_LIMIT_SIZE=16384 \
+            -o "$(pwd)/docs/architecture/rendered" \
+            docs/architecture/*.puml
+          ls -la docs/architecture/rendered
+
+      - name: Upload rendered diagrams as artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: uml-diagrams
+          path: docs/architecture/rendered/
+          if-no-files-found: error
+
+      # On a pull request, do not commit. Just tell the author whether the
+      # checked-in images match the sources, so a stale diagram cannot be
+      # merged. This also avoids the permission failure that commit-to-PR
+      # hits on forks.
+      - name: Check rendered diagrams are up to date (PR only)
+        if: github.event_name == 'pull_request'
+        run: |
+          if ! git diff --quiet --exit-code -- docs/architecture/rendered; then
+            echo '::error::Rendered diagrams are out of date.'
+            echo 'Run the render script locally and commit docs/architecture/rendered,'
+            echo 'or merge to main and let the workflow commit them.'
+            git diff --stat -- docs/architecture/rendered
+            exit 1
+          fi
+          echo 'Rendered diagrams are up to date.'
+
+      # On a push to main, commit the refreshed images so the README and the
+      # docs site show current diagrams without anyone installing Graphviz.
+      - name: Commit rendered diagrams (main only)
+        if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+        run: |
+          git config user.name  'github-actions[bot]'
+          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+          git add docs/architecture/rendered
+          if git diff --cached --quiet; then
+            echo 'No diagram changes to commit.'
+            exit 0
+          fi
+          git commit -m 'docs: re-render UML diagrams [skip ci]'
+          git push

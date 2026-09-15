@@ -1,0 +1,284 @@
+@startuml 02-data-model
+' =====================================================================
+' Automated Code Feedback -- Logical Data Model
+' Traces to: FR-6, FR-12..FR-18, FR-25, FR-26, FR-28, FR-30, NFR-6
+'
+' This is the most important diagram in the set. Every module reads or
+' writes this schema, so it is the contract all four students share.
+' Logical model: types are indicative, not a DDL commitment (the DB
+' technology is out of scope per SRS section 10).
+' =====================================================================
+
+title Automated Code Feedback -- Logical Data Model
+
+hide circle
+' NOTE: do not add "hide methods" here. PlantUML treats any member
+' containing parentheses as a method, which would hide constraint lines.
+skinparam shadowing false
+skinparam defaultFontName Helvetica
+skinparam linetype ortho
+
+' ---------------------------------------------------------------------
+' Instructor configuration (written by Web App, read by everything)
+' ---------------------------------------------------------------------
+entity "course" as course #DCEFD9 {
+  * id : uuid <<PK>>
+  --
+  name : text
+  term : text
+}
+
+entity "assignment" as assignment #DCEFD9 {
+  * id : uuid <<PK>>
+  --
+  * course_id : uuid <<FK>>
+  * platform : text <<GRADESCOPE>>
+  * platform_assignment_id : text
+  name : text
+  is_active : boolean
+  created_at : timestamptz
+  --
+  unique: platform, platform_assignment_id
+}
+
+entity "grading_target" as target #DCEFD9 {
+  * id : uuid <<PK>>
+  --
+  * assignment_id : uuid <<FK>>
+  * identifier : text
+  * kind : text <<METHOD|CLASS|FILE>>
+  max_score : numeric
+  display_order : integer
+  --
+  FR-2, FR-3
+}
+
+entity "target_file_pattern" as tfile #DCEFD9 {
+  * id : uuid <<PK>>
+  --
+  * grading_target_id : uuid <<FK>>
+  * path_glob : text
+  --
+  FR-7: which student files
+  are relevant to this target
+}
+
+entity "rubric" as rubric #DCEFD9 {
+  * id : uuid <<PK>>
+  --
+  * grading_target_id : uuid <<FK>>
+  * version : integer
+  criteria_text : text
+  feedback_guidance : text
+  is_current : boolean
+  created_at : timestamptz
+  --
+  FR-4, FR-5, FR-13.
+  Versioned so old feedback
+  stays explainable after a
+  rubric is edited.
+}
+
+entity "llm_provider_config" as pcfg #DCEFD9 {
+  * id : uuid <<PK>>
+  --
+  * provider : text <<ANTHROPIC|OPENAI|GOOGLE>>
+  * model_name : text
+  is_enabled : boolean
+  is_primary : boolean
+  --
+  FR-23, NFR-11.
+  Secrets live in the secret
+  store, never in this table.
+}
+
+' ---------------------------------------------------------------------
+' Submission state (written by Platform Integration)
+' ---------------------------------------------------------------------
+entity "submission" as sub #FBE6D4 {
+  * id : uuid <<PK>>
+  --
+  * assignment_id : uuid <<FK>>
+  * platform_submission_id : text
+  student_identifier : text
+  submitted_at : timestamptz
+  * state : text <<see state diagram>>
+  attempt_count : integer
+  last_error : text
+  updated_at : timestamptz
+  --
+  unique: assignment_id,
+          platform_submission_id
+  --
+  FR-18, FR-29, FR-30, NFR-6.
+  The unique key IS the
+  idempotency guarantee.
+}
+
+entity "submission_file" as subfile #FBE6D4 {
+  * id : uuid <<PK>>
+  --
+  * submission_id : uuid <<FK>>
+  * path : text
+  content : text
+  sha256 : char_64
+  byte_size : integer
+}
+
+entity "test_outcome" as outcome #FBE6D4 {
+  * id : uuid <<PK>>
+  --
+  * submission_id : uuid <<FK>>
+  * grading_target_id : uuid <<FK>>
+  test_name : text
+  * status : text <<PASS|FAIL|ERROR|SKIP>>
+  earned_score : numeric
+  raw_output : text
+  recorded_at : timestamptz
+  --
+  FR-14, FR-33
+}
+
+' ---------------------------------------------------------------------
+' Generated feedback (written by LLM Feedback Module)
+' ---------------------------------------------------------------------
+entity "feedback" as fb #D6E4F0 {
+  * id : uuid <<PK>>
+  --
+  * submission_id : uuid <<FK>>
+  * grading_target_id : uuid <<FK>>
+  * rubric_id : uuid <<FK>>
+  * provider : text
+  * model_name : text
+  prompt_version : text
+  feedback_text : text
+  suggested_score : numeric
+  confidence : numeric
+  is_selected : boolean
+  input_tokens : integer
+  output_tokens : integer
+  generated_at : timestamptz
+  --
+  FR-15, FR-16, FR-25, FR-26.
+  One row PER PROVIDER so
+  FR-27 comparison is a query,
+  not a re-run. is_selected
+  marks the row delivered to
+  the student.
+}
+
+entity "feedback_comparison" as cmp #D6E4F0 {
+  * id : uuid <<PK>>
+  --
+  * submission_id : uuid <<FK>>
+  * grading_target_id : uuid <<FK>>
+  agreement_score : numeric
+  score_spread : numeric
+  selection_reason : text
+  compared_at : timestamptz
+  --
+  FR-27, FR-28, NFR-12
+}
+
+entity "feedback_review" as review #DCEFD9 {
+  * id : uuid <<PK>>
+  --
+  * feedback_id : uuid <<FK>>
+  reviewer : text
+  instructor_rating : integer
+  instructor_comment : text
+  reviewed_at : timestamptz
+  --
+  FR-11: lets the instructor
+  judge feedback quality, and
+  gives you data to improve
+  prompts later.
+}
+
+' ---------------------------------------------------------------------
+' Delivery + audit (written by Orchestrator / Platform Integration)
+' ---------------------------------------------------------------------
+entity "delivery" as deliver #FBE6D4 {
+  * id : uuid <<PK>>
+  --
+  * submission_id : uuid <<FK>>
+  * status : text <<PENDING|SENT|FAILED>>
+  payload_sha256 : char_64
+  requested_at : timestamptz
+  delivered_at : timestamptz
+  error_detail : text
+  --
+  FR-34, FR-35, FR-36
+}
+
+entity "workflow_run" as run #EDE0F0 {
+  * id : uuid <<PK>>
+  --
+  * trigger : text <<SCHEDULE|MANUAL>>
+  started_at : timestamptz
+  finished_at : timestamptz
+  status : text
+  submissions_seen : integer
+  submissions_processed : integer
+  log_uri : text
+  --
+  CI-3. Makes a failed night
+  diagnosable after the fact.
+}
+
+' ---------------------------------------------------------------------
+' Relationships
+' ---------------------------------------------------------------------
+course ||--o{ assignment
+assignment ||--o{ target
+assignment ||--o{ sub
+target ||--o{ tfile
+target ||--o{ rubric
+target ||--o{ outcome
+target ||--o{ fb
+target ||--o{ cmp
+sub ||--o{ subfile
+sub ||--o{ outcome
+sub ||--o{ fb
+sub ||--o{ cmp
+sub ||--o| deliver
+rubric ||--o{ fb
+fb ||--o{ review
+
+note as N1 #FFF8DC
+  **Open decision: "deduction" (FR-10)**
+  SRS section 10 leaves this undefined. Do not
+  add a boolean column for it. Derive it as a
+  view, so changing the definition is one
+  migration and not a backfill:
+
+  has_deduction :=
+    EXISTS(test_outcome WHERE status IN ('FAIL','ERROR'))
+    OR feedback.suggested_score < grading_target.max_score
+
+  Ratify the definition in the team meeting and
+  record it here before Student B writes the view.
+end note
+
+note as N2 #FFF8DC
+  **Open decision: confidence (FR-28)**
+  Also undefined in SRS section 10. The column
+  exists, its semantics do not yet. Candidates:
+  self-reported score from the model, agreement
+  across providers, or score variance on repeat
+  sampling. Student A should pick one, write it
+  down, and keep the units stable, because the
+  web app will render it.
+end note
+
+note as N3 #FFF8DC
+  **Student code and FERPA**
+  submission_file holds student source code and
+  student identifiers. Privacy and retention are
+  listed as out of scope in the SRS, which is
+  fine for a design doc but not for a deployment.
+  Raise with Pitt before this holds real student
+  work from a live course.
+end note
+
+@enduml
