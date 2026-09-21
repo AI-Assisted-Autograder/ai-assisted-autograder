@@ -296,9 +296,14 @@ student need do nothing.
 mode column on `assignment`; the web app can offer "apply to all
 targets" as a convenience, which needs UI but no schema.
 
-A single submission can therefore mix the two, and `results.json` gets
-written twice with different content. The student sees feedback arrive
-in two waves.
+A single submission can therefore mix the two. How many times
+`results.json` is written depends on whether **any** target is
+`NIGHTLY`, not on whether the submission is mixed:
+
+| Targets | `results.json` writes |
+| --- | --- |
+| All `IMMEDIATE` | Once, on the submission run. Guard is set; never enters the nightly queue. |
+| Any `NIGHTLY` | Twice: once on the submission run, once on the rerun. |
 
 This needs no extra machinery, which is the nice part. After the
 immediate pass the `NIGHTLY` tasks are still `NEEDED`, so
@@ -306,7 +311,21 @@ immediate pass the `NIGHTLY` tasks are still `NEEDED`, so
 submission up on its own. On the rerun, the `IMMEDIATE` tasks are
 already `DONE` and get skipped, so a mixed submission never pays twice.
 
-Two things to put in the instructor guide:
+**The real cost of mixed mode is partial feedback that reads as
+complete.** The first `results.json` carries commentary on the
+`IMMEDIATE` targets and silence on the `NIGHTLY` ones. A student's
+reasonable inference is that the silent targets were fine, which is
+exactly backwards if they failed and are queued for tonight.
+All-`NIGHTLY` does not have this problem, because zero feedback reads as
+"not graded yet".
+
+Mitigation, cheap and worth doing: the packager emits a placeholder
+entry for every task that is `NEEDED` but not `DONE`, saying feedback is
+being generated and will appear by the next morning. That is the
+difference between a student thinking they passed and a student knowing
+to check back.
+
+Two more things for the instructor guide:
 
 - Every `IMMEDIATE` target adds LLM latency inside the autograder
   timeout, and submissions arrive in a spike before the deadline. Marking
@@ -314,8 +333,7 @@ Two things to put in the instructor guide:
   sensible default.
 - An `IMMEDIATE` target whose grading fails stays `NEEDED` and is
   retried on the nightly run, so its feedback arrives the next morning
-  instead of at once. A reasonable degradation, but say so rather than
-  letting it surprise someone.
+  instead of at once.
 
 **AD-2 superseded an earlier revision of these diagrams.** They showed
 our entrypoint fetching the target list and invoking a test runner per

@@ -102,16 +102,35 @@ package "AI Phase entrypoint (Student C)" #FBE6D4 {
   }
 
   class ResultsPackager {
-    +to_platform_json(pkg) : dict
+    +to_platform_json(pkg, pending) : dict
     --
     The only code that knows the
     platform's results.json schema.
     --
-    Called twice for a mixed-mode
-    submission: once during the
-    submission run, once on the rerun,
-    with different content each time.
+    Called twice whenever any target is
+    NIGHTLY: once on the submission run,
+    once on the rerun.
+    --
+    `pending` is the tasks still NEEDED
+    but not DONE. Emit a placeholder
+    entry for each. See the note below.
   }
+
+  note bottom of ResultsPackager #FFF8DC
+    **Placeholders are not cosmetic.** On a
+    mixed-mode submission the first results.json
+    shows feedback for the IMMEDIATE targets and
+    nothing for the NIGHTLY ones, which a student
+    reads as "those were fine". If they failed
+    and are queued for tonight, that inference is
+    backwards.
+
+    A one-line placeholder per pending task,
+    saying feedback is being generated and will
+    appear by the next morning, is the difference
+    between a student thinking they passed and a
+    student knowing to check back.
+  end note
 
   AiPhaseEntrypoint --> ResultsPackager
 }

@@ -370,9 +370,15 @@ note as N2 #FFF8DC
   feedback_mode is per target, so one submission
   can have IMMEDIATE targets graded during the
   submission run and NIGHTLY targets left for a
-  rerun. results.json is then written twice with
-  different content, and the student sees
-  feedback arrive in two waves.
+  rerun.
+
+  How many times results.json is written depends
+  on whether ANY target is NIGHTLY, not on
+  whether the submission is mixed:
+    all IMMEDIATE -> written once, guard set,
+      never enters the nightly queue
+    any NIGHTLY -> written twice, once on the
+      submission run and once on the rerun
 
   This needs no extra machinery. After the
   immediate pass the NIGHTLY tasks are still
@@ -381,13 +387,28 @@ note as N2 #FFF8DC
   After the rerun nothing is NEEDED and the
   guard is set.
 
-  One consequence to accept: an IMMEDIATE target
-  whose grading failed is also still NEEDED, so
-  it is retried on the nightly run. Its feedback
-  arrives the next morning instead of at once.
-  That is a reasonable degradation, but say so
-  in the instructor guide rather than letting it
-  surprise someone.
+  **What is specific to mixed mode is partial
+  feedback that reads as complete.** The first
+  results.json carries commentary on the
+  IMMEDIATE targets and silence on the NIGHTLY
+  ones. A student's reasonable inference is that
+  the silent targets were fine, which is exactly
+  backwards if they failed and are queued.
+
+  All-NIGHTLY does not have this problem:
+  zero feedback reads as "not graded yet".
+
+  Mitigation, cheap and worth doing: the
+  packager emits a placeholder for every task
+  that is NEEDED but not DONE, saying feedback
+  is being generated and will appear by the next
+  morning. See the packager note in 07.
+
+  One more consequence to accept: an IMMEDIATE
+  target whose grading failed is also still
+  NEEDED, so it is retried on the nightly run
+  and its feedback arrives the next morning
+  instead of at once.
 end note
 
 note as N2b #FFF8DC

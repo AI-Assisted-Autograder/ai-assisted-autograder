@@ -130,6 +130,14 @@ note right of aip #FFF8DC
   NEEDED. That is what puts this submission in
   tonight's trigger queue, with no extra
   bookkeeping.
+
+  If every target was IMMEDIATE, the guard is
+  set below and this submission is done in one
+  write. If any was NIGHTLY, results.json is
+  written again after tonight's rerun, and the
+  packager must emit placeholders for the
+  pending targets so the student does not read
+  silence as success.
 end note
 
 aip -> api : POST /submissions/{id}/ai-complete
@@ -139,7 +147,9 @@ api --> aip : 200 {guard_set}
 aip -> api : GET /submissions/{id}/feedback
 api -> db : SELECT feedback WHERE is_selected
 api --> aip : 200 {items[], total_score}
-aip -> aip : package results.json [FR-35]
+aip -> aip : package results.json,
+with placeholders for any
+task still NEEDED [FR-35]
 aip --> script : results.json
 script -> gs : write results.json
 gs --> stud : test results, plus feedback\nfor IMMEDIATE targets
