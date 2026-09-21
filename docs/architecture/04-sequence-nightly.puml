@@ -63,10 +63,10 @@ note over aip #FFF8DC
   No extra bookkeeping.
 end note
 
-aip -> aip : package results.json\n(test results only)
+aip -> aip : package results.json\n(tests + "pending" placeholders)
 aip --> script : results.json
 script -> gs : write results.json
-gs --> stud : test results now,\nfeedback tomorrow
+gs --> stud : test results now,\n"pending" markers,\nfeedback tomorrow
 
 == Phase 2: nightly -- trigger a rerun per submission ==
 

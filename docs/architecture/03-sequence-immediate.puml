@@ -147,12 +147,10 @@ api --> aip : 200 {guard_set}
 aip -> api : GET /submissions/{id}/feedback
 api -> db : SELECT feedback WHERE is_selected
 api --> aip : 200 {items[], total_score}
-aip -> aip : package results.json,
-with placeholders for any
-task still NEEDED [FR-35]
+aip -> aip : package results.json,\nwith placeholders for any\ntask still NEEDED [FR-35]
 aip --> script : results.json
 script -> gs : write results.json
-gs --> stud : test results, plus feedback\nfor IMMEDIATE targets
+gs --> stud : test results, feedback for\nIMMEDIATE targets,\nand "pending" for NIGHTLY ones
 
 note over aip, llm #FFF8DC
   **Constraint specific to IMMEDIATE targets.**
