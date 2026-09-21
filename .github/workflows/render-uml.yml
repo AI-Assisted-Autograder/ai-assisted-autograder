@@ -69,10 +69,31 @@ jobs:
           done
           exit "$drift"
 
+      # Check one file at a time. Across a glob, PlantUML reports only
+      # "Some diagram description contains errors" and exits 200 without
+      # naming the file, which is useless in CI. Per-file, the output is
+      # attributable and lands as a GitHub annotation on the right file.
       - name: Verify diagram syntax
         run: |
-          java -jar ~/.plantuml/plantuml.jar -checkonly -failfast2 \
-            docs/architecture/*.puml
+          status=0
+          for f in docs/architecture/*.puml; do
+            if out=$(java -jar ~/.plantuml/plantuml.jar \
+                       -checkonly -failfast2 "$f" 2>&1); then
+              echo "ok      $f"
+            else
+              status=1
+              echo "FAILED  $f"
+              echo "$out" | sed 's/^/          /'
+              first=$(echo "$out" | grep -oE '\(line [0-9]+\)' | head -1 \
+                      | grep -oE '[0-9]+' || true)
+              if [ -n "$first" ]; then
+                echo "::error file=$f,line=$first::PlantUML syntax error"
+              else
+                echo "::error file=$f::PlantUML syntax error"
+              fi
+            fi
+          done
+          exit "$status"
 
       # Delete previously rendered images before regenerating. Without
       # this, a renamed or deleted .puml leaves an orphaned .svg/.png in

@@ -17,19 +17,21 @@ title grading_task -- ai_needed and ai_status
 skinparam shadowing false
 skinparam defaultFontName Helvetica
 
-[*] --> Marking : instructor's suite has exited;\nthe AI phase creates one task\nper REGISTERED target
+state "Resolving ai_needed\n(AI phase)" as Marking
 
-state "Resolving ai_needed\n(AI phase)" as Marking {
-  state "policy = NEVER or ALWAYS:\ndecided by config alone" as c_policy
-  state "policy = AUTOGRADER:\ndid the instructor's suite call\nrequest_ai_feedback(target)?" as c_auto
-}
+[*] --> Marking : the test suite has exited;\nthe AI phase creates one task\nper REGISTERED target
+
+Marking : Apply the target's ai_feedback_policy.
+Marking : NEVER or ALWAYS are decided by config alone.
+Marking : AUTOGRADER defers to the test suite: did it
+Marking : call request_ai_feedback for this target?
 
 Marking --> NOT_NEEDED : NEVER\n(reason POLICY_NEVER)
 Marking --> NOT_NEEDED : AUTOGRADER and the suite\nnever requested it\n(reason NOT_REQUESTED)
 Marking --> NEEDED : ALWAYS\n(reason POLICY_ALWAYS)
 Marking --> NEEDED : AUTOGRADER and the suite\nrequested it\n(reason AUTOGRADER_REQUEST)
 
-note right of NOT_NEEDED #FFF8DC
+note as N_NN #FFF8DC
   Marking is the instructor's only lever, and it
   happens here, during the submission autograder
   run. There is no post-hoc "grade this after
@@ -68,7 +70,7 @@ DONE --> [*]
 NOT_NEEDED --> [*]
 GAVE_UP --> [*]
 
-note right of Marking #FFF8DC
+note as N_MARK #FFF8DC
 Config and code, chosen per target. NEVER and
   ALWAYS are decided by the dropdown alone and
   need no programming. AUTOGRADER delegates the

@@ -22,7 +22,7 @@ participant "Nightly Trigger\n(Playwright)" as trig #FBE6D4
 participant "Gradescope" as gs #E8E8E8
 box "Autograder Container" #F7F7F7
   participant "Autograder Script\n(run_autograder)" as script #FFF2CC
-  participant "Instructor's\nTest Suite" as ti #FFF2CC
+  participant "Instructor\nTest Suite" as ti #FFF2CC
   participant "Reporting\nLibrary" as wrap #FBE6D4
   participant "AI Grading\nPhase" as aip #D6E4F0
 end box

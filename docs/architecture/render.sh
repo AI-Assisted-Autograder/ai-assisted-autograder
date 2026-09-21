@@ -45,8 +45,24 @@ fi
 
 echo 'Checking @startuml names match filenames...'
 check_names
+# One file at a time. Across a glob, PlantUML reports only "Some
+# diagram description contains errors" and exits 200 without naming the
+# file, which makes a syntax error tedious to locate.
 echo 'Checking syntax...'
-java -jar "${JAR}" -checkonly -failfast2 "${SRC_DIR}"/*.puml
+syntax_status=0
+for f in "${SRC_DIR}"/*.puml; do
+  if out="$(java -jar "${JAR}" -checkonly -failfast2 "${f}" 2>&1)"; then
+    printf 'ok      %s\n' "$(basename "${f}")"
+  else
+    syntax_status=1
+    printf 'FAILED  %s\n' "$(basename "${f}")"
+    printf '%s\n' "${out}" | sed 's/^/          /'
+  fi
+done
+if [[ "${syntax_status}" -ne 0 ]]; then
+  echo 'One or more diagrams failed to parse.' >&2
+  exit 1
+fi
 
 if [[ "${1:-}" == '--check' ]]; then
   echo 'OK'

@@ -64,7 +64,7 @@ cloud "Gradescope (or other LMS)" as gs #E8E8E8 {
   package "Autograder Container" as agbox #E8E8E8 {
 
     [Autograder Script\n(run_autograder)] as script #FFF2CC
-    [Instructor's Test Suite\n(JUnit / pytest / ...)] as tests_i #FFF2CC
+    [Instructor Test Suite\n(JUnit / pytest / ...)] as tests_i #FFF2CC
 
     [Reporting Library\nJava jar + Python pkg] as wrapper #FBE6D4
 
@@ -140,7 +140,7 @@ tests ..> aigrade
 tests ..> wrapper
 tests ..> trigger
 
-note bottom of tests_i #FFF8DC
+note as N_OWN #FFF8DC
   **The instructor owns the two yellow boxes.**
   It is an ordinary JUnit or pytest suite. We do
   not generate it, invoke it, or constrain how
@@ -158,7 +158,7 @@ note bottom of tests_i #FFF8DC
   run her suite and then invoke our AI phase.
 end note
 
-note right of wrapper #FFF8DC
+note as N_WRAP #FFF8DC
   Thin by design: two calls, an HTTPS client,
   and argument validation. One artifact per
   language the courses use.
@@ -170,7 +170,7 @@ note right of wrapper #FFF8DC
   worked and the feedback simply never appears.
 end note
 
-note right of aigrade #FFF8DC
+note as N_AIP #FFF8DC
   Invoked by the instructor's autograder script
   as a separate command after her suite exits,
   not from inside her test code.
@@ -181,14 +181,14 @@ note right of aigrade #FFF8DC
   NIGHTLY ones alone, and packages results.json.
 end note
 
-note right of trigger #FFF8DC
+note as N_TRIG #FFF8DC
   Log in, then click Rerun Autograder once per
   submission that still has tasks marked
   ai_needed. It does NOT call an LLM and does
   NOT write feedback.
 end note
 
-note bottom of llms #FFF8DC
+note as N_KEYS #FFF8DC
   **AD-5: the container holds the instructor's
   own LLM API key** and calls the providers
   directly. Our service never proxies an LLM
