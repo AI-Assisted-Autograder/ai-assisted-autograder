@@ -81,7 +81,7 @@ ti --> script : suite exits
 
 script -> aip : invoke AI phase
 aip -> api : POST /submissions/{id}/resolve-marks
-api -> db : for each REGISTERED target,\nresolve ai_needed:\nALWAYS -> true, NEVER -> false,\nAUTOGRADER -> was it requested
+api -> db : for each REGISTERED target,\nresolve ai_needed from feedback_mode:\nALWAYS -> true, NEVER -> false,\nAUTOGRADER -> was it requested
 api -> db : insert grading_task rows
 
 alt a registered target has no recorded outcome
@@ -94,7 +94,7 @@ alt a registered target has no recorded outcome
     Gradescope the student sees it too.
   end note
 else all registered targets reported
-  api --> aip : 200 {tasks[], each with\nfeedback_mode,\nai_graded_submitted_at}
+  api --> aip : 200 {grading_mode: IMMEDIATE,\ntasks needing AI,\nai_graded_submitted_at}
 end
 
 note over aip #FFF8DC
@@ -103,7 +103,26 @@ note over aip #FFF8DC
   re-bill the LLM.
 end note
 
-loop for each task with ai_needed AND feedback_mode = IMMEDIATE
+== Defensive write: test results first ==
+
+aip -> aip : package results.json\n(test results only)
+aip -> gs : write results.json
+
+note right of aip #FFF8DC
+  Written BEFORE grading starts, and overwritten
+  after. Last write wins, so a container killed
+  mid-grading leaves the student with their test
+  results rather than a bare autograder error.
+  The tests already succeeded and are already in
+  the database; there is no reason to lose them
+  to an LLM failure.
+
+  Costs one extra file write.
+end note
+
+== AI grading ==
+
+loop for each task with ai_needed
   aip -> api : GET /tasks/{id}/request
   api -> db : SELECT rubric, guidance,\ntest_outcome, submission_file
   api --> aip : 200 {FeedbackRequest}
@@ -126,18 +145,42 @@ loop for each task with ai_needed AND feedback_mode = IMMEDIATE
 end
 
 note right of aip #FFF8DC
-  NIGHTLY tasks are skipped here and stay
-  NEEDED. That is what puts this submission in
-  tonight's trigger queue, with no extra
-  bookkeeping.
+  grading_mode is IMMEDIATE, so every task marked
+  ai_needed is graded here and now. Nothing is
+  deferred to a rerun and the guard is set below.
+end note
 
-  If every target was IMMEDIATE, the guard is
-  set below and this submission is done in one
-  write. If any was NIGHTLY, results.json is
-  written again after tonight's rerun, and the
-  packager must emit placeholders for the
-  pending targets so the student does not read
-  silence as success.
+note as N_FAIL #FFF8DC
+  **Why an IMMEDIATE grading fails, and whether
+  retrying helps.**
+
+  Transient, worth retrying overnight:
+   1. Rate limiting. Every submission for the
+      assignment uses ONE instructor API key, and
+      everyone submits in the last hour before
+      the deadline. A burst of concurrent
+      containers on one key makes 429 the
+      expected case, not an edge case.
+   2. Autograder timeout kills the container
+      mid-grading. LLM latency sits inside the
+      platform's fixed timeout, and rate limiting
+      makes latency worse, during the same spike.
+   3. Provider 5xx.
+   4. Quota or billing exhausted mid-term.
+
+  Deterministic, retrying only burns tokens:
+   5. Context overflow. A student submits an
+      enormous file and the prompt exceeds the
+      model limit.
+   6. Model refuses, or returns output the
+      parser cannot read.
+
+  Note that 1 and 2 are CORRELATED WITH THE
+  DEADLINE. The failure rate is not uniform: it
+  spikes exactly when the most students are
+  affected. That is a sharper argument against
+  IMMEDIATE for large courses than latency
+  alone, and it is why OQ-15 matters.
 end note
 
 aip -> api : POST /submissions/{id}/ai-complete
@@ -147,10 +190,9 @@ api --> aip : 200 {guard_set}
 aip -> api : GET /submissions/{id}/feedback
 api -> db : SELECT feedback WHERE is_selected
 api --> aip : 200 {items[], total_score}
-aip -> aip : package results.json,\nwith placeholders for any\ntask still NEEDED [FR-35]
-aip --> script : results.json
-script -> gs : write results.json
-gs --> stud : test results, feedback for\nIMMEDIATE targets,\nand "pending" for NIGHTLY ones
+aip -> aip : package results.json\n(tests + AI feedback) [FR-35]
+aip -> gs : OVERWRITE results.json
+gs --> stud : test results and\nAI feedback together
 
 note over aip, llm #FFF8DC
   **Constraint specific to IMMEDIATE targets.**
@@ -159,12 +201,13 @@ note over aip, llm #FFF8DC
   before a deadline. Targets times providers
   times LLM latency adds up.
 
-  Per-target mode helps: mark the one or two
-  targets worth instant feedback as IMMEDIATE
-  and leave the rest NIGHTLY. Also consider
-  capping IMMEDIATE targets to a single provider
-  and using multi-provider comparison only at
-  night.
+  Mitigations: set feedback_mode = NEVER on
+  targets that need no commentary, keep the
+  AUTOGRADER logic narrow so few targets are
+  marked, and consider capping IMMEDIATE
+  assignments to a single provider, using
+  multi-provider comparison only in NIGHTLY
+  mode.
 end note
 
 @enduml

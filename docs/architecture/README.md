@@ -34,9 +34,25 @@ she registered in the web app. We never invoke her tests. Her
 `run_autograder` then invokes our AI phase as a separate command, which
 resolves the marks and writes `results.json`. See `DECISIONS.md`, AD-2.
 
-**Feedback mode is per target.** `IMMEDIATE` targets are graded during
-the submission run, `NIGHTLY` ones on a triggered rerun, and one
-submission can mix both. See AD-4.
+**Two settings, easily confused.** `assignment.grading_mode`
+(`IMMEDIATE` or `NIGHTLY`) says *when* AI grading happens.
+`grading_target.feedback_mode` (`NEVER`, `ALWAYS`, `AUTOGRADER`) says
+*whether* a given target gets feedback at all. See AD-4.
+
+## Failure handling
+
+`results.json` is written twice per grading run: test results only before
+grading starts, then the full version after (AD-6). A container killed
+mid-grading therefore leaves the student with their test results rather
+than a bare autograder error.
+
+Failures are classified before retry. Transient ones (429, 5xx, timeout,
+killed container) consume `attempt_count` and retry overnight;
+deterministic ones (context overflow, refusal, unparseable output) go
+straight to `GAVE_UP`. The taxonomy is in `DECISIONS.md` under AD-6, and
+it matters more than it looks: the most likely failure is rate limiting
+during the deadline-hour submission spike, which hits many students at
+once.
 
 ## Cost control
 
@@ -47,7 +63,7 @@ clicks "Rerun Autograder"; it does not generate feedback.
 Two fields do the cost control, and they answer different questions.
 
 `grading_task.ai_needed` answers *does this target deserve feedback*.
-The AI phase resolves it from `ai_feedback_policy`
+The AI phase resolves it from the target's `feedback_mode`
 (`AUTOGRADER`, `ALWAYS`, `NEVER`) and, under `AUTOGRADER`, from the
 requests the instructor's suite made during the run. A target nobody
 asked about is never sent to an LLM.

@@ -17,35 +17,39 @@ participant "Web Backend\n/ REST API" as be #DCEFD9
 participant "Repository\nLayer" as repo #DCEFD9
 database "Grading DB" as db #DCEFD9
 
-== Configure an assignment [FR-1, FR-6] ==
+== Configure an assignment and its grading mode [FR-1, FR-6] ==
 
-instr -> fe : create assignment
-fe -> be : POST /assignments\n{platform_assignment_id, name}
+instr -> fe : create assignment,\nchoose IMMEDIATE or NIGHTLY
+fe -> be : POST /assignments\n{platform_assignment_id, name,\ngrading_mode}
 be -> repo : create_assignment()
 repo -> db : INSERT assignment
 be --> fe : 201 {assignment_id}
 
 note right of instr #FFF8DC
-  **feedback_mode is per target**, so one
-  assignment can mix the two and one submission
-  can get feedback in two waves.
+  Two separate settings, easily confused:
 
-  Both settings live in the database, so
-  changing either needs no re-upload of the
-  autograder zip.
+  **grading_mode** on the ASSIGNMENT says WHEN.
+  IMMEDIATE grades during the submission run,
+  NIGHTLY defers to a triggered rerun. One
+  choice for the whole assignment, so a
+  submission is wholly one or the other.
 
-  Guidance for the instructor guide: mark the
-  one or two targets worth instant feedback as
-  IMMEDIATE and leave the rest NIGHTLY. Every
-  IMMEDIATE target adds LLM latency inside the
-  autograder timeout, and submissions arrive in
-  a spike before the deadline.
+  **feedback_mode** on each TARGET says WHETHER.
+  NEVER, ALWAYS, or AUTOGRADER.
+
+  Both live in the database, so changing either
+  needs no re-upload of the autograder zip.
+
+  Guidance for the instructor guide: IMMEDIATE
+  adds LLM latency inside the autograder
+  timeout, and submissions spike before a
+  deadline. Large courses should prefer NIGHTLY.
 end note
 
 == Define grading targets [FR-2, FR-3, FR-7] ==
 
 loop for each method or class to grade
-  instr -> fe : add target\n(identifier, kind, max_score,\nai_feedback_policy, feedback_mode)
+  instr -> fe : add target\n(identifier, kind, max_score,\nfeedback_mode)
   fe -> be : POST /assignments/{id}/targets
   be -> repo : create_target()
   repo -> db : INSERT grading_target
@@ -57,8 +61,8 @@ loop for each method or class to grade
 end
 
 note right of instr #FFF8DC
-  ai_feedback_policy is the instructor's control
-  over token spend:
+  feedback_mode is the instructor's control over
+  token spend:
     AUTOGRADER (default) -- her test suite calls
       request_ai_feedback for the targets it
       wants graded, so correct code costs

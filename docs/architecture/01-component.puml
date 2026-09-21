@@ -106,7 +106,7 @@ aigrade -up- ILLM
 ' ---------------------------------------------------------------------
 ' Wiring
 ' ---------------------------------------------------------------------
-instr --> fe : registers targets, rubrics,\nai_feedback_policy, feedback_mode
+instr --> fe : registers targets, rubrics,\nfeedback_mode, grading_mode
 instr --> script : writes the autograder script\nand the test suite
 fe --> be : HTTPS / JSON
 be ..> IRepo
@@ -148,11 +148,11 @@ note as N_OWN #FFF8DC
   library and calls us with the target names the
   instructor registered in the web app.
 
-  The marking logic lives here too. Under the
-  AUTOGRADER policy, whether a target gets AI
-  feedback on failures only, on a subset, or on
-  a superset is a decision she expresses in this
-  code.
+  The marking logic lives here too. Under
+  feedback_mode = AUTOGRADER, whether a target
+  gets AI feedback on failures only, on a
+  subset, or on a superset is a decision she
+  expresses in this code.
 
   run_autograder is hers as well: it decides to
   run her suite and then invoke our AI phase.
@@ -176,9 +176,10 @@ note as N_AIP #FFF8DC
   not from inside her test code.
 
   Resolves the marks, errors if a registered
-  target was never reported, grades the tasks
-  whose target is marked IMMEDIATE, leaves
-  NIGHTLY ones alone, and packages results.json.
+  target was never reported, then grades the
+  marked tasks if the assignment's grading_mode
+  is IMMEDIATE, or leaves them for a rerun if it
+  is NIGHTLY. Packages results.json either way.
 end note
 
 note as N_TRIG #FFF8DC

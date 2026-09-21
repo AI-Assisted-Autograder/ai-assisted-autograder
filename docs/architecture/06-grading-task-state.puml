@@ -21,7 +21,7 @@ state "Resolving ai_needed\n(AI phase)" as Marking
 
 [*] --> Marking : the test suite has exited;\nthe AI phase creates one task\nper REGISTERED target
 
-Marking : Apply the target's ai_feedback_policy.
+Marking : Apply the target's feedback_mode.
 Marking : NEVER or ALWAYS are decided by config alone.
 Marking : AUTOGRADER defers to the test suite: did it
 Marking : call request_ai_feedback for this target?
@@ -50,9 +50,10 @@ NEEDED : **This is the work queue.** The nightly
 NEEDED : trigger queries it to decide which
 NEEDED : submissions to rerun.
 
-NEEDED --> DONE : AI phase generated feedback.\nDuring the submission run if the\ntarget is IMMEDIATE, on a\ntriggered rerun if NIGHTLY
-NEEDED --> NEEDED : attempt failed,\nattempt_count < 3
+NEEDED --> DONE : AI phase generated feedback.\nDuring the submission run if the\nassignment is IMMEDIATE, on a\ntriggered rerun if NIGHTLY
+NEEDED --> NEEDED : TRANSIENT failure\n(429, 5xx, timeout,\ncontainer killed)\nattempt_count < 3
 NEEDED --> GAVE_UP : attempt_count reached 3
+NEEDED --> GAVE_UP : DETERMINISTIC failure\n(context overflow, refusal,\nunparseable output)
 
 DONE : ai_status = DONE, completed_at set.
 DONE : Terminal. Once no task on the submission
@@ -60,7 +61,8 @@ DONE : is still NEEDED, the submission's
 DONE : ai_graded_submitted_at is set and the
 DONE : nightly trigger stops selecting it.
 
-GAVE_UP : Repeated failures. Surfaced on the
+GAVE_UP : Either three transient failures or one
+GAVE_UP : deterministic one. Surfaced on the
 GAVE_UP : instructor dashboard. Counts as "not
 GAVE_UP : NEEDED" for the guard, so one broken
 GAVE_UP : target cannot hold a submission in the
@@ -71,12 +73,17 @@ NOT_NEEDED --> [*]
 GAVE_UP --> [*]
 
 note as N_MARK #FFF8DC
-Config and code, chosen per target. NEVER and
-  ALWAYS are decided by the dropdown alone and
-  need no programming. AUTOGRADER delegates the
-  per-submission decision to the instructor's
-  test suite, which calls request_ai_feedback
-  for the targets it wants graded.
+Config and code, chosen per target via
+  feedback_mode. NEVER and ALWAYS are decided by
+  the dropdown alone and need no programming.
+  AUTOGRADER delegates the per-submission
+  decision to the instructor's test suite, which
+  calls request_ai_feedback for the targets it
+  wants graded.
+
+  Note this is orthogonal to the assignment's
+  grading_mode, which says WHEN grading happens,
+  not whether.
 
   AUTOGRADER is the default because the usual
   rule, "explain it when the tests fail", is one
@@ -100,12 +107,24 @@ note as N1 #FFF8DC
   solely to stop a permanently broken target
   being retried every night forever.
 
-  The same mechanism carries mixed-mode
-  submissions. After the IMMEDIATE pass, NIGHTLY
-  tasks are still NEEDED, so the submission
-  enters the queue with no extra flag, and the
-  IMMEDIATE tasks are skipped on the rerun
-  because they are already DONE.
+  The same mechanism covers a partially graded
+  submission: tasks that reached DONE on an
+  earlier night are skipped, and only the ones
+  still NEEDED are retried.
+end note
+
+note as N_CLASS #FFF8DC
+  **Classify before retrying.**
+  A deterministic failure returns the same result
+  on every attempt, so three nights of retries
+  spend three times the tokens to reach the same
+  GAVE_UP. Route it there on the first attempt.
+
+  The full taxonomy is in
+  03-sequence-immediate.puml. The short version:
+  429, 5xx, timeout and a killed container are
+  transient; context overflow, a refusal and
+  unparseable output are not.
 end note
 
 note as N2 #FFF8DC
@@ -113,8 +132,8 @@ note as N2 #FFF8DC
   grading_task.ai_needed decides WHETHER a
   target deserves feedback. It is the token
   saving, and the instructor controls it through
-  ai_feedback_policy and, under AUTOGRADER,
-  through her own test suite.
+  the target's feedback_mode and, under
+  AUTOGRADER, through her own test suite.
 
   submission.ai_graded_submitted_at decides
   whether this submission is finished. The

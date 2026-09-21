@@ -8,12 +8,15 @@
 two-pass proposal, and supersedes SRS section 3.4, which was ambiguous
 on this point and should be rewritten to match.
 
-The instructor chooses a feedback mode **per grading target** (see
-AD-4).
+The instructor chooses a **grading mode per assignment** (`IMMEDIATE`
+or `NIGHTLY`), and separately a **feedback mode per target** (`NEVER`,
+`ALWAYS`, `AUTOGRADER`). The two answer different questions: grading
+mode says *when*, feedback mode says *whether*. See AD-4.
 
-**IMMEDIATE.** The AI phase grades the target during the submission run,
-invoked by the instructor's autograder script after her test suite
-exits. Functional tests, AI feedback, `results.json`, done.
+**IMMEDIATE.** The AI phase grades the marked targets during the
+submission run, invoked by the instructor's autograder script after her
+test suite exits. Functional tests, AI feedback, `results.json`, done in
+one pass.
 
 **NIGHTLY.** The submission run records outcomes and marks the work but
 grades nothing. Every night a job runner uses browser automation to log
@@ -77,15 +80,15 @@ Consequences:
 resolved by the AI phase. It is the main token saving in the
 system: a target nobody asked feedback for is never sent to an LLM.
 
-`grading_target.ai_feedback_policy`, set per target in the web app:
+`grading_target.feedback_mode`, set per target in the web app:
 
-| Policy | Behaviour |
+| `feedback_mode` | Behaviour |
 | --- | --- |
 | `AUTOGRADER` | The instructor's suite decides per submission, by calling `request_ai_feedback`. The default. |
 | `ALWAYS` | Mark every submission regardless of outcome. For style or design feedback no test can detect. |
 | `NEVER` | Never mark. For targets graded purely by tests. |
 
-**There is deliberately no `ON_FAILURE` policy.** Marking on failure is
+**There is deliberately no `ON_FAILURE` value.** Marking on failure is
 one line in the instructor's suite, and any variant (a subset of
 failures, a superset, a partial-credit threshold, a cross-target
 condition) is equally expressible there. A policy value would only
@@ -149,6 +152,7 @@ document, not survivable for four people implementing in parallel.
 
 | ID | Question | Blocks | Owner |
 | --- | --- | --- | --- |
+| OQ-15 | Does the nightly trigger consider IMMEDIATE assignments, so a failed immediate grading self-heals? | C's trigger query, B's endpoint | C |
 | ~~OQ-11~~ | ~~Where LLM keys live~~ | **DECIDED** (AD-5): the autograder container holds the instructor's own LLM API key. No DB credential ever. | -- |
 | ~~OQ-12~~ | ~~Typo'd target identifiers~~ | **DECIDED**: the API rejects unregistered names and the library raises, failing the test run | -- |
 | ~~OQ-13~~ | ~~Who invokes the AI phase~~ | **DECIDED**: the instructor's `run_autograder` invokes it as a command after her suite exits | -- |
@@ -157,7 +161,7 @@ document, not survivable for four people implementing in parallel.
 | OQ-2 | How is confidence defined and computed (FR-28)? | A's engine, B's UI | A |
 | OQ-3 | Can the instructor edit feedback before release? Now mode-dependent. | state machine, B's dashboard | Instructor |
 | OQ-4 | Are all submission attempts graded, or only the latest? | cost, C's task creation | Instructor + A |
-| OQ-5 | Retry policy and the attempt cap before GAVE_UP | A and C will otherwise write two | D |
+| OQ-5 | Retry policy: attempt cap, and the transient/deterministic split (taxonomy now in AD-6) | A and C will otherwise write two | D |
 | OQ-6 | Exact Gradescope autograder JSON schema | C's packager, D's tests | C |
 | OQ-7 | Gradescope authentication, and where that credential lives | C's trigger job | C |
 | OQ-8 | Web framework, database, cloud host | B cannot start | B |
@@ -226,7 +230,7 @@ up.
 the instructor to request AI grading on an already-graded submission,
 which required clearing `ai_graded_submitted_at` in the same
 transaction. That path does not exist. Instructor control is exercised
-at marking time, through `ai_feedback_policy` and their own autograder
+at marking time, through `feedback_mode` and their own autograder
 logic.
 
 ### AD-5. The autograder container holds the LLM API key
@@ -265,6 +269,158 @@ container depends on what secret facility the platform offers; if the
 only route available is the uploaded autograder zip, say so plainly,
 because a key in a zip is a key in every backup of that zip. Confirm
 what Gradescope actually provides here before writing that section.
+
+### AD-6. results.json is written twice, tests first
+
+The AI phase writes a tests-only `results.json` **before** grading
+starts, then overwrites it with the full version after. Last write wins.
+
+The reason: if the container is killed mid-grading, the original ordering
+left the student with a bare autograder error and no test results at
+all, even though the tests had succeeded and were already recorded in the
+database. There is no reason to lose passing test results to an LLM
+failure. Costs one extra file write.
+
+### Why an IMMEDIATE grading fails, and whether retrying helps
+
+Worth writing down because it determines the retry policy (OQ-5) and
+because it is a stronger argument about `IMMEDIATE` than latency alone.
+
+**Transient, worth retrying overnight:**
+
+1. **Rate limiting.** Every submission for an assignment uses one
+   instructor API key, and students submit in the last hour before the
+   deadline. A burst of concurrent containers against a single key makes
+   429 the expected case, not an edge case.
+2. **Autograder timeout kills the container mid-grading.** LLM latency
+   sits inside the platform's fixed timeout, and rate limiting makes
+   latency worse, during the same spike.
+3. **Provider 5xx.**
+4. **Quota or billing exhausted** mid-term.
+
+**Deterministic, where retrying only burns tokens:**
+
+5. **Context overflow.** A student submits an enormous file and the
+   prompt exceeds the model's limit.
+6. **Model refuses, or returns output the parser cannot read.**
+
+Two consequences.
+
+**Classify before retrying.** A deterministic failure returns the same
+result every attempt, so three nights of retries spend three times the
+tokens to reach the same `GAVE_UP`. Route those there on the first
+attempt. Only transient failures should consume `attempt_count`.
+
+**Failures 1 and 2 are correlated with the deadline.** The failure rate
+under `IMMEDIATE` is not uniform; it spikes exactly when the most
+students are affected. That is a sharper argument against `IMMEDIATE`
+for large courses than the latency point on its own, and it is why OQ-15
+matters: without overnight retry, a deadline-hour 429 means that student
+never gets feedback.
+
+### AD-3. Target identifiers are a checked contract
+
+Target identifiers cross a process boundary as bare strings: typed once
+into the web app, again into the instructor's test suite, with no
+compiler between them. Both directions of mismatch are now errors rather
+than silent skips.
+
+1. `POST /outcomes` rejects an unregistered target with a 4xx naming it
+   and listing the registered ones. The reporting library raises rather
+   than swallowing it, so her test run fails loudly on the first call.
+2. The AI phase treats a registered target that received **no** outcome
+   as an error. It exits non-zero and the autograder run fails. This
+   catches the opposite mistake, renamed in the web app but still the old
+   name in the suite.
+3. Recommended, not yet decided: the web app offers a copy-paste block of
+   the exact identifiers for an assignment, so the second typing is a
+   paste.
+
+One consequence to handle in the message text, not the schema: on
+Gradescope this error is visible to the student and blocks their score.
+That is the right trade for a misconfigured assignment, but the
+diagnostic must say plainly that the assignment is misconfigured and the
+student need do nothing.
+
+### AD-4. Grading mode is per assignment; feedback mode is per target
+
+Two settings, easily confused, answering different questions.
+
+| Setting | Level | Values | Question |
+| --- | --- | --- | --- |
+| `grading_mode` | assignment | `IMMEDIATE`, `NIGHTLY` | **When** does AI grading happen? |
+| `feedback_mode` | grading target | `NEVER`, `ALWAYS`, `AUTOGRADER` | **Whether** does this target get feedback? |
+
+Because grading mode is per assignment, a submission is wholly immediate
+or wholly nightly. There is no mixing, and therefore no submission that
+receives partial feedback in one write and the rest in another.
+
+How many times `results.json` gets written follows from the grading mode
+alone:
+
+| `grading_mode` | Writes |
+| --- | --- |
+| `IMMEDIATE` | Once, during the submission run. The guard is set; the submission never enters the nightly queue. |
+| `NIGHTLY` | Twice: test results on the submission run, feedback on the rerun. |
+
+In `NIGHTLY` mode the first write carries no AI feedback at all, which
+reads correctly to a student as "not graded yet". A one-line marker per
+pending task saying feedback arrives by the next morning is a courtesy
+worth adding, but nothing depends on it.
+
+For the instructor guide: `IMMEDIATE` puts LLM latency inside the
+platform's autograder timeout, and submissions spike before a deadline.
+Large courses should prefer `NIGHTLY`, and `IMMEDIATE` assignments are
+worth capping to a single provider, using multi-provider comparison only
+at night.
+
+### AD-6. results.json is written twice, tests first
+
+The AI phase writes a tests-only `results.json` **before** grading
+starts, then overwrites it with the full version after. Last write wins.
+
+The reason: if the container is killed mid-grading, the original ordering
+left the student with a bare autograder error and no test results at
+all, even though the tests had succeeded and were already recorded in the
+database. There is no reason to lose passing test results to an LLM
+failure. Costs one extra file write.
+
+### Why an IMMEDIATE grading fails, and whether retrying helps
+
+Worth writing down because it determines the retry policy (OQ-5) and
+because it is a stronger argument about `IMMEDIATE` than latency alone.
+
+**Transient, worth retrying overnight:**
+
+1. **Rate limiting.** Every submission for an assignment uses one
+   instructor API key, and students submit in the last hour before the
+   deadline. A burst of concurrent containers against a single key makes
+   429 the expected case, not an edge case.
+2. **Autograder timeout kills the container mid-grading.** LLM latency
+   sits inside the platform's fixed timeout, and rate limiting makes
+   latency worse, during the same spike.
+3. **Provider 5xx.**
+4. **Quota or billing exhausted** mid-term.
+
+**Deterministic, where retrying only burns tokens:**
+
+5. **Context overflow.** A student submits an enormous file and the
+   prompt exceeds the model's limit.
+6. **Model refuses, or returns output the parser cannot read.**
+
+Two consequences.
+
+**Classify before retrying.** A deterministic failure returns the same
+result every attempt, so three nights of retries spend three times the
+tokens to reach the same `GAVE_UP`. Route those there on the first
+attempt. Only transient failures should consume `attempt_count`.
+
+**Failures 1 and 2 are correlated with the deadline.** The failure rate
+under `IMMEDIATE` is not uniform; it spikes exactly when the most
+students are affected. That is a sharper argument against `IMMEDIATE`
+for large courses than the latency point on its own, and it is why OQ-15
+matters: without overnight retry, a deadline-hour 429 means that student
+never gets feedback.
 
 ### AD-3. Target identifiers are a checked contract
 
@@ -311,29 +467,11 @@ immediate pass the `NIGHTLY` tasks are still `NEEDED`, so
 submission up on its own. On the rerun, the `IMMEDIATE` tasks are
 already `DONE` and get skipped, so a mixed submission never pays twice.
 
-**The real cost of mixed mode is partial feedback that reads as
-complete.** The first `results.json` carries commentary on the
-`IMMEDIATE` targets and silence on the `NIGHTLY` ones. A student's
-reasonable inference is that the silent targets were fine, which is
-exactly backwards if they failed and are queued for tonight.
-All-`NIGHTLY` does not have this problem, because zero feedback reads as
-"not graded yet".
-
-Mitigation, cheap and worth doing: the packager emits a placeholder
-entry for every task that is `NEEDED` but not `DONE`, saying feedback is
-being generated and will appear by the next morning. That is the
-difference between a student thinking they passed and a student knowing
-to check back.
-
-Two more things for the instructor guide:
-
-- Every `IMMEDIATE` target adds LLM latency inside the autograder
-  timeout, and submissions arrive in a spike before the deadline. Marking
-  one or two targets `IMMEDIATE` and leaving the rest `NIGHTLY` is the
-  sensible default.
-- An `IMMEDIATE` target whose grading fails stays `NEEDED` and is
-  retried on the nightly run, so its feedback arrives the next morning
-  instead of at once.
+For the instructor guide: `IMMEDIATE` puts LLM latency inside the
+platform's autograder timeout, and submissions spike before a deadline.
+Large courses should prefer `NIGHTLY`. An `IMMEDIATE` assignment whose
+grading fails is picked up by the nightly trigger and retried, subject to
+OQ-15.
 
 **AD-2 superseded an earlier revision of these diagrams.** They showed
 our entrypoint fetching the target list and invoking a test runner per
@@ -341,3 +479,37 @@ target, with an `ITestRunner` interface and an `IMarkingHook` for
 instructor logic. Control runs the other way: her suite calls us, and
 the marking logic is ordinary code in that suite rather than a hook we
 invoke.
+
+### OQ-15: failed IMMEDIATE grading
+
+If an `IMMEDIATE` submission's AI grading fails, its task stays `NEEDED`
+and `ai_graded_submitted_at` is never set. What happens next depends on
+one line of the trigger's query.
+
+If the trigger filters on `grading_mode = NIGHTLY`, that task is stuck
+forever: nothing retries it, and the submission stays permanently
+half-graded with no feedback and no error the student can see.
+
+If the trigger ignores `grading_mode` and selects any submission with a
+task still `NEEDED`, the failure self-heals overnight. The student gets
+the feedback the next morning instead of at once, which is a mild
+degradation and much better than never.
+
+**Recommend the latter**, which is what the query in
+`04-sequence-nightly.puml` shows. It costs nothing and it is the
+difference between a transient LLM error being invisible and being
+permanent.
+
+The failure taxonomy above makes this concrete rather than theoretical.
+The most likely `IMMEDIATE` failure is rate limiting during the
+deadline-hour submission spike, which is both transient and
+simultaneous across many students. Without overnight retry, a single
+burst of 429s silently denies feedback to everyone who submitted in that
+window, and nothing in the system would say so.
+
+**AD-4 was corrected.** An earlier revision put `IMMEDIATE`/`NIGHTLY` on
+the grading target rather than the assignment, which allowed mixed-mode
+submissions and created a real problem: the first `results.json` carried
+feedback for some targets and silence for others, which a student reads
+as "those were fine". That whole complication was an artifact of the
+misplacement and is gone.

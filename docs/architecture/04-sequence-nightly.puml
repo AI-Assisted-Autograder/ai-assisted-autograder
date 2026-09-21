@@ -52,21 +52,20 @@ ti --> script : suite exits
 script -> aip : invoke AI phase
 aip -> api : POST /submissions/{id}/resolve-marks
 api -> db : resolve ai_needed per target,\ninsert grading_task rows
-api --> aip : 200 {tasks[], feedback_mode,\nai_graded_submitted_at}
+api --> aip : 200 {grading_mode: NIGHTLY,\ntasks needing AI,\nai_graded_submitted_at}
 
 note over aip #FFF8DC
-  Every task here has feedback_mode = NIGHTLY,
-  so the AI phase grades nothing and spends no
-  tokens. The tasks stay NEEDED, so
+  grading_mode is NIGHTLY, so the AI phase
+  grades nothing and spends no tokens here.
+  Tasks marked ai_needed stay NEEDED, so
   ai_graded_submitted_at stays NULL, which is
   what puts this submission in tonight's queue.
   No extra bookkeeping.
 end note
 
-aip -> aip : package results.json\n(tests + "pending" placeholders)
-aip --> script : results.json
-script -> gs : write results.json
-gs --> stud : test results now,\n"pending" markers,\nfeedback tomorrow
+aip -> aip : package results.json\n(test results only)
+aip -> gs : write results.json
+gs --> stud : test results now,\nfeedback tomorrow
 
 == Phase 2: nightly -- trigger a rerun per submission ==
 
@@ -78,12 +77,18 @@ db --> api : submission list
 api --> trig : 200 {submissions[] with platform ids}
 
 note right of api #FFF8DC
-  The query does not mention feedback_mode. Any
-  task still NEEDED qualifies, which means an
-  IMMEDIATE target whose grading failed earlier
-  is retried tonight for free. Its feedback
-  arrives next morning rather than at once, a
-  degradation worth documenting.
+  **OQ-15.** The query deliberately does not
+  filter on grading_mode. Any submission with a
+  task still NEEDED qualifies, including one from
+  an IMMEDIATE assignment whose grading failed.
+  That failure self-heals overnight and the
+  student gets feedback next morning instead of
+  at once.
+
+  Filtering on grading_mode = NIGHTLY instead
+  would leave such a task stuck forever, the
+  submission permanently half-graded, nothing
+  retrying it. Ratify this choice.
 end note
 
 trig -> gs : log in
@@ -125,7 +130,7 @@ ti --> script : suite exits
 
 script -> aip : invoke AI phase
 aip -> api : POST /submissions/{id}/resolve-marks
-api --> aip : 200 {tasks[], feedback_mode,\nai_graded_submitted_at}
+api --> aip : 200 {grading_mode: NIGHTLY,\ntasks needing AI,\nai_graded_submitted_at}
 
 alt already fully graded (ai_graded_submitted_at = submitted_at)
   note right of aip #FFF8DC
@@ -138,8 +143,19 @@ alt already fully graded (ai_graded_submitted_at = submitted_at)
   aip -> api : GET /submissions/{id}/feedback
   api --> aip : 200 {stored feedback}
   aip -> aip : package results.json\n(tests + stored feedback)
+  aip -> gs : write results.json
 
 else work remains
+  aip -> aip : package results.json\n(test results only)
+  aip -> gs : write results.json
+
+  note right of aip #FFF8DC
+    Same defensive write as in 03. Written before
+    grading, overwritten after. A container killed
+    mid-grading leaves the student with their test
+    results rather than a bare autograder error.
+  end note
+
   loop for each task with ai_needed and ai_status = PENDING
     aip -> api : GET /tasks/{id}/request
     api -> db : SELECT rubric, guidance,\ntest_outcome, submission_file
@@ -163,29 +179,33 @@ else work remains
   end
 
   note right of aip #FFF8DC
-    Tasks already DONE from an earlier IMMEDIATE
-    pass are skipped by ai_status, so a
-    mixed-mode submission does not pay twice for
-    its IMMEDIATE targets.
+    ai_status stops a partially graded submission
+    paying twice: tasks already DONE on a previous
+    night are skipped, and only the ones still
+    NEEDED are graded.
   end note
 
   aip -> api : POST /submissions/{id}/ai-complete
   api -> db : UPDATE submission\nSET ai_graded_submitted_at = submitted_at\nWHERE NO task is still NEEDED\n(GAVE_UP counts as settled)
   api --> aip : 200 {guard_set}
   aip -> aip : package results.json\n(tests + all feedback)
+  aip -> gs : OVERWRITE results.json
 end
 
-aip --> script : results.json
-script -> gs : write results.json
 gs --> stud : feedback now visible
 
 note over trig, db #FFF8DC
   **OQ-5, still open: failure policy.**
-  1. A failed task stays NEEDED and increments
-     attempt_count. The next night retries it
-     while attempt_count < 3, then GAVE_UP.
-  2. LLM calls retry with backoff on 429 and 5xx
-     only, never on 400.
+  1. Classify the failure. Transient ones (429,
+     5xx, timeout, container killed) leave the
+     task NEEDED and increment attempt_count;
+     the next night retries while
+     attempt_count < 3, then GAVE_UP.
+  2. Deterministic ones (context overflow, model
+     refusal, unparseable output) go STRAIGHT to
+     GAVE_UP. Retrying them for three nights
+     burns tokens to reach the same answer.
+     See the taxonomy in 03.
   3. If the trigger cannot find or click a
      submission's rerun button, record it on
      trigger_run and surface it. A silent trigger

@@ -4,10 +4,11 @@
 ' Traces to: FR-6, FR-12..FR-18, FR-25, FR-26, FR-28, FR-30, NFR-6
 '
 ' Changes in this revision:
-'   grading_target.ai_feedback_policy -- the instructor's static
-'     per-target default, set in the web app.
-'   grading_target.feedback_mode -- IMMEDIATE or NIGHTLY, per target
-'     rather than per assignment, so one submission can mix the two.
+'   grading_target.feedback_mode -- the instructor's per-target choice
+'     of WHETHER a target gets AI feedback, set in the web app.
+'   assignment.grading_mode -- IMMEDIATE or NIGHTLY, per assignment.
+'   grading_target.feedback_mode -- NEVER, ALWAYS or AUTOGRADER, per
+'     target. Governs WHETHER a target gets feedback, not when.
 '   grading_task.ai_needed + ai_needed_reason -- the per-submission
 '     marker, resolved by the AI phase after the instructor's suite
 '     has exited.
@@ -38,17 +39,24 @@ entity "assignment" as assignment #DCEFD9 {
   * course_id : uuid <<FK>>
   * platform : text <<GRADESCOPE>>
   * platform_assignment_id : text
+  * grading_mode : text <<IMMEDIATE|NIGHTLY>>
   name : text
   is_active : boolean
   created_at : timestamptz
   --
   unique: platform, platform_assignment_id
   --
-  No mode column. Feedback mode is per
-  target, on grading_target. The web
-  app can still offer "apply to all
-  targets" as a convenience, which
-  needs UI but no schema.
+  grading_mode decides WHEN AI grading
+  happens, for the whole assignment:
+    IMMEDIATE -- the AI phase grades
+      during the submission run.
+    NIGHTLY -- grading is left for a
+      triggered rerun.
+  --
+  It lives here, not on the target, so
+  a submission is wholly immediate or
+  wholly nightly. Changing it needs no
+  re-upload of the autograder zip.
 }
 
 entity "grading_target" as target #DCEFD9 {
@@ -57,17 +65,17 @@ entity "grading_target" as target #DCEFD9 {
   * assignment_id : uuid <<FK>>
   * identifier : text
   * kind : text <<METHOD|CLASS|FILE>>
-  * ai_feedback_policy : text
-  * feedback_mode : text <<IMMEDIATE|NIGHTLY>>
+  * feedback_mode : text <<NEVER|ALWAYS|AUTOGRADER>>
   max_score : numeric
   display_order : integer
   --
   FR-2, FR-3.
-  ai_feedback_policy is set per target
-  in the web app:
+  feedback_mode decides WHETHER this
+  target gets AI feedback, and is set
+  per target in the web app:
     AUTOGRADER -- the instructor's test
       suite decides, per submission, by
-      calling request_ai_feedback().
+      calling request_ai_feedback.
       The default and the usual case.
     ALWAYS -- mark every submission
       regardless of outcome, for style
@@ -79,19 +87,16 @@ entity "grading_target" as target #DCEFD9 {
   There is no ON_FAILURE value. Marking
   on failures is one line in the
   instructor's suite, and any other
-  rule (a subset of failures, a
-  superset, a partial-credit threshold)
-  is equally expressible there. A
-  policy value could only duplicate
-  what the code already says.
+  rule such as a subset of failures, a
+  superset, or a partial-credit
+  threshold is equally expressible
+  there. A value
+  here could only duplicate what the
+  code already says.
   --
-  feedback_mode is also per target:
-    IMMEDIATE -- the AI phase grades it
-      during the submission run.
-    NIGHTLY -- it is left for a
-      triggered rerun.
-  One submission may mix the two. See
-  the mixed-mode note below.
+  Note the division of labour:
+  feedback_mode says WHETHER,
+  assignment.grading_mode says WHEN.
 }
 
 entity "target_file_pattern" as tfile #DCEFD9 {
@@ -335,9 +340,8 @@ end note
 
 note as N1b #FFF8DC
   **Who sets grading_task.ai_needed**
-  The submission autograder writes it after
-  functional testing, applying the target's
-  ai_feedback_policy:
+  The AI phase resolves it after the test suite
+  exits, applying the target's feedback_mode:
 
   ALWAYS      -> true, reason POLICY_ALWAYS
   NEVER       -> false, reason POLICY_NEVER
@@ -366,49 +370,43 @@ note as N1b #FFF8DC
 end note
 
 note as N2 #FFF8DC
-  **Mixed-mode submissions are normal**
-  feedback_mode is per target, so one submission
-  can have IMMEDIATE targets graded during the
-  submission run and NIGHTLY targets left for a
-  rerun.
+  **How many times results.json is written**
+  Determined by the assignment's grading_mode,
+  not by anything per target:
+    IMMEDIATE -> once, during the submission
+      run. The guard is set and the submission
+      never enters the nightly queue.
+    NIGHTLY -> twice. Once on the submission
+      run carrying test results only, once on
+      the triggered rerun carrying feedback.
 
-  How many times results.json is written depends
-  on whether ANY target is NIGHTLY, not on
-  whether the submission is mixed:
-    all IMMEDIATE -> written once, guard set,
-      never enters the nightly queue
-    any NIGHTLY -> written twice, once on the
-      submission run and once on the rerun
+  In NIGHTLY mode the first write has no AI
+  feedback at all, which reads correctly as
+  "not graded yet". A one-line "feedback arrives
+  by tomorrow morning" marker per pending task
+  is a courtesy worth adding, but nothing
+  depends on it.
+end note
 
-  This needs no extra machinery. After the
-  immediate pass the NIGHTLY tasks are still
-  NEEDED, so ai_graded_submitted_at stays NULL
-  and tonight's trigger picks the submission up.
-  After the rerun nothing is NEEDED and the
-  guard is set.
+note as N2a #FFF8DC
+  **OQ-15: does the nightly trigger consider
+  IMMEDIATE assignments?**
+  If an IMMEDIATE submission's grading fails,
+  its task stays NEEDED and
+  ai_graded_submitted_at is never set.
 
-  **What is specific to mixed mode is partial
-  feedback that reads as complete.** The first
-  results.json carries commentary on the
-  IMMEDIATE targets and silence on the NIGHTLY
-  ones. A student's reasonable inference is that
-  the silent targets were fine, which is exactly
-  backwards if they failed and are queued.
+  If the trigger filters on grading_mode =
+  NIGHTLY, that task is stuck forever and the
+  submission is permanently half-graded. If the
+  trigger ignores grading_mode and selects any
+  submission with pending work, the failure
+  self-heals overnight and the student gets the
+  feedback the next morning instead of at once.
 
-  All-NIGHTLY does not have this problem:
-  zero feedback reads as "not graded yet".
-
-  Mitigation, cheap and worth doing: the
-  packager emits a placeholder for every task
-  that is NEEDED but not DONE, saying feedback
-  is being generated and will appear by the next
-  morning. See the packager note in 07.
-
-  One more consequence to accept: an IMMEDIATE
-  target whose grading failed is also still
-  NEEDED, so it is retried on the nightly run
-  and its feedback arrives the next morning
-  instead of at once.
+  Recommend the latter, which is what the query
+  in 04 shows. It costs nothing and it is the
+  difference between a transient LLM error being
+  invisible and being permanent. Ratify it.
 end note
 
 note as N2b #FFF8DC

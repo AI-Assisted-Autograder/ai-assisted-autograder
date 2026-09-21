@@ -96,9 +96,11 @@ package "AI Phase entrypoint (Student C)" #FBE6D4 {
     --
     Resolves marks, errors if a
     registered target was never
-    reported, grades tasks whose target
-    is IMMEDIATE, leaves NIGHTLY ones
-    NEEDED, packages results.json.
+    reported, writes a tests-only
+    results.json, then grades the marked
+    tasks if grading_mode is IMMEDIATE
+    or leaves them NEEDED if NIGHTLY,
+    and overwrites results.json.
   }
 
   class ResultsPackager {
@@ -107,29 +109,27 @@ package "AI Phase entrypoint (Student C)" #FBE6D4 {
     The only code that knows the
     platform's results.json schema.
     --
-    Called twice whenever any target is
-    NIGHTLY: once on the submission run,
-    once on the rerun.
+    Called TWICE per grading run: once
+    with test results only before
+    grading starts, once with the full
+    content after. Last write wins, so a
+    container killed mid-grading leaves
+    the student with test results rather
+    than a bare autograder error.
     --
-    `pending` is the tasks still NEEDED
-    but not DONE. Emit a placeholder
-    entry for each. See the note below.
+    `pending` is the tasks still NEEDED.
+    A courtesy marker for each is worth
+    emitting in NIGHTLY mode.
   }
 
   note as N_PKG #FFF8DC
-    **Placeholders are not cosmetic.** On a
-    mixed-mode submission the first results.json
-    shows feedback for the IMMEDIATE targets and
-    nothing for the NIGHTLY ones, which a student
-    reads as "those were fine". If they failed
-    and are queued for tonight, that inference is
-    backwards.
-
-    A one-line placeholder per pending task,
-    saying feedback is being generated and will
-    appear by the next morning, is the difference
-    between a student thinking they passed and a
-    student knowing to check back.
+    In NIGHTLY mode the first results.json has no
+    AI feedback at all, which reads correctly as
+    "not graded yet". A one-line marker per
+    pending task saying feedback arrives by the
+    next morning is a courtesy rather than a
+    correctness requirement, but it saves the
+    student wondering.
   end note
 
   AiPhaseEntrypoint --> ResultsPackager
@@ -332,7 +332,7 @@ end note
 note as N2 #FFF8DC
   **resolve_marks_and_create_tasks is where cost
   control lives.** It applies each target's
-  ai_feedback_policy and, under AUTOGRADER, the
+  feedback_mode and, under AUTOGRADER, the
   requests the instructor's suite made during
   this run. It can only run after her suite has
   exited, because only then is the full request
