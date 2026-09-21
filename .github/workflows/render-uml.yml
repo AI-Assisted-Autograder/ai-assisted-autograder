@@ -53,14 +53,41 @@ jobs:
             "https://github.com/plantuml/plantuml/releases/download/v${PLANTUML_VERSION}/plantuml-${PLANTUML_VERSION}.jar" \
             -o ~/.plantuml/plantuml.jar
 
+      # PlantUML names output from the "@startuml <name>" directive, not
+      # from the filename. If they drift, a rename produces output under
+      # the old name and the stale file looks legitimate.
+      - name: Check @startuml names match filenames
+        run: |
+          drift=0
+          for f in docs/architecture/*.puml; do
+            base="$(basename "$f" .puml)"
+            name="$(grep -m1 '^@startuml' "$f" | awk '{print $2}')"
+            if [ "$name" != "$base" ]; then
+              echo "::error file=$f::declares '@startuml $name'; output would be named '$name', not '$base'"
+              drift=1
+            fi
+          done
+          exit "$drift"
+
       - name: Verify diagram syntax
         run: |
           java -jar ~/.plantuml/plantuml.jar -checkonly -failfast2 \
             docs/architecture/*.puml
 
-      - name: Render SVG and PNG
+      # Delete previously rendered images before regenerating. Without
+      # this, a renamed or deleted .puml leaves an orphaned .svg/.png in
+      # the repo forever. Worse, the freshness check below is a git diff,
+      # and an orphan is not a *change*, so it would pass clean while
+      # stale diagrams accumulate. Scoped to the two generated
+      # extensions so .gitkeep survives.
+      - name: Remove previously rendered images
         run: |
           mkdir -p docs/architecture/rendered
+          find docs/architecture/rendered -maxdepth 1 -type f \
+            \( -name '*.svg' -o -name '*.png' \) -delete
+
+      - name: Render SVG and PNG
+        run: |
           java -Djava.awt.headless=true -jar ~/.plantuml/plantuml.jar \
             -tsvg -failfast2 \
             -o "$(pwd)/docs/architecture/rendered" \
@@ -78,30 +105,36 @@ jobs:
           path: docs/architecture/rendered/
           if-no-files-found: error
 
-      # On a pull request, do not commit. Just tell the author whether the
+      # On a pull request, do not commit. Just report whether the
       # checked-in images match the sources, so a stale diagram cannot be
-      # merged. This also avoids the permission failure that commit-to-PR
-      # hits on forks.
+      # merged. This also avoids the permission failure that
+      # commit-to-PR hits on forks.
+      #
+      # `git status --porcelain` rather than `git diff --quiet`: diff
+      # alone does not report untracked additions, and after the delete
+      # step above a newly named file arrives as untracked.
       - name: Check rendered diagrams are up to date (PR only)
         if: github.event_name == 'pull_request'
         run: |
-          if ! git diff --quiet --exit-code -- docs/architecture/rendered; then
+          if [ -n "$(git status --porcelain -- docs/architecture/rendered)" ]; then
             echo '::error::Rendered diagrams are out of date.'
-            echo 'Run the render script locally and commit docs/architecture/rendered,'
-            echo 'or merge to main and let the workflow commit them.'
-            git diff --stat -- docs/architecture/rendered
+            echo 'Run docs/architecture/render.sh and commit the result,'
+            echo 'or merge to main and let the workflow commit it.'
+            git status --short -- docs/architecture/rendered
             exit 1
           fi
           echo 'Rendered diagrams are up to date.'
 
-      # On a push to main, commit the refreshed images so the README and the
-      # docs site show current diagrams without anyone installing Graphviz.
+      # On a push to main, commit the refreshed images so the README and
+      # docs site show current diagrams without anyone installing
+      # Graphviz. `git add -A` on the directory stages deletions as well
+      # as additions, which is what retires an orphaned image.
       - name: Commit rendered diagrams (main only)
         if: github.event_name == 'push' && github.ref == 'refs/heads/main'
         run: |
           git config user.name  'github-actions[bot]'
           git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
-          git add docs/architecture/rendered
+          git add -A docs/architecture/rendered
           if git diff --cached --quiet; then
             echo 'No diagram changes to commit.'
             exit 0
