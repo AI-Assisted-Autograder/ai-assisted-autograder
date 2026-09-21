@@ -17,19 +17,17 @@ title grading_task -- ai_needed and ai_status
 skinparam shadowing false
 skinparam defaultFontName Helvetica
 
-[*] --> Marking : submission autograder\nfinishes functional testing\nand creates one task per target
+[*] --> Marking : instructor's suite has exited;\nthe AI phase creates one task\nper REGISTERED target
 
-state "Applying ai_feedback_policy" as Marking {
-  state "policy = NEVER" as c_never
-  state "policy = ON_FAILURE" as c_onfail
-  state "policy = ALWAYS" as c_always
-  state "policy = AUTOGRADER" as c_auto
+state "Resolving ai_needed\n(AI phase)" as Marking {
+  state "policy = NEVER or ALWAYS:\ndecided by config alone" as c_policy
+  state "policy = AUTOGRADER:\ndid the instructor's suite call\nrequest_ai_feedback(target)?" as c_auto
 }
 
-Marking --> NOT_NEEDED : NEVER,\nor ON_FAILURE and\nall tests passed
-Marking --> NEEDED : ON_FAILURE and a test failed\n(reason TEST_FAILURE)
+Marking --> NOT_NEEDED : NEVER\n(reason POLICY_NEVER)
+Marking --> NOT_NEEDED : AUTOGRADER and the suite\nnever requested it\n(reason NOT_REQUESTED)
 Marking --> NEEDED : ALWAYS\n(reason POLICY_ALWAYS)
-Marking --> NEEDED : instructor's autograder logic\nsays so (reason AUTOGRADER_RULE)
+Marking --> NEEDED : AUTOGRADER and the suite\nrequested it\n(reason AUTOGRADER_REQUEST)
 
 note right of NOT_NEEDED #FFF8DC
   Marking is the instructor's only lever, and it
@@ -50,7 +48,7 @@ NEEDED : **This is the work queue.** The nightly
 NEEDED : trigger queries it to decide which
 NEEDED : submissions to rerun.
 
-NEEDED --> DONE : AI component generated feedback\nand wrote the rows
+NEEDED --> DONE : AI phase generated feedback.\nDuring the submission run if the\ntarget is IMMEDIATE, on a\ntriggered rerun if NIGHTLY
 NEEDED --> NEEDED : attempt failed,\nattempt_count < 3
 NEEDED --> GAVE_UP : attempt_count reached 3
 
@@ -71,11 +69,18 @@ NOT_NEEDED --> [*]
 GAVE_UP --> [*]
 
 note right of Marking #FFF8DC
-  The policy is the instructor's static default
-  per target, set in the web app. The autograder
-  applies it per submission. AUTOGRADER hands
-  the decision to the instructor's own code, for
-  conditions no generic rule captures.
+Config and code, chosen per target. NEVER and
+  ALWAYS are decided by the dropdown alone and
+  need no programming. AUTOGRADER delegates the
+  per-submission decision to the instructor's
+  test suite, which calls request_ai_feedback
+  for the targets it wants graded.
+
+  AUTOGRADER is the default because the usual
+  rule, "explain it when the tests fail", is one
+  line of the instructor's own code and can be
+  refined to any condition she likes without
+  touching this system.
 end note
 
 note as N1 #FFF8DC
@@ -92,6 +97,13 @@ note as N1 #FFF8DC
   still marked NEEDED. attempt_count exists
   solely to stop a permanently broken target
   being retried every night forever.
+
+  The same mechanism carries mixed-mode
+  submissions. After the IMMEDIATE pass, NIGHTLY
+  tasks are still NEEDED, so the submission
+  enters the queue with no extra flag, and the
+  IMMEDIATE tasks are skipped on the rerun
+  because they are already DONE.
 end note
 
 note as N2 #FFF8DC
@@ -99,16 +111,16 @@ note as N2 #FFF8DC
   grading_task.ai_needed decides WHETHER a
   target deserves feedback. It is the token
   saving, and the instructor controls it through
-  ai_feedback_policy and their own autograder
-  logic.
+  ai_feedback_policy and, under AUTOGRADER,
+  through her own test suite.
 
   submission.ai_graded_submitted_at decides
   whether this submission is finished. The
-  nightly trigger filters on it, so a graded
-  submission is never rerun. The autograder
-  re-checks it on entry, which catches reruns
-  the trigger did not cause, such as an
-  instructor debugging the autograder.
+  nightly trigger filters on it, so a fully
+  graded submission is never rerun. The AI phase
+  re-checks it, which catches reruns the trigger
+  did not cause, such as an instructor debugging
+  the autograder.
 
   Set the guard when no task is still NEEDED,
   counting GAVE_UP as settled. Setting it while

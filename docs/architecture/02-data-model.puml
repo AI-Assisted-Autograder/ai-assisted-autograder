@@ -6,10 +6,11 @@
 ' Changes in this revision:
 '   grading_target.ai_feedback_policy -- the instructor's static
 '     per-target default, set in the web app.
+'   grading_target.feedback_mode -- IMMEDIATE or NIGHTLY, per target
+'     rather than per assignment, so one submission can mix the two.
 '   grading_task.ai_needed + ai_needed_reason -- the per-submission
-'     marker. Set by the submission autograder from the functional test
-'     result, from the policy, or from instructor-controlled rules.
-'     Also settable by the instructor from the dashboard.
+'     marker, resolved by the AI phase after the instructor's suite
+'     has exited.
 ' =====================================================================
 
 title Logical Data Model
@@ -37,19 +38,17 @@ entity "assignment" as assignment #DCEFD9 {
   * course_id : uuid <<FK>>
   * platform : text <<GRADESCOPE>>
   * platform_assignment_id : text
-  * grading_mode : text <<IMMEDIATE|NIGHTLY>>
   name : text
   is_active : boolean
   created_at : timestamptz
   --
   unique: platform, platform_assignment_id
   --
-  grading_mode is the instructor's
-  choice per assignment. It is read
-  by the autograder script to decide
-  whether to run AI grading inline,
-  and by the nightly trigger to
-  decide which assignments to rerun.
+  No mode column. Feedback mode is per
+  target, on grading_target. The web
+  app can still offer "apply to all
+  targets" as a convenience, which
+  needs UI but no schema.
 }
 
 entity "grading_target" as target #DCEFD9 {
@@ -59,29 +58,40 @@ entity "grading_target" as target #DCEFD9 {
   * identifier : text
   * kind : text <<METHOD|CLASS|FILE>>
   * ai_feedback_policy : text
+  * feedback_mode : text <<IMMEDIATE|NIGHTLY>>
   max_score : numeric
   display_order : integer
   --
   FR-2, FR-3.
-  ai_feedback_policy is the
-  instructor's static default for this
-  target, chosen in the web app:
-    ON_FAILURE -- mark only when this
-      target's functional tests fail.
-      The usual case.
-    ALWAYS -- mark every submission,
-      including passing code, for
-      style or design feedback that no
-      test can detect.
+  ai_feedback_policy is set per target
+  in the web app:
+    AUTOGRADER -- the instructor's test
+      suite decides, per submission, by
+      calling request_ai_feedback().
+      The default and the usual case.
+    ALWAYS -- mark every submission
+      regardless of outcome, for style
+      or design feedback that no test
+      can detect.
     NEVER -- never mark. For targets
       graded purely by tests.
-    AUTOGRADER -- the instructor's own
-      autograder logic decides.
   --
-  This is only the default. The
-  submission autograder writes the
-  actual per-submission marker onto
-  grading_task.ai_needed.
+  There is no ON_FAILURE value. Marking
+  on failures is one line in the
+  instructor's suite, and any other
+  rule (a subset of failures, a
+  superset, a partial-credit threshold)
+  is equally expressible there. A
+  policy value could only duplicate
+  what the code already says.
+  --
+  feedback_mode is also per target:
+    IMMEDIATE -- the AI phase grades it
+      during the submission run.
+    NIGHTLY -- it is left for a
+      triggered rerun.
+  One submission may mix the two. See
+  the mixed-mode note below.
 }
 
 entity "target_file_pattern" as tfile #DCEFD9 {
@@ -117,8 +127,13 @@ entity "llm_provider_config" as pcfg #DCEFD9 {
   is_primary : boolean
   --
   FR-23, NFR-11.
-  Secrets live in the secret store,
-  never in this table.
+  Which providers and models to use,
+  and which is primary. Never a key:
+  per AD-5 the instructor's LLM API
+  key lives in the autograder
+  container's environment, so this
+  table says WHAT to call and the
+  container supplies the credential.
 }
 
 ' ---------------------------------------------------------------------
@@ -182,16 +197,17 @@ entity "grading_task" as task #FBE6D4 {
   unique: submission_id,
           grading_target_id
   --
-  **ai_needed is the marker.** Written
-  by the submission autograder after
-  functional testing. See the note
-  below for who sets it and why.
+  **ai_needed is the marker.** Resolved
+  by the AI phase once the
+  instructor's suite has exited. See
+  the note below for who decides.
   --
   ai_needed_reason records WHICH rule
-  fired:
-    TEST_FAILURE
+  decided:
+    AUTOGRADER_REQUEST
     POLICY_ALWAYS
-    AUTOGRADER_RULE
+    POLICY_NEVER
+    NOT_REQUESTED
   Worth storing. Without it nobody can
   explain why a passing target got
   feedback, or audit the marking rules
@@ -323,18 +339,21 @@ note as N1b #FFF8DC
   functional testing, applying the target's
   ai_feedback_policy:
 
-  ON_FAILURE  failing test_outcome exists
-              -> true, reason TEST_FAILURE
-              otherwise false
   ALWAYS      -> true, reason POLICY_ALWAYS
-  NEVER       -> false
-  AUTOGRADER  the instructor's own logic decides
-              -> reason AUTOGRADER_RULE
+  NEVER       -> false, reason POLICY_NEVER
+  AUTOGRADER  did the instructor's suite call
+              request_ai_feedback for this
+              target during this run?
+              yes -> true, AUTOGRADER_REQUEST
+              no  -> false, NOT_REQUESTED
+
+  Resolved by the AI phase, after the
+  instructor's suite has exited, because only
+  then is the full set of requests known.
 
   All of this happens during the submission
-  autograder run, which is the instructor's only
-  lever. There is no later "grade it after all"
-  path.
+  autograder run. There is no later "grade it
+  after all" path.
 
   Why a stored column rather than a query over
   test_outcome: the rule is not always
@@ -347,9 +366,58 @@ note as N1b #FFF8DC
 end note
 
 note as N2 #FFF8DC
+  **Mixed-mode submissions are normal**
+  feedback_mode is per target, so one submission
+  can have IMMEDIATE targets graded during the
+  submission run and NIGHTLY targets left for a
+  rerun. results.json is then written twice with
+  different content, and the student sees
+  feedback arrive in two waves.
+
+  This needs no extra machinery. After the
+  immediate pass the NIGHTLY tasks are still
+  NEEDED, so ai_graded_submitted_at stays NULL
+  and tonight's trigger picks the submission up.
+  After the rerun nothing is NEEDED and the
+  guard is set.
+
+  One consequence to accept: an IMMEDIATE target
+  whose grading failed is also still NEEDED, so
+  it is retried on the nightly run. Its feedback
+  arrives the next morning instead of at once.
+  That is a reasonable degradation, but say so
+  in the instructor guide rather than letting it
+  surprise someone.
+end note
+
+note as N2b #FFF8DC
+  **A registered target with no outcome is an
+  error.** If the instructor's suite never calls
+  record_outcome for a target registered on this
+  assignment, the AI phase fails the autograder
+  run with a diagnostic naming the missing
+  targets.
+
+  Rationale: the alternative is a silent skip,
+  and a silently skipped target produces no
+  feedback with no explanation, which is the
+  failure mode hardest to debug from the
+  outside.
+
+  One thing to weigh: on Gradescope this error
+  is visible to the student, not just the
+  instructor, and it blocks their score. That is
+  the correct trade for a misconfigured
+  assignment that needs fixing immediately, but
+  the message should say plainly that the
+  assignment is misconfigured and the student
+  need do nothing.
+end note
+
+note as N2c #FFF8DC
   **Open decisions still outstanding**
-  OQ-1  "deduction" (FR-10) is undefined. Derive
-        it as a view, not a column:
+  OQ-1  "deduction" (FR-10) undefined. Derive as
+        a view, not a column:
         EXISTS failing test_outcome
         OR feedback.suggested_score < max_score
   OQ-2  confidence (FR-28) has a column but no
@@ -357,9 +425,6 @@ note as N2 #FFF8DC
   OQ-4  resubmissions. As drawn every attempt is
         graded. is_active_attempt exists if a
         latest-only policy is chosen.
-  OQ-11 where LLM keys and DB credentials live,
-        given the AI component runs inside the
-        platform's container.
 end note
 
 note as N3 #FFF8DC

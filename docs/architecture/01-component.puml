@@ -3,10 +3,16 @@
 ' Automated Code Feedback -- Component Architecture
 ' Traces to: NFR-3, NFR-4, NFR-11, FR-37, FR-38, FR-39
 '
-' Key structural fact: the AI grading component runs INSIDE the
-' platform autograder script, in both immediate and nightly mode. The
-' nightly job runner only triggers reruns. It does not generate
-' feedback.
+' Two structural facts that drive everything else:
+'
+'  1. The instructor's own test suite IS the autograder. We do not
+'     invoke it. It imports our reporting library and calls us with the
+'     target names the instructor registered in the web app. Control is
+'     inverted relative to a framework: we ship a library, not a runner.
+'
+'  2. The AI grading component runs INSIDE the platform autograder
+'     container, in both immediate and nightly mode. The nightly job
+'     runner only triggers reruns; it never calls an LLM.
 ' =====================================================================
 
 title Component Architecture
@@ -21,9 +27,10 @@ legend top right
   |= Colour |= Owner |= Stream |
   |<#D6E4F0>| Student A | AI grading and LLM orchestration |
   |<#DCEFD9>| Student B | Web app, DB schema, repository layer |
-  |<#FBE6D4>| Student C | Platform integration, autograder script |
+  |<#FBE6D4>| Student C | Reporting library, packager, nightly trigger |
   |<#EDE0F0>| Student D | Requirements, tests, CI/CD, docs |
-  |<#E8E8E8>| -- | External, not built by us |
+  |<#FFF2CC>| Instructor | Written per course, NOT by us |
+  |<#E8E8E8>| -- | External systems |
 endlegend
 
 actor Instructor as instr
@@ -55,10 +62,14 @@ cloud "Gradescope (or other LMS)" as gs #E8E8E8 {
   [Submission view\n(Rerun Autograder)] as gs_rerun #E8E8E8
 
   package "Autograder Container" as agbox #E8E8E8 {
-    [Autograder Entrypoint] as ag #FBE6D4
-    [Functional Test Runner\n(JUnit, pytest, ...)] as junit #FBE6D4
+
+    [Autograder Script\n(run_autograder)] as script #FFF2CC
+    [Instructor's Test Suite\n(JUnit / pytest / ...)] as tests_i #FFF2CC
+
+    [Reporting Library\nJava jar + Python pkg] as wrapper #FBE6D4
+
+    [AI Grading Phase] as aigrade #D6E4F0
     [results.json Packager] as packager #FBE6D4
-    [AI Grading Component] as aigrade #D6E4F0
   }
 }
 
@@ -69,7 +80,7 @@ cloud "LLM Providers" as llms #E8E8E8 {
 }
 
 ' ---------------------------------------------------------------------
-' Nightly trigger -- thin by design
+' Nightly trigger
 ' ---------------------------------------------------------------------
 package "Repository / CI-CD" #EDE0F0 {
   [Nightly Trigger Job\n(Playwright / Selenium)] as trigger #FBE6D4
@@ -83,78 +94,123 @@ package "Repository / CI-CD" #EDE0F0 {
 ' Published interfaces -- THE CONTRACTS
 ' ---------------------------------------------------------------------
 interface "IGradingRepository" as IRepo
+interface "IReportingApi" as IReport
 interface "ILearningPlatform" as IPlat
 interface "ILLMProvider" as ILLM
-interface "IGradingClient" as IClient
 
 repo -up- IRepo
+be -up- IReport
 trigger -up- IPlat
 aigrade -up- ILLM
-be -up- IClient
 
 ' ---------------------------------------------------------------------
 ' Wiring
 ' ---------------------------------------------------------------------
-instr --> fe : configures targets, rubrics,\ngrading mode, reviews quality
+instr --> fe : registers targets, rubrics,\nai_feedback_policy, feedback_mode
+instr --> script : writes the autograder script\nand the test suite
 fe --> be : HTTPS / JSON
 be ..> IRepo
 repo --> db : SQL
 
 stud --> gs_ui : submits code
-ag --> junit : run functional tests
-ag --> aigrade : invoke in immediate mode, or on\nrerun when the submission is\nnot already AI-graded
-ag --> packager
+gs_ui --> script : container runs\nrun_autograder
+script --> tests_i : 1. run the test suite
+script --> aigrade : 2. invoke the AI phase
+
+tests_i --> wrapper : record_outcome(target, ...)\nrequest_ai_feedback(target)
+wrapper ..> IReport : HTTPS
+
+aigrade --> packager
 packager --> gs_fb : results.json
 gs_fb --> stud : feedback
 
-aigrade ..> IClient : HTTPS.\nread rubric + marks,\nwrite feedback + scores
+aigrade ..> IReport
 aigrade ..> ILLM
 p_claude <-- aigrade
 p_openai <-- aigrade
 p_gemini <-- aigrade
 
 cron --> trigger : nightly
-trigger --> gs_rerun : login, click\n"Rerun Autograder"\nper submission needing AI
+trigger --> gs_rerun : login, click "Rerun Autograder"\nper submission needing AI
 gs_rerun --> agbox : re-runs the container
 
 ci --> tests
 tests ..> be
 tests ..> aigrade
+tests ..> wrapper
 tests ..> trigger
 
-note bottom of agbox #FFF8DC
-  **OQ-11, open: where do credentials live?**
-  This container is Gradescope's infrastructure,
-  not ours.
+note bottom of tests_i #FFF8DC
+  **The instructor owns the two yellow boxes.**
+  It is an ordinary JUnit or pytest suite. We do
+  not generate it, invoke it, or constrain how
+  it is structured. It imports the reporting
+  library and calls us with the target names the
+  instructor registered in the web app.
 
-  (a) Container holds the LLM API key and talks
-      to the DB directly. Simplest code. Means
-      every adopting instructor pastes their own
-      API key into Gradescope's autograder
-      settings, visible to any TA with access.
+  The marking logic lives here too. Under the
+  AUTOGRADER policy, whether a target gets AI
+  feedback on failures only, on a subset, or on
+  a superset is a decision she expresses in this
+  code.
 
-  (b) Container holds only a per-assignment
-      token and calls IGradingClient, which does
-      the LLM work on our side. Keys stay on our
-      infrastructure. Needs a synchronous
-      generate-feedback endpoint.
+  run_autograder is hers as well: it decides to
+  run her suite and then invoke our AI phase.
+end note
 
-  Recommend (b) for an OER. The diagram shows
-  (b). Switching to (a) is local to this package.
+note right of wrapper #FFF8DC
+  Thin by design: two calls, an HTTPS client,
+  and argument validation. One artifact per
+  language the courses use.
+
+  It rejects an unregistered target name loudly
+  on the first call, failing her test run. A
+  typo that silently succeeds is the worst
+  failure mode here: everything looks like it
+  worked and the feedback simply never appears.
+end note
+
+note right of aigrade #FFF8DC
+  Invoked by the instructor's autograder script
+  as a separate command after her suite exits,
+  not from inside her test code.
+
+  Resolves the marks, errors if a registered
+  target was never reported, grades the tasks
+  whose target is marked IMMEDIATE, leaves
+  NIGHTLY ones alone, and packages results.json.
 end note
 
 note right of trigger #FFF8DC
-  Deliberately thin: log in, then click Rerun
-  Autograder once per submission that still has
-  PENDING tasks. It does NOT call an LLM and
-  does NOT write feedback. Everything else
-  happens inside the container.
+  Log in, then click Rerun Autograder once per
+  submission that still has tasks marked
+  ai_needed. It does NOT call an LLM and does
+  NOT write feedback.
 end note
 
-note right of repo
-  Student B owns the schema and migrations.
-  A, C and D go through the repository layer
-  or the REST API, never raw SQL.
+note bottom of llms #FFF8DC
+  **AD-5: the container holds the instructor's
+  own LLM API key** and calls the providers
+  directly. Our service never proxies an LLM
+  call and never sees a provider key.
+
+  For an OER this is the right default: each
+  adopting institution uses its own key and pays
+  its own bill, so nobody has to run a metered
+  service or handle someone else's billing.
+
+  The container still holds NO database
+  credential. It reaches our data only through
+  IReportingApi with a per-assignment token.
+
+  Two things to settle in the instructor guide,
+  not in code. How the key gets into the
+  container, which depends on what secret
+  facility the platform offers; if the only
+  route is the uploaded autograder zip, say so
+  plainly, because a key in a zip is a key in a
+  backup. And that rotation means touching every
+  assignment that carries it.
 end note
 
 @enduml

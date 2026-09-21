@@ -1,15 +1,15 @@
 @startuml 04-sequence-nightly
 ' =====================================================================
-' Nightly mode: functional tests on submission, AI grading on a
-' per-submission triggered rerun.
+' NIGHTLY targets: graded on a per-submission triggered rerun.
 ' Traces to: FR-29..FR-36, FR-41..FR-47, CI-3, CI-4
 '
-' The nightly job runner ONLY triggers reruns, one submission at a
-' time. It does not call an LLM and does not write feedback. The same
-' AI component as immediate mode does the work, inside the container.
+' Phase 1 is the same submission run as 03. The only difference is what
+' the AI phase does with a task whose target is marked NIGHTLY: it
+' leaves it alone. A submission with both kinds of target goes through
+' both diagrams.
 ' =====================================================================
 
-title Nightly Mode -- AI grading deferred to a per-submission rerun
+title NIGHTLY targets -- graded on a per-submission rerun
 
 skinparam shadowing false
 skinparam defaultFontName Helvetica
@@ -21,48 +21,70 @@ participant "Scheduled\nWorkflow (cron)" as cron #EDE0F0
 participant "Nightly Trigger\n(Playwright)" as trig #FBE6D4
 participant "Gradescope" as gs #E8E8E8
 box "Autograder Container" #F7F7F7
-  participant "Autograder\nEntrypoint" as ag #FBE6D4
-  participant "Test Runner" as junit #FBE6D4
-  participant "AI Grading\nComponent" as ai #D6E4F0
+  participant "Autograder Script\n(run_autograder)" as script #FFF2CC
+  participant "Instructor's\nTest Suite" as ti #FFF2CC
+  participant "Reporting\nLibrary" as wrap #FBE6D4
+  participant "AI Grading\nPhase" as aip #D6E4F0
 end box
 participant "Web API" as api #DCEFD9
 database "Grading DB" as db #DCEFD9
 participant "LLM\nProviders" as llm #E8E8E8
 
-== Phase 1: on submission -- tests only, mark the work ==
+== Phase 1: on submission -- mark the work, grade nothing ==
 
 stud -> gs : submit code
-gs -> ag : run autograder
-ag -> api : GET /assignments/{platform_id}/config
-api --> ag : 200 {grading_mode: NIGHTLY, targets[]}
-ag -> junit : run tests
-junit --> ag : TestOutcome[]
-ag -> api : POST /submissions\n{platform_submission_id, submitted_at,\n outcomes[], source_files[]}
-api -> db : upsert submission\n(idempotent on platform_submission_id)
-api -> db : insert test_outcome rows
-api -> db : insert grading_task rows.\nai_needed set per target from\nai_feedback_policy + test result\n(see 06)
-api --> ag : 200 {submission_id}
+gs -> script : run_autograder
+script -> ti : run the test suite
 
-note over ag #FFF8DC
-  grading_mode is NIGHTLY, so the AI component
-  is not invoked. Targets whose tests passed are
-  marked ai_needed = false and cost nothing
-  further. The ai_needed = true rows are what
-  the nightly trigger looks for.
+loop for each test
+  ti -> wrap : record_outcome(target, ...)
+  wrap -> api : POST /outcomes
+  api -> db : upsert submission,\ninsert test_outcome
+end
+
+opt her marking logic requests feedback
+  ti -> wrap : request_ai_feedback(target)
+  wrap -> api : POST /ai-requests
+  api -> db : record the request
+end
+
+ti --> script : suite exits
+script -> aip : invoke AI phase
+aip -> api : POST /submissions/{id}/resolve-marks
+api -> db : resolve ai_needed per target,\ninsert grading_task rows
+api --> aip : 200 {tasks[], feedback_mode,\nai_graded_submitted_at}
+
+note over aip #FFF8DC
+  Every task here has feedback_mode = NIGHTLY,
+  so the AI phase grades nothing and spends no
+  tokens. The tasks stay NEEDED, so
+  ai_graded_submitted_at stays NULL, which is
+  what puts this submission in tonight's queue.
+  No extra bookkeeping.
 end note
 
-ag -> ag : package results.json\n(test results only)
-ag -> gs : write results.json
+aip -> aip : package results.json\n(test results only)
+aip --> script : results.json
+script -> gs : write results.json
 gs --> stud : test results now,\nfeedback tomorrow
 
 == Phase 2: nightly -- trigger a rerun per submission ==
 
 cron -> trig : invoke
 trig -> api : POST /trigger-runs (start)
-trig -> api : GET /submissions/pending-ai\n?mode=NIGHTLY
+trig -> api : GET /submissions/pending-ai
 api -> db : SELECT submission JOIN grading_task\nWHERE ai_needed AND ai_status = 'PENDING'\nAND ai_graded_submitted_at IS NULL
 db --> api : submission list
-api --> trig : 200 {submissions[]\nwith platform ids}
+api --> trig : 200 {submissions[] with platform ids}
+
+note right of api #FFF8DC
+  The query does not mention feedback_mode. Any
+  task still NEEDED qualifies, which means an
+  IMMEDIATE target whose grading failed earlier
+  is retried tonight for free. Its feedback
+  arrives next morning rather than at once, a
+  degradation worth documenting.
+end note
 
 trig -> gs : log in
 
@@ -73,109 +95,92 @@ loop for each submission needing AI grading
 end
 
 note right of trig #FFF8DC
-  Rerun is per submission, so the trigger job
-  iterates only submissions that actually need
-  work. It never touches an already-graded one.
+  Rerun is per submission, so the trigger only
+  touches submissions that need work.
 
-  This is still the one fragile step in the
-  design: Gradescope has no public API, so
-  locating a submission and clicking its rerun
-  button is UI automation and will break when
-  they reskin. Keep every selector in one file.
+  Still the one fragile step: Gradescope has no
+  public API, so locating a submission and
+  clicking its rerun button is UI automation and
+  will break when they reskin. Keep every
+  selector in one file.
 
   Consider throttling the loop. A term's worth
   of submissions clicked as fast as Playwright
-  can manage looks like abuse from the outside.
+  manages looks like abuse from the outside.
 end note
 
 trig -> api : POST /trigger-runs/{id}/finish
 api -> db : update trigger_run
 
-== Phase 3: the rerun -- AI grading for marked targets ==
+== Phase 3: the rerun -- grade the NIGHTLY tasks ==
 
-gs -> ag : re-run container\n(this submission only)
-ag -> api : GET /assignments/{platform_id}/config
-api --> ag : 200 {grading_mode: NIGHTLY, targets[]}
+gs -> script : run_autograder again
+script -> ti : the test suite runs again
+loop for each test
+  ti -> wrap : record_outcome(target, ...)
+  wrap -> api : POST /outcomes
+  api -> db : upsert, refresh test_outcome
+end
+ti --> script : suite exits
 
-ag -> api : GET /submissions/{platform_submission_id}/state
-api -> db : SELECT submitted_at,\nai_graded_submitted_at
-db --> api : state
-api --> ag : 200 {submitted_at,\nai_graded_submitted_at}
+script -> aip : invoke AI phase
+aip -> api : POST /submissions/{id}/resolve-marks
+api --> aip : 200 {tasks[], feedback_mode,\nai_graded_submitted_at}
 
-alt already AI-graded (ai_graded_submitted_at = submitted_at)
-  note right of ag #FFF8DC
-    **The token guard.** Checked before any task
-    query and before any LLM call. Reruns happen
-    for reasons other than our nightly job: an
+alt already fully graded (ai_graded_submitted_at = submitted_at)
+  note right of aip #FFF8DC
+    **The token guard.** Reruns happen for
+    reasons other than our nightly job: an
     instructor debugging the autograder, a TA
-    re-running a flaky test. None of those
-    should re-bill the LLM.
+    re-running a flaky test. None should re-bill
+    the LLM.
   end note
-  ag -> junit : run tests again
-  junit --> ag : TestOutcome[]
-  ag -> api : GET /submissions/{id}/feedback
-  api -> db : SELECT feedback WHERE is_selected
-  api --> ag : 200 {stored feedback}
-  ag -> ag : package results.json\n(tests + stored feedback)
+  aip -> api : GET /submissions/{id}/feedback
+  api --> aip : 200 {stored feedback}
+  aip -> aip : package results.json\n(tests + stored feedback)
 
-else not yet AI-graded
-  ag -> junit : run tests
-  junit --> ag : TestOutcome[]
-  ag -> api : POST /submissions (upsert, refresh outcomes)
-  api --> ag : 200 {submission_id}
-
-  ag -> api : GET /submissions/{id}/pending-tasks
-  api -> db : SELECT grading_task\nWHERE ai_status = 'PENDING'
-  db --> api : rows
-  api --> ag : 200 {tasks[]}
-
-  loop for each task with ai_needed
-    ag -> ai : grade(task)
-    ai -> api : GET /tasks/{id}/request
+else work remains
+  loop for each task with ai_needed and ai_status = PENDING
+    aip -> api : GET /tasks/{id}/request
     api -> db : SELECT rubric, guidance,\ntest_outcome, submission_file
-    api --> ai : 200 {FeedbackRequest}
-    ai -> ai : build prompt\n(rubric + guidance +\noutcomes + code)
+    api --> aip : 200 {FeedbackRequest}
+    aip -> aip : build prompt
 
     group Multi-provider fan-out [FR-23, FR-27]
       par
-        ai -> llm : Claude: generate
-        llm --> ai : response
+        aip -> llm : Claude: generate
+        llm --> aip : response
       else
-        ai -> llm : ChatGPT: generate
-        llm --> ai : response
+        aip -> llm : ChatGPT: generate
+        llm --> aip : response
       end
-      ai -> ai : compare, estimate confidence,\nselect one
+      aip -> aip : compare, estimate confidence
     end
 
-    ai -> api : POST /tasks/{id}/feedback
+    aip -> api : POST /tasks/{id}/feedback
     api -> db : insert feedback rows,\ninsert feedback_comparison,\nUPDATE ai_status = DONE
-    api --> ai : 201
-    ai --> ag : FeedbackItem
+    api --> aip : 201
   end
 
-  ag -> api : POST /submissions/{id}/ai-complete
-  api -> db : UPDATE submission\nSET ai_graded_submitted_at = submitted_at\nWHERE NO task is still NEEDED\n(GAVE_UP counts as settled)
-  api --> ag : 200 {guard_set: true|false}
-
-  note right of api #FFF8DC
-    Set only when no task is still NEEDED. On
-    partial failure it stays NULL, so tomorrow's
-    trigger picks the submission up and retries
-    just the failed targets. Once set it is never
-    cleared, and the trigger stops selecting this
-    submission.
+  note right of aip #FFF8DC
+    Tasks already DONE from an earlier IMMEDIATE
+    pass are skipped by ai_status, so a
+    mixed-mode submission does not pay twice for
+    its IMMEDIATE targets.
   end note
 
-  ag -> ag : package results.json\n(tests + AI feedback)
+  aip -> api : POST /submissions/{id}/ai-complete
+  api -> db : UPDATE submission\nSET ai_graded_submitted_at = submitted_at\nWHERE NO task is still NEEDED\n(GAVE_UP counts as settled)
+  api --> aip : 200 {guard_set}
+  aip -> aip : package results.json\n(tests + all feedback)
 end
 
-ag -> gs : write results.json
+aip --> script : results.json
+script -> gs : write results.json
 gs --> stud : feedback now visible
 
 note over trig, db #FFF8DC
   **OQ-5, still open: failure policy.**
-  Rules to ratify before A and C write two
-  different retry mechanisms:
   1. A failed task stays NEEDED and increments
      attempt_count. The next night retries it
      while attempt_count < 3, then GAVE_UP.
@@ -183,9 +188,9 @@ note over trig, db #FFF8DC
      only, never on 400.
   3. If the trigger cannot find or click a
      submission's rerun button, record it on
-     trigger_run and surface it to the
-     instructor. A silent trigger failure looks
-     identical to "no feedback needed."
+     trigger_run and surface it. A silent trigger
+     failure looks identical to "no feedback
+     needed."
 end note
 
 @enduml

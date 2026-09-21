@@ -17,31 +17,35 @@ participant "Web Backend\n/ REST API" as be #DCEFD9
 participant "Repository\nLayer" as repo #DCEFD9
 database "Grading DB" as db #DCEFD9
 
-== Configure an assignment and pick a mode [FR-1, FR-6] ==
+== Configure an assignment [FR-1, FR-6] ==
 
-instr -> fe : create assignment,\nchoose IMMEDIATE or NIGHTLY
-fe -> be : POST /assignments\n{platform_assignment_id, name,\ngrading_mode}
+instr -> fe : create assignment
+fe -> be : POST /assignments\n{platform_assignment_id, name}
 be -> repo : create_assignment()
 repo -> db : INSERT assignment
 be --> fe : 201 {assignment_id}
 
 note right of instr #FFF8DC
-  Mode is per assignment and changeable later.
-  It lives in the database, so switching modes
-  does not require re-uploading the autograder
-  zip to Gradescope.
+  **feedback_mode is per target**, so one
+  assignment can mix the two and one submission
+  can get feedback in two waves.
 
-  Rough guidance for the instructor guide:
-  IMMEDIATE suits small classes and formative
-  work where fast feedback is the point.
-  NIGHTLY suits large classes, deadline spikes,
-  and multi-provider comparison.
+  Both settings live in the database, so
+  changing either needs no re-upload of the
+  autograder zip.
+
+  Guidance for the instructor guide: mark the
+  one or two targets worth instant feedback as
+  IMMEDIATE and leave the rest NIGHTLY. Every
+  IMMEDIATE target adds LLM latency inside the
+  autograder timeout, and submissions arrive in
+  a spike before the deadline.
 end note
 
 == Define grading targets [FR-2, FR-3, FR-7] ==
 
 loop for each method or class to grade
-  instr -> fe : add target\n(identifier, kind, max_score,\nai_feedback_policy)
+  instr -> fe : add target\n(identifier, kind, max_score,\nai_feedback_policy, feedback_mode)
   fe -> be : POST /assignments/{id}/targets
   be -> repo : create_target()
   repo -> db : INSERT grading_target
@@ -54,17 +58,23 @@ end
 
 note right of instr #FFF8DC
   ai_feedback_policy is the instructor's control
-  over token spend. ON_FAILURE is the default and
-  means correct code costs nothing. ALWAYS is for
-  style or design feedback no test can detect.
-  NEVER is for targets graded purely by tests.
-  AUTOGRADER delegates to the instructor's own
-  autograder logic.
+  over token spend:
+    AUTOGRADER (default) -- her test suite calls
+      request_ai_feedback for the targets it
+      wants graded, so correct code costs
+      nothing unless she says otherwise.
+    ALWAYS -- every submission, for style or
+      design feedback no test can detect.
+    NEVER -- targets graded purely by tests.
 
-  This is the only lever. It is applied during
-  the submission autograder run, and there is no
-  post-hoc path to request feedback on a
-  submission that has already been AI-graded.
+  **The target identifiers registered here are a
+  contract with her test suite.** She passes
+  these exact strings to record_outcome and
+  request_ai_feedback. Rename a target in the
+  web app and her suite stops matching, so the
+  UI should make renaming visibly consequential
+  and the API should reject unknown names
+  loudly. See OQ-12.
 end note
 
 == Attach rubric and feedback guidance [FR-4, FR-5, FR-13] ==

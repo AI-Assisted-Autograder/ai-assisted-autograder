@@ -3,22 +3,11 @@
 ' Key interfaces and extension points
 ' Traces to: FR-23, FR-24, FR-37..FR-40, NFR-3, NFR-4, NFR-11
 '
-' Changes in this revision:
-'   Rerun is PER SUBMISSION, so ILearningPlatform needs to locate an
-'   individual submission before clicking its rerun button. It no
-'   longer pulls submission files at all: the autograder script
-'   already has them.
-'
-'   No claim step. Rerun is per submission, so one container works on
-'   a submission at a time and there is nothing to race against.
-'
-'   AiNeedMarker is new: it applies the instructor's per-target
-'   ai_feedback_policy to the functional test outcomes to decide which
-'   targets need AI feedback at all.
-'
-'   + IGradingClient: the boundary the autograder container talks to.
-'     It runs on Gradescope infrastructure, so this is the only surface
-'     it gets, and it is how credentials stay on our side (OQ-11).
+' Shaped by AD-2: we ship a library, not a runner. The instructor's
+' test suite calls us, and her run_autograder invokes our AI phase.
+' There is therefore no ITestRunner and no IMarkingHook -- running
+' tests and deciding what needs feedback are both ordinary code in her
+' suite.
 ' =====================================================================
 
 title Key Interfaces and Extension Points
@@ -28,7 +17,107 @@ skinparam defaultFontName Helvetica
 skinparam classAttributeIconSize 0
 
 ' ---------------------------------------------------------------------
-' Platform abstraction -- Student C
+' What the instructor writes. Not ours.
+' ---------------------------------------------------------------------
+package "Written by the instructor" #FFF2CC {
+  class "Instructor's Test Suite" as ITS #FFF2CC {
+    Ordinary JUnit or pytest. Calls
+    the reporting library with the
+    target names registered in the
+    web app.
+    --
+    Under the AUTOGRADER policy, the
+    marking logic lives here: any
+    condition she can express in code
+    can decide whether a target gets
+    AI feedback.
+  }
+}
+
+' ---------------------------------------------------------------------
+' The library the instructor's suite calls -- Student C
+' ---------------------------------------------------------------------
+package "Reporting Library (Student C)" #FBE6D4 {
+
+  interface IReportingClient <<abstract>> {
+    +record_outcome(target, test_name,\n status, output, earned_score) : None
+    +request_ai_feedback(target, note) : None
+    --
+    The entire surface the instructor
+    touches. Two calls. Keep it this
+    small.
+  }
+
+  class JavaReporter {
+    Shipped as a jar for JUnit suites.
+  }
+
+  class PythonReporter {
+    Shipped as a package for pytest.
+  }
+
+  class FakeReporter {
+    Records calls in memory. Lets the
+    instructor guide's examples and
+    our own tests run offline.
+  }
+
+  IReportingClient <|.. JavaReporter
+  IReportingClient <|.. PythonReporter
+  IReportingClient <|.. FakeReporter
+
+  note bottom of IReportingClient #FFF8DC
+    **Validate the target name on the first
+    call.** These identifiers cross a process
+    boundary as bare strings, typed once in the
+    web app and again in the suite. A mismatch
+    must fail the instructor's test run loudly,
+    not record an outcome against nothing.
+    See OQ-12.
+  end note
+}
+
+ITS ..> IReportingClient
+
+' ---------------------------------------------------------------------
+' AI phase entrypoint -- Student C
+' ---------------------------------------------------------------------
+package "AI Phase entrypoint (Student C)" #FBE6D4 {
+
+  class AiPhaseEntrypoint {
+    -client : IGradingClient
+    -grader : AIGradingComponent
+    --
+    +main() : int
+    --
+    A command the instructor's
+    run_autograder invokes after her
+    test suite exits.
+    --
+    Resolves marks, errors if a
+    registered target was never
+    reported, grades tasks whose target
+    is IMMEDIATE, leaves NIGHTLY ones
+    NEEDED, packages results.json.
+  }
+
+  class ResultsPackager {
+    +to_platform_json(pkg) : dict
+    --
+    The only code that knows the
+    platform's results.json schema.
+    --
+    Called twice for a mixed-mode
+    submission: once during the
+    submission run, once on the rerun,
+    with different content each time.
+  }
+
+  AiPhaseEntrypoint --> ResultsPackager
+}
+
+' ---------------------------------------------------------------------
+' Platform automation -- Student C
 ' ---------------------------------------------------------------------
 package "Platform Integration (Student C)" #FBE6D4 {
 
@@ -41,16 +130,12 @@ package "Platform Integration (Student C)" #FBE6D4 {
   class GradescopePlatform {
     -page : playwright.Page
     -selectors : SelectorMap
-    --
-    +authenticate()
-    +find_submission(...)
-    +trigger_rerun(...)
   }
 
   class FakePlatform {
     Records rerun calls. Lets the
-    nightly trigger be tested with
-    no browser and no account.
+    trigger be tested with no browser
+    and no account.
   }
 
   class SelectorMap {
@@ -74,54 +159,16 @@ package "Platform Integration (Student C)" #FBE6D4 {
     --
     +run() : TriggerRunSummary
     --
-    Thin on purpose. Asks the service
-    which submissions still have
-    PENDING tasks, then clicks rerun on
-    each. Never calls an LLM.
+    Asks the service which submissions
+    still have tasks marked ai_needed,
+    then clicks rerun on each. Never
+    calls an LLM.
   }
-
-  class AutograderEntrypoint {
-    -client : IGradingClient
-    -runner : ITestRunner
-    -marker : AiNeedMarker
-    -grader : AIGradingComponent
-    --
-    +main() : int
-    --
-    Ships inside the platform
-    autograder zip. Decides from
-    grading_mode whether to invoke
-    the AI component now.
-  }
-
-  class AiNeedMarker {
-    +mark(targets, outcomes) : AiMark[]
-    --
-    Applies each target's
-    ai_feedback_policy to its test
-    outcomes. The AUTOGRADER policy
-    delegates to instructor-supplied
-    logic. Pure function of its
-    inputs, so it is the easiest
-    thing in the system to test.
-  }
-
-  AutograderEntrypoint --> AiNeedMarker
-
-  interface ITestRunner <<abstract>> {
-    +run(targets, submission_dir) : TestOutcome[]
-  }
-
-  class JUnitRunner
-  class PytestRunner
 
   ILearningPlatform <|.. GradescopePlatform
   ILearningPlatform <|.. FakePlatform
   GradescopePlatform --> SelectorMap
   NightlyTrigger ..> ILearningPlatform
-  ITestRunner <|.. JUnitRunner
-  ITestRunner <|.. PytestRunner
-  AutograderEntrypoint ..> ITestRunner
 }
 
 ' ---------------------------------------------------------------------
@@ -138,8 +185,8 @@ package "AI Grading (Student A)" #D6E4F0 {
     --
     +grade(task_id) : FeedbackItem
     --
-    Same code in both modes. The only
-    difference is who calls it.
+    Same code in both modes. Only the
+    caller's timing differs.
   }
 
   interface ILLMProvider <<abstract>> {
@@ -153,9 +200,9 @@ package "AI Grading (Student A)" #D6E4F0 {
   class OpenAIProvider
   class GeminiProvider
   class FakeProvider {
-    Deterministic canned responses.
-    Required so the test suite runs
-    in CI with no API key and no bill.
+    Deterministic canned responses, so
+    the test suite runs in CI with no
+    API key and no bill.
   }
 
   class PromptBuilder {
@@ -183,18 +230,15 @@ package "AI Grading (Student A)" #D6E4F0 {
   AIGradingComponent --> ConfidenceEstimator
 }
 
-AutograderEntrypoint --> AIGradingComponent
+AiPhaseEntrypoint --> AIGradingComponent
 
 ' ---------------------------------------------------------------------
-' The container's only window onto our data -- Student B
+' Service boundary -- Student B
 ' ---------------------------------------------------------------------
 package "Service Boundary (Student B)" #DCEFD9 {
 
   interface IGradingClient <<abstract>> {
-    +get_config(platform_assignment_id) : AssignmentConfig
-    +post_submission(ref, outcomes, files) : SubmissionResult
-    +get_submission_state(platform_submission_id) : SubmissionState
-    +get_pending_tasks(submission_id) : GradingTaskRef[]
+    +resolve_marks(platform_submission_id) : ResolveResult
     +get_feedback_request(task_id) : FeedbackRequest
     +post_feedback(task_id, result) : None
     +mark_ai_complete(submission_id) : bool
@@ -212,17 +256,16 @@ package "Service Boundary (Student B)" #DCEFD9 {
   }
 
   class FakeGradingClient {
-    In-memory. Lets the whole
-    autograder script be tested
-    offline.
+    In-memory. Lets the AI phase be
+    tested offline.
   }
 
   interface IGradingRepository <<abstract>> {
     +get_assignment_config(...) : AssignmentConfig
     +upsert_submission(ref) : str
-    +record_outcomes(...) : None
-    +create_pending_tasks(...) : GradingTaskRef[]
-    +create_tasks(submission_id, marks) : GradingTaskRef[]
+    +record_outcome(...) : None
+    +record_ai_request(submission_id, target) : None
+    +resolve_marks_and_create_tasks(submission_id) : ResolveResult
     +build_feedback_request(task_id) : FeedbackRequest
     +save_feedback(task_id, result) : None
     +mark_ai_complete_if_all_done(submission_id) : bool
@@ -239,8 +282,9 @@ package "Service Boundary (Student B)" #DCEFD9 {
   IGradingRepository <|.. InMemoryRepository
 }
 
+IReportingClient ..> IGradingClient : over HTTPS
 AIGradingComponent ..> IGradingClient
-AutograderEntrypoint ..> IGradingClient
+AiPhaseEntrypoint ..> IGradingClient
 NightlyTrigger ..> IGradingClient
 
 note as N1 #FFF8DC
@@ -250,26 +294,40 @@ note as N1 #FFF8DC
   host. The client is HTTPS from someone else's
   container. Collapsing them would mean shipping
   database credentials inside the autograder
-  zip, which is OQ-11 option (a).
+  zip.
+
+  Note the asymmetry decided in AD-5: the
+  container DOES hold the instructor's LLM API
+  key, and does NOT hold a database credential.
+  It reaches our data only through this client,
+  with a per-assignment token scoped to one
+  assignment's rows.
 
   The Web API implements the client surface on
-  top of the repository. Keeping the two
-  interfaces distinct is what makes the
-  credential boundary visible in code rather
-  than a deployment convention nobody remembers.
+  top of the repository. Keeping them distinct
+  is what makes that boundary visible in code
+  rather than a deployment convention nobody
+  remembers.
 end note
 
 note as N2 #FFF8DC
-  **Every interface ships with a fake.**
-  FakePlatform, FakeProvider, FakeGradingClient
-  and InMemoryRepository are not extras. They
-  are what lets four people work in parallel in
-  week two rather than week six, and what makes
-  TR-2 and TR-8 achievable with no Gradescope
-  account and no API bill.
+  **resolve_marks_and_create_tasks is where cost
+  control lives.** It applies each target's
+  ai_feedback_policy and, under AUTOGRADER, the
+  requests the instructor's suite made during
+  this run. It can only run after her suite has
+  exited, because only then is the full request
+  set known.
 
-  Rule: adding an abstract method means adding
-  it to the fake in the same commit.
+  It also returns the registered targets that
+  received no outcome. That is an error, not a
+  warning: the AI phase exits non-zero and the
+  autograder run fails.
+
+  Pure function of policy plus requests, so it
+  is the cheapest thing in the system to
+  unit-test and the most expensive to get wrong.
+  Student D should cover it first.
 end note
 
 note as N3 #FFF8DC
@@ -283,12 +341,16 @@ note as N3 #FFF8DC
 end note
 
 note as N4 #FFF8DC
-  **ITestRunner exists so the system is not
-  Java-only.** The SRS names JUnit, but a
-  generic autograder for CS courses will meet
-  pytest and others. Same shape as
-  ILearningPlatform: one interface, one
-  implementation to start.
+  **Every interface ships with a fake.**
+  FakeReporter, FakePlatform, FakeProvider,
+  FakeGradingClient and InMemoryRepository are
+  not extras. They are what lets four people
+  work in parallel in week two rather than week
+  six, and what makes TR-2 and TR-8 achievable
+  with no Gradescope account and no API bill.
+
+  Adding an abstract method means adding it to
+  the fake in the same commit.
 end note
 
 @enduml

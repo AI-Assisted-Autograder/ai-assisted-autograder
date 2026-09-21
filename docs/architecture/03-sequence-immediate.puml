@@ -1,13 +1,15 @@
 @startuml 03-sequence-immediate
 ' =====================================================================
-' Immediate mode: AI grading runs inline, on student submission.
+' A submission run, with IMMEDIATE targets graded inline.
 ' Traces to: FR-19..FR-28, FR-32..FR-36
 '
-' One pass. The student gets test results and AI feedback together.
-' No nightly job is involved at all.
+' Two things to note about ownership:
+'  * The instructor's autograder script drives both phases. It runs her
+'    test suite, then invokes our AI phase. We do not own run_autograder.
+'  * Her suite calls US. We never enumerate targets and invoke tests.
 ' =====================================================================
 
-title Immediate Mode -- AI grading inline on submission
+title Submission Run -- IMMEDIATE targets graded inline
 
 skinparam shadowing false
 skinparam defaultFontName Helvetica
@@ -16,109 +18,145 @@ skinparam maxMessageSize 220
 
 actor Student as stud
 participant "Gradescope" as gs #E8E8E8
-box "Autograder Container\n(Gradescope infrastructure)" #F7F7F7
-  participant "Autograder\nEntrypoint" as ag #FBE6D4
-  participant "Test Runner\n(JUnit)" as junit #FBE6D4
-  participant "AI Grading\nComponent" as ai #D6E4F0
+box "Autograder Container" #F7F7F7
+  participant "Autograder Script\n(run_autograder)" as script #FFF2CC
+  participant "Instructor's\nTest Suite" as ti #FFF2CC
+  participant "Reporting\nLibrary" as wrap #FBE6D4
+  participant "AI Grading\nPhase" as aip #D6E4F0
 end box
 participant "Web API" as api #DCEFD9
 database "Grading DB" as db #DCEFD9
 participant "LLM\nProviders" as llm #E8E8E8
 
 stud -> gs : submit code
-gs -> ag : run autograder
+gs -> script : run_autograder
 
-== Configuration and functional testing ==
-
-ag -> api : GET /assignments/{platform_id}/config
-api -> db : SELECT assignment, grading_target,\nrubric WHERE is_current
-db --> api : config
-api --> ag : 200 {grading_mode: IMMEDIATE,\ntargets[], rubrics[]}
-
-note right of ag #FFF8DC
-  grading_mode comes from the database, not
-  from the autograder zip. The instructor can
-  switch an assignment between modes in the web
-  app without re-uploading anything.
+note over script #FFF2CC
+  The instructor owns this script. It invokes
+  her test suite, then invokes our AI phase as a
+  separate command. Ordering and error handling
+  are hers.
 end note
 
-ag -> junit : run tests for configured targets
-junit --> ag : TestOutcome[]
+== Phase 1: functional testing. Her suite reports to us. ==
 
-ag -> api : POST /submissions\n{platform_submission_id, submitted_at,\n outcomes[], source_files[]}
-api -> db : upsert submission\n(idempotent on platform_submission_id)
-api -> db : insert test_outcome rows
-api -> db : insert grading_task rows.\nai_needed set per target from\nai_feedback_policy + test result\n(see 06)
-api --> ag : 200 {submission_id,\ntasks needing AI}
+script -> ti : run the test suite
 
-== AI grading, inline ==
+loop for each test the instructor wrote
+  ti -> ti : run the assertion
+  ti -> wrap : record_outcome(target,\ntest_name, status, output)
+  wrap -> api : POST /outcomes\n{platform_submission_id, submitted_at,\n target, test_name, status, output}
+  api -> db : upsert submission\n(idempotent on platform_submission_id)
+  api -> db : insert test_outcome
+  api --> wrap : 200
+end
 
-note over ag #FFF8DC
-  grading_mode is IMMEDIATE, so the entrypoint
-  invokes the AI component now rather than
-  leaving the tasks for a nightly rerun.
+note right of wrap #FFF8DC
+  **Unknown target names fail loudly.** The API
+  rejects an identifier not registered on this
+  assignment with a 4xx naming it and listing
+  the registered ones, and the library raises
+  rather than swallowing it. A typo must fail
+  the instructor's test run, never record an
+  outcome against nothing.
 end note
 
-loop for each task with ai_needed
-  ag -> ai : grade(task)
-  ai -> api : GET /tasks/{id}/request
+opt her marking logic decides this target needs feedback
+  ti -> wrap : request_ai_feedback(target)
+  wrap -> api : POST /ai-requests {target}
+  api -> db : record the request\n(honoured only if policy\n= AUTOGRADER)
+  api --> wrap : 200
+  note right of ti #FFF8DC
+    Under AUTOGRADER this call IS the decision.
+    Failures only, a subset, a superset, a
+    partial-credit threshold: all just code she
+    writes here. That is why no ON_FAILURE
+    policy exists.
+  end note
+end
+
+ti --> script : suite exits
+
+== Phase 2: the autograder script invokes the AI phase ==
+
+script -> aip : invoke AI phase
+aip -> api : POST /submissions/{id}/resolve-marks
+api -> db : for each REGISTERED target,\nresolve ai_needed:\nALWAYS -> true, NEVER -> false,\nAUTOGRADER -> was it requested
+api -> db : insert grading_task rows
+
+alt a registered target has no recorded outcome
+  api --> aip : 409 {missing_targets[]}
+  aip --> script : exit non-zero with a diagnostic
+  note right of aip #FFF8DC
+    An error, not a silent skip. The message must
+    say the assignment is misconfigured and the
+    student need do nothing, because on
+    Gradescope the student sees it too.
+  end note
+else all registered targets reported
+  api --> aip : 200 {tasks[], each with\nfeedback_mode,\nai_graded_submitted_at}
+end
+
+note over aip #FFF8DC
+  The guard is checked even here. An instructor
+  or TA re-running the autograder later must not
+  re-bill the LLM.
+end note
+
+loop for each task with ai_needed AND feedback_mode = IMMEDIATE
+  aip -> api : GET /tasks/{id}/request
   api -> db : SELECT rubric, guidance,\ntest_outcome, submission_file
-  api --> ai : 200 {FeedbackRequest}
-
-  ai -> ai : build prompt\n(rubric + guidance +\noutcomes + code)
+  api --> aip : 200 {FeedbackRequest}
+  aip -> aip : build prompt\n(rubric + guidance +\noutcomes + code)
 
   group Multi-provider fan-out [FR-23, FR-27]
     par
-      ai -> llm : Claude: generate
-      llm --> ai : text, suggested_score
+      aip -> llm : Claude: generate
+      llm --> aip : text, suggested_score
     else
-      ai -> llm : ChatGPT: generate
-      llm --> ai : text, suggested_score
+      aip -> llm : ChatGPT: generate
+      llm --> aip : text, suggested_score
     end
-    ai -> ai : compare, estimate confidence,\nselect one
+    aip -> aip : compare, estimate confidence,\nselect one
   end
 
-  ai -> api : POST /tasks/{id}/feedback\n{responses[], comparison, selected}
-  api -> db : insert feedback (one row per provider)
-  api -> db : insert feedback_comparison
-  api -> db : UPDATE grading_task\nSET ai_status = DONE
-  api --> ai : 201
-  ai --> ag : FeedbackItem
+  aip -> api : POST /tasks/{id}/feedback\n{responses[], comparison, selected}
+  api -> db : insert feedback (one row per provider),\ninsert feedback_comparison,\nUPDATE ai_status = DONE
+  api --> aip : 201
 end
 
-== Deliver ==
-
-ag -> api : POST /submissions/{id}/ai-complete
-api -> db : UPDATE submission\nSET ai_graded_submitted_at = submitted_at\nWHERE NO task is still NEEDED
-api --> ag : 200
-
-note right of api #FFF8DC
-  Immediate mode sets the same guard. An
-  instructor or TA re-running the autograder
-  later must not re-bill the LLM.
+note right of aip #FFF8DC
+  NIGHTLY tasks are skipped here and stay
+  NEEDED. That is what puts this submission in
+  tonight's trigger queue, with no extra
+  bookkeeping.
 end note
 
-ag -> api : GET /submissions/{id}/feedback
+aip -> api : POST /submissions/{id}/ai-complete
+api -> db : UPDATE submission\nSET ai_graded_submitted_at = submitted_at\nWHERE NO task is still NEEDED
+api --> aip : 200 {guard_set}
+
+aip -> api : GET /submissions/{id}/feedback
 api -> db : SELECT feedback WHERE is_selected
-db --> api : rows
-api --> ag : 200 {items[], total_score}
-ag -> ag : package results.json [FR-35]
-ag -> gs : write results.json\n(tests + AI feedback)
-gs --> stud : test results and feedback
+api --> aip : 200 {items[], total_score}
+aip -> aip : package results.json [FR-35]
+aip --> script : results.json
+script -> gs : write results.json
+gs --> stud : test results, plus feedback\nfor IMMEDIATE targets
 
-note over ag, llm #FFF8DC
-  **Constraint specific to this mode.** All of
-  this happens inside Gradescope's autograder
-  timeout. Several targets times several
-  providers times LLM latency adds up, and
-  submissions arrive in a spike before the
-  deadline.
+note over aip, llm #FFF8DC
+  **Constraint specific to IMMEDIATE targets.**
+  This all happens inside the platform's
+  autograder timeout, and submissions spike
+  before a deadline. Targets times providers
+  times LLM latency adds up.
 
-  Before choosing immediate mode for a large
-  course, measure the worst case and consider
-  capping to a single provider here, using
-  multi-provider comparison only in nightly
-  mode.
+  Per-target mode helps: mark the one or two
+  targets worth instant feedback as IMMEDIATE
+  and leave the rest NIGHTLY. Also consider
+  capping IMMEDIATE targets to a single provider
+  and using multi-provider comparison only at
+  night.
 end note
 
 @enduml

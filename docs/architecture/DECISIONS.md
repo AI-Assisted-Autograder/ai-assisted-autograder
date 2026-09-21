@@ -8,19 +8,17 @@
 two-pass proposal, and supersedes SRS section 3.4, which was ambiguous
 on this point and should be rewritten to match.
 
-The instructor chooses a grading mode per assignment.
+The instructor chooses a feedback mode **per grading target** (see
+AD-4).
 
-**Immediate mode.** The AI grading component runs as part of the
-autograder script that the LMS executes on student submission. One
-pass: functional tests, AI feedback, `results.json`, done. No nightly
-job is involved.
+**IMMEDIATE.** The AI phase grades the target during the submission run,
+invoked by the instructor's autograder script after her test suite
+exits. Functional tests, AI feedback, `results.json`, done.
 
-**Nightly mode.** The autograder script on submission runs functional
-tests only, and marks in the database which grading targets need AI
-grading. Every night a job runner uses browser automation to log in and
-click "Rerun Autograder". During that rerun, the same autograder script
-queries the database for marked targets and runs the AI component only
-on those.
+**NIGHTLY.** The submission run records outcomes and marks the work but
+grades nothing. Every night a job runner uses browser automation to log
+in and click "Rerun Autograder" on each submission that still has marked
+work. During that rerun the AI phase grades the marked targets.
 
 ### What this means structurally
 
@@ -42,39 +40,60 @@ the diagrams:
    trigger job queries it to decide which submissions to rerun, and the
    rerun grades only the marked targets.
 
+### AD-2. The instructor's test suite is the autograder
+
+**Status: DECIDED** by the instructor.
+
+We ship a **library, not a runner**. The instructor's own JUnit or
+pytest suite is the autograder. It imports our reporting library and
+calls us:
+
+```
+record_outcome(target, test_name, status, output)
+request_ai_feedback(target)
+```
+
+She knows the target identifiers because she registered them in the web
+app. We never enumerate targets and invoke tests ourselves.
+
+This is an inversion of control relative to a framework, and it is the
+right call for an OER: adopting instructors already have test suites and
+a way of structuring them, and a system that insists on driving them
+would be a rewrite rather than an adoption.
+
+Consequences:
+
+- There is no `ITestRunner` interface. Running tests is not our job.
+- The **AI phase** is a command her `run_autograder` invokes after the
+  suite exits. It resolves the marks, grades what the mode and guard
+  warrant, and writes `results.json`. Not called from inside her test
+  code, so she never has to remember a teardown.
+- Target identifiers are a **contract expressed as strings** across a
+  process boundary. See OQ-12; this is the sharpest new edge.
+
 ### The AI-needed marker, and instructor control over it
 
-`grading_task.ai_needed` is the per-submission, per-target marker. The
-submission autograder writes it after functional testing. It is the
-main token saving in the system: a target whose tests passed has
-nothing to explain, so it is never sent to an LLM.
+`grading_task.ai_needed` is the per-submission, per-target marker,
+resolved by the AI phase. It is the main token saving in the
+system: a target nobody asked feedback for is never sent to an LLM.
 
-The instructor controls it through `grading_target.ai_feedback_policy`,
-set per target in the web app:
+`grading_target.ai_feedback_policy`, set per target in the web app:
 
 | Policy | Behaviour |
 | --- | --- |
-| `ON_FAILURE` | Mark only when this target's tests fail. The default. |
-| `ALWAYS` | Mark every submission, including passing code. For style or design feedback no test can detect. |
+| `AUTOGRADER` | The instructor's suite decides per submission, by calling `request_ai_feedback`. The default. |
+| `ALWAYS` | Mark every submission regardless of outcome. For style or design feedback no test can detect. |
 | `NEVER` | Never mark. For targets graded purely by tests. |
-| `AUTOGRADER` | The instructor's own autograder logic decides. |
 
-`AUTOGRADER` is the escape hatch for conditions no generic rule
-captures: a partial-credit threshold, a target-specific heuristic, a
-cross-target condition.
+**There is deliberately no `ON_FAILURE` policy.** Marking on failure is
+one line in the instructor's suite, and any variant (a subset of
+failures, a superset, a partial-credit threshold, a cross-target
+condition) is equally expressible there. A policy value would only
+duplicate what her code already states, and would then need a way to say
+"ignore the dropdown".
 
-`ai_needed_reason` records which rule fired (`TEST_FAILURE`,
-`POLICY_ALWAYS`, `AUTOGRADER_RULE`). Store it. It is how the instructor
-distinguishes "correct code, nothing to say" from "feedback is late"
-from "this target gave up" on the dashboard, and how the marking rules
-get audited against real submissions. Without it all three render as a
-blank cell.
-
-**Marking happens only during the submission autograder run.** There is
-no post-hoc path to request AI feedback on a submission that has
-already been graded. Once a submission is AI-graded it is finished: the
-nightly trigger stops selecting it and the guard below short-circuits
-any other rerun.
+`ai_needed_reason` records which rule decided (`AUTOGRADER_REQUEST`,
+`POLICY_ALWAYS`, `POLICY_NEVER`, `NOT_REQUESTED`). Store it.
 
 ### The token-waste guard
 
@@ -130,7 +149,10 @@ document, not survivable for four people implementing in parallel.
 
 | ID | Question | Blocks | Owner |
 | --- | --- | --- | --- |
-| OQ-11 | Where do LLM API keys and DB credentials live, given the AI component runs on Gradescope's infrastructure? | A and C both; the service API surface | A + C |
+| ~~OQ-11~~ | ~~Where LLM keys live~~ | **DECIDED** (AD-5): the autograder container holds the instructor's own LLM API key. No DB credential ever. | -- |
+| ~~OQ-12~~ | ~~Typo'd target identifiers~~ | **DECIDED**: the API rejects unregistered names and the library raises, failing the test run | -- |
+| ~~OQ-13~~ | ~~Who invokes the AI phase~~ | **DECIDED**: the instructor's `run_autograder` invokes it as a command after her suite exits | -- |
+| ~~OQ-14~~ | ~~Registered target with no outcome~~ | **DECIDED**: an error. The AI phase exits non-zero and the autograder run fails | -- |
 | OQ-1 | What exactly is a "deduction" (FR-10)? | B's dashboard query | Instructor |
 | OQ-2 | How is confidence defined and computed (FR-28)? | A's engine, B's UI | A |
 | OQ-3 | Can the instructor edit feedback before release? Now mode-dependent. | state machine, B's dashboard | Instructor |
@@ -141,32 +163,6 @@ document, not survivable for four people implementing in parallel.
 | OQ-8 | Web framework, database, cloud host | B cannot start | B |
 | OQ-9 | Instructor authentication and authorization | B's backend | B |
 | OQ-10 | Student code retention, privacy, FERPA | deployment | Instructor |
-
-### OQ-11 is the new one and it is the most urgent
-
-The AI grading component executes inside the LMS autograder container,
-which is not your infrastructure. Two options:
-
-**(a) Credentials in the container.** It holds an LLM API key and talks
-to the database directly. Simplest code. But every adopting instructor
-must paste their own API key into Gradescope's autograder settings,
-where any TA with assignment access can read it, and a database
-credential would be sitting in a third party's container.
-
-**(b) Credentials on our side.** The container holds only a scoped
-per-assignment token and calls the service through `IGradingClient`.
-The service does the LLM work. Keys never leave our infrastructure.
-Costs a synchronous generate-feedback endpoint.
-
-**Recommend (b)**, and the diagrams show (b). For an OER this matters
-more than usual: an adopting instructor at another institution should be
-able to use this without handling provider keys, and the separation of
-`IGradingClient` from `IGradingRepository` in `07-interfaces.puml` is
-what makes the credential boundary visible in code rather than a
-deployment convention nobody remembers.
-
-Switching to (a) is local to the AI grading package, so this is
-reversible, but it needs deciding before A and C agree the API surface.
 
 ### Two that deserve a flag
 
@@ -232,3 +228,98 @@ which required clearing `ai_graded_submitted_at` in the same
 transaction. That path does not exist. Instructor control is exercised
 at marking time, through `ai_feedback_policy` and their own autograder
 logic.
+
+### AD-5. The autograder container holds the LLM API key
+
+**Status: DECIDED** by the instructor.
+
+The AI phase calls the LLM providers directly from inside the platform's
+autograder container, using the instructor's own API key. Our service
+never proxies an LLM call and never sees a provider key.
+
+The asymmetry is deliberate and worth stating in one place:
+
+| Credential | Where it lives |
+| --- | --- |
+| LLM provider API key | The autograder container's environment. The instructor's own key. |
+| Database credential | Only on our cloud host. Never in the container. |
+| Per-assignment service token | The container, scoped to one assignment's rows. |
+
+**Why this is the right default for an OER.** Each adopting institution
+uses its own key and pays its own LLM bill directly to the provider.
+Nobody has to run a metered service, meter per-course usage, or handle
+another institution's billing. The alternative, proxying LLM calls
+through our service, would have made us the billing intermediary for
+every adopter, which is a far larger operational commitment than a
+grading tool should carry.
+
+`llm_provider_config` in the database therefore says *what* to call,
+which providers and models and which is primary. The container supplies
+the credential.
+
+**What this costs, to write into the instructor guide rather than the
+code.** The key is visible to anyone with access to the assignment's
+autograder configuration, which in practice includes TAs. Rotation means
+touching every assignment that carries it. And how the key reaches the
+container depends on what secret facility the platform offers; if the
+only route available is the uploaded autograder zip, say so plainly,
+because a key in a zip is a key in every backup of that zip. Confirm
+what Gradescope actually provides here before writing that section.
+
+### AD-3. Target identifiers are a checked contract
+
+Target identifiers cross a process boundary as bare strings: typed once
+into the web app, again into the instructor's test suite, with no
+compiler between them. Both directions of mismatch are now errors rather
+than silent skips.
+
+1. `POST /outcomes` rejects an unregistered target with a 4xx naming it
+   and listing the registered ones. The reporting library raises rather
+   than swallowing it, so her test run fails loudly on the first call.
+2. The AI phase treats a registered target that received **no** outcome
+   as an error. It exits non-zero and the autograder run fails. This
+   catches the opposite mistake, renamed in the web app but still the old
+   name in the suite.
+3. Recommended, not yet decided: the web app offers a copy-paste block of
+   the exact identifiers for an assignment, so the second typing is a
+   paste.
+
+One consequence to handle in the message text, not the schema: on
+Gradescope this error is visible to the student and blocks their score.
+That is the right trade for a misconfigured assignment, but the
+diagnostic must say plainly that the assignment is misconfigured and the
+student need do nothing.
+
+### AD-4. Feedback mode is per target, not per assignment
+
+`grading_target.feedback_mode` is `IMMEDIATE` or `NIGHTLY`. There is no
+mode column on `assignment`; the web app can offer "apply to all
+targets" as a convenience, which needs UI but no schema.
+
+A single submission can therefore mix the two, and `results.json` gets
+written twice with different content. The student sees feedback arrive
+in two waves.
+
+This needs no extra machinery, which is the nice part. After the
+immediate pass the `NIGHTLY` tasks are still `NEEDED`, so
+`ai_graded_submitted_at` stays NULL and tonight's trigger picks the
+submission up on its own. On the rerun, the `IMMEDIATE` tasks are
+already `DONE` and get skipped, so a mixed submission never pays twice.
+
+Two things to put in the instructor guide:
+
+- Every `IMMEDIATE` target adds LLM latency inside the autograder
+  timeout, and submissions arrive in a spike before the deadline. Marking
+  one or two targets `IMMEDIATE` and leaving the rest `NIGHTLY` is the
+  sensible default.
+- An `IMMEDIATE` target whose grading fails stays `NEEDED` and is
+  retried on the nightly run, so its feedback arrives the next morning
+  instead of at once. A reasonable degradation, but say so rather than
+  letting it surprise someone.
+
+**AD-2 superseded an earlier revision of these diagrams.** They showed
+our entrypoint fetching the target list and invoking a test runner per
+target, with an `ITestRunner` interface and an `IMarkingHook` for
+instructor logic. Control runs the other way: her suite calls us, and
+the marking logic is ordinary code in that suite rather than a hook we
+invoke.
