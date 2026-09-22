@@ -107,7 +107,7 @@ fe --> instr : submissions needing attention
 instr -> fe : drill into one submission
 fe -> be : GET /submissions/{id}
 be -> repo : get_submission_detail()
-repo -> db : SELECT test_result rows,\nai_feedback rows (every provider),\nai_feedback_comparison, ai_needed,\ncompleted_at, last_error
+repo -> db : SELECT test_result rows,\nai_feedback rows (every provider),\nai_needed, completed_at, last_error,\nagreement_score, score_spread
 db --> repo : detail
 be --> fe : 200 {detail}
 fe --> instr : side-by-side provider feedback,\nconfidence, and AI status\n[FR-27, NFR-12]

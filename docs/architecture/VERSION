@@ -1,4 +1,4 @@
-uml-docs 20260922-0316Z
+uml-docs 20260922-0324Z
 
 Decisions (see DECISIONS.md):
   AD-1   Grading mode is per assignment
@@ -19,8 +19,8 @@ Reporting library, both calls optional:
   add_test_result(target, status, functional_test_feedback)
 
 Naming: test_result.functional_test_feedback is what the instructor's
-suite reports; ai_feedback (+ _comparison, _review) is what the model
-produces. Both are feedback, so both are qualified.
+suite reports; ai_feedback is what the model produces. Both are
+feedback, so both are qualified.
 
 Open questions, in the order they block work:
   OQ-3   Can the instructor edit or approve generated feedback befo...

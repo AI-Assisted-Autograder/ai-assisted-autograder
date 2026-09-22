@@ -202,7 +202,7 @@ else action = GRADE
     end
 
     aip -> api : POST /feedback
-    api -> db : insert ai_feedback rows,\ninsert ai_feedback_comparison,\nSET completed_at = now
+    api -> db : insert ai_feedback rows,\nset the comparison columns,\nSET completed_at = now
     api --> aip : 201
   end
 

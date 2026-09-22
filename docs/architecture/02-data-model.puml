@@ -3,24 +3,25 @@
 ' Automated Code Feedback -- Logical Data Model
 ' Traces to: FR-6, FR-12..FR-18, FR-25, FR-26, FR-28, FR-30, NFR-6
 '
-' Changes in this revision:
-'   assignment.grading_mode -- IMMEDIATE or NIGHTLY, per assignment.
-'   submission_target.ai_needed -- defaults TRUE for every registered target
-'     on submission. The instructor's test suite opts targets out during
-'     functional testing. There is no resolution step.
+' Key points, so the diagram is not the only place they live:
 '
-' NOT stored here: student source files. Those stay on the container
+'   assignment.grading_mode      IMMEDIATE or NIGHTLY, per assignment
+'   grading_target.identifier    plus kind and language, determines the
+'                                source file the AI phase reads (AD-12)
+'   submission_target.ai_needed  TRUE for every registered target; the
+'                                instructor's suite opts targets out
+'   submission_target            completed_at and last_error carry the
+'                                state; there is no status enum
+'
+' Student source files are NOT stored. They stay on the container
 ' filesystem and are read from disk when building a prompt.
 '
 ' Functional outcomes ARE stored, as test_result rows, but only because
-' the instructor's suite reports them for the dashboard. We never derive
-' them ourselves.
-'
-' results.json is never parsed to build a prompt. The prompt carries
-' test_result.functional_test_feedback: whatever diagnostic her suite
-' report. test_result.status is stored for the dashboard and is the only
-' functional pass/fail record we hold. The AI phase reads results.json
-' only to splice feedback into it.
+' the instructor's suite reports them. We never derive them, and
+' results.json is never parsed to build a prompt. test_result.status
+' serves the dashboard; test_result.functional_test_feedback goes into
+' the prompt. The AI phase reads results.json only to splice feedback
+' into it.
 ' =====================================================================
 
 title Logical Data Model
@@ -92,13 +93,12 @@ entity "grading_target" as target #DCEFD9 {
   source file the AI phase reads. There
   is no file-pattern table: see AD-12.
   --
-  No feedback_mode column. A target the
-  instructor never wants AI feedback on
-  simply is not registered, so a NEVER
-  value would have nothing to describe.
-  Whether a given SUBMISSION gets
-  feedback on this target is
-  submission_target.ai_needed.
+  There is no per-target on/off setting
+  here. A target the instructor never
+  wants AI feedback on simply is not
+  registered. Whether a given
+  SUBMISSION gets feedback on this
+  target is submission_target.ai_needed.
 }
 
 entity "rubric" as rubric #DCEFD9 {
@@ -177,9 +177,18 @@ entity "submission_target" as subtgt #FBE6D4 {
   * ai_needed : boolean <<default TRUE>>
   completed_at : timestamptz
   last_error : text
+  agreement_score : numeric
+  score_spread : numeric
+  selection_reason : text
   --
   unique: submission_id,
           grading_target_id
+  --
+  The three comparison columns hold the
+  FR-27 cross-provider result. They sat
+  in a separate table, but it was 1:1
+  with this row, since one grading
+  attempt per row means one comparison.
   --
   Created with ai_needed = TRUE for
   every registered target when the
@@ -190,14 +199,13 @@ entity "submission_target" as subtgt #FBE6D4 {
   test passed and there is nothing left
   to explain.
   --
-  No ai_needed_reason column. With one
-  mechanism and a default of TRUE,
-  "false" can only mean the suite opted
-  out, so a reason would carry no
-  information.
+  One mechanism and a default of TRUE
+  mean "false" can only have come from
+  the suite opting out, so there is no
+  reason column to record.
   --
-  No ai_status enum either. Two columns
-  say everything:
+  State is derived from two columns
+  rather than stored in an enum:
     completed_at NULL
       -> not attempted yet
     completed_at set, last_error NULL
@@ -205,6 +213,8 @@ entity "submission_target" as subtgt #FBE6D4 {
     completed_at set, last_error set
       -> attempted and failed; the
          message went to results.json
+  An enum alongside these could only
+  agree with them or contradict them.
   --
   completed_at means "the AI phase
   finished with this row", not "it
@@ -213,15 +223,12 @@ entity "submission_target" as subtgt #FBE6D4 {
   cross-night retry: a failure gets the
   same message in both grading modes.
   --
-  No attempt_count either. Retries
-  happen inside a single AI phase run
-  and never outlive the process, so
-  there is nothing to persist.
+  Retries happen inside a single AI
+  phase run and never outlive the
+  process, so there is no attempt
+  counter to persist.
 }
 
-' ---------------------------------------------------------------------
-' AI-generated feedback
-' ---------------------------------------------------------------------
 entity "test_result" as tres #FBE6D4 {
   * id : uuid <<PK>>
   --
@@ -251,10 +258,11 @@ entity "test_result" as tres #FBE6D4 {
   tests. Rows are rendered into the
   prompt in recorded_at order.
   --
-  No test_name column. Nothing would
-  join on it or validate it, and she
-  can name the test inside the note if
-  it helps the model.
+  There is no test_name column: nothing
+  would join on it or validate it, and
+  she can name the test inside
+  functional_test_feedback if it helps
+  the model.
   --
   **Her report, not our parse.**
   results.json remains the
@@ -268,6 +276,9 @@ entity "test_result" as tres #FBE6D4 {
   target.
 }
 
+' ---------------------------------------------------------------------
+' AI-generated feedback
+' ---------------------------------------------------------------------
 entity "ai_feedback" as aifb #D6E4F0 {
   * id : uuid <<PK>>
   --
@@ -300,18 +311,6 @@ entity "ai_feedback" as aifb #D6E4F0 {
   The body column is not called
   feedback_text: inside a table already
   named ai_feedback that would stutter.
-}
-
-entity "ai_feedback_comparison" as aicmp #D6E4F0 {
-  * id : uuid <<PK>>
-  --
-  * submission_target_id : uuid <<FK>>
-  agreement_score : numeric
-  score_spread : numeric
-  selection_reason : text
-  compared_at : timestamptz
-  --
-  FR-27, FR-28, NFR-12
 }
 
 entity "ai_feedback_review" as aireview #DCEFD9 {
@@ -358,7 +357,6 @@ target ||--o{ subtgt
 sub ||--o{ subtgt
 subtgt ||--o{ tres
 subtgt ||--o{ aifb
-subtgt ||--o| aicmp
 rubric ||--o{ aifb
 aifb ||--o{ aireview
 

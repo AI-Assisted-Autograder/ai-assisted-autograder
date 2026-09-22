@@ -171,7 +171,7 @@ loop for each target with ai_needed
   end
 
   aip -> api : POST /feedback\n{target, responses[], comparison, selected}
-  api -> db : insert ai_feedback (one per provider),\ninsert ai_feedback_comparison,\nSET completed_at = now
+  api -> db : insert ai_feedback (one per provider),\nset the comparison columns,\nSET completed_at = now
   api --> aip : 201
 end
 
