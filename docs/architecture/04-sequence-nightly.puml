@@ -4,7 +4,7 @@
 ' Traces to: FR-29..FR-36, FR-41..FR-47, CI-3, CI-4
 '
 ' Phase 1 is the same submission run as 03. The only difference is what
-' the AI phase does with a task whose target is marked NIGHTLY: it
+' the AI phase does on a NIGHTLY assignment's submission run: it
 ' leaves it alone. A submission with both kinds of target goes through
 ' both diagrams.
 ' =====================================================================
@@ -113,7 +113,7 @@ end note
 trig -> gs : log in
 
 loop for each submission needing AI grading
-  trig -> api : POST /submissions/{id}/authorise
+  trig -> api : POST /submissions/{id}/authorize
   api -> db : SET ai_authorized_at = now
   api --> trig : 200
 
@@ -216,7 +216,7 @@ aip -> gs : write the new results.json
 gs --> stud : feedback now visible
 
 note over trig, db #FFF8DC
-  **Retry behaviour is identical to IMMEDIATE.**
+  **Retry behavior is identical to IMMEDIATE.**
   The AI phase retries inside the run, with
   backoff on transient errors and no retry on
   deterministic ones. If it still fails, the
@@ -227,7 +227,7 @@ note over trig, db #FFF8DC
   Two consequences worth stating:
   1. The rate-limit argument that makes IMMEDIATE
      risky barely applies here. NIGHTLY grades at
-     3am against a serialised trigger, not during
+     3am against a serialized trigger, not during
      a deadline-hour submission spike, so the
      main driver of transient failure is largely
      absent.

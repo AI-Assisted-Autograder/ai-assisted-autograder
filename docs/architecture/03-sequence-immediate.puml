@@ -129,12 +129,12 @@ note over api #FFF8DC
 
   Deriving it server-side:
     IMMEDIATE                     -> GRADE
-    NIGHTLY, not yet authorised   -> DEFER
-    NIGHTLY, authorised           -> GRADE
+    NIGHTLY, not yet authorized   -> DEFER
+    NIGHTLY, authorized           -> GRADE
     already graded (AD-9 guard)   -> REEMIT
 
   This collapses the mode rule, the nightly
-  authorisation check and the token guard into
+  authorization check and the token guard into
   one decision in one place. It matters because
   the container is the hardest thing to update:
   it lives inside the instructor's autograder
@@ -153,11 +153,10 @@ loop for each target with ai_needed
     The model locates the target in the source
     and reasons from the rubric.
 
-    test_result is untrusted: assertion messages
-    routinely embed the student's own output.
-    Delimit it, label it as test output, cap its
-    length, and keep the rubric authoritative
-    over anything it says.
+    functional_test_feedback is untrusted input to
+    a prompt, because assertion messages routinely
+    embed the student's own output. The mitigations
+    are in 02-data-model.
   end note
 
   group Multi-provider fan-out [FR-23, FR-27]
@@ -266,7 +265,7 @@ note over aip, llm #FFF8DC
   spikes exactly when the most students are
   affected. That is the strongest argument for
   preferring NIGHTLY in a large course, and an
-  argument for serialising rather than fanning out
+  argument for serializing rather than fanning out
   the provider calls.
 end note
 

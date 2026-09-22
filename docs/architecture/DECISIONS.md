@@ -67,7 +67,7 @@ registered ones, and the library raises rather than swallowing it. Her
 test run fails on the first bad call.
 
 Since `ai_needed` defaults to TRUE (AD-7), there is no "registered but
-never reported" case to detect — a target the suite never mentions keeps
+never reported" case to detect. A target the suite never mentions keeps
 its default and gets graded. That does leave one softer failure: a target
 renamed in the web app but not in the suite will be graded with no test
 outcome in the prompt, so the feedback is vague rather than absent, which
@@ -111,9 +111,14 @@ writing that section.
 The instructor's framework writes `results.json` with the functional test
 results as Phase 1 ends. Only then does the AI phase run.
 
-If Phase 2 dies outright, that file is what the student sees. Since test
-outcomes are not stored anywhere else (AD-6), losing it to an LLM failure
-would lose the test results entirely.
+If Phase 2 dies outright, that file is what the student sees. Writing it
+first means an LLM failure costs them their feedback but not their test
+results, which had already succeeded.
+
+Note this is about the student's view, not about durability. Outcomes her
+suite reported are in `test_result` (AD-10), so the data survives either
+way; what the early write protects is what appears on the student's
+screen.
 
 ### AD-6. results.json is never parsed
 
@@ -125,19 +130,15 @@ only because her suite reports them. The direction is what matters. She
 tells us; we do not derive it. `results.json` remains the student-facing
 record and is still read only to splice feedback into.
 
-The prompt is built from the target's rubric, its feedback guidance, the
-student's source code on the container filesystem, and any `test_result` note
-the instructor's suite chose to record (AD-10). `ai_needed` being true
+Nothing parsed out of that file feeds a prompt. `ai_needed` being true
 already carries the only thing a raw outcome had to convey, namely that
-this target wants feedback. The model locates the target in the source
-and reasons from the rubric.
+this target wants feedback; the rest of the prompt comes from the rubric,
+the source file (AD-12) and `functional_test_feedback` (AD-10).
 
-`results.json` is therefore read exactly once per run, at the end, to
-splice the feedback into.
-
-This removes the `submission_file` table and `record_outcome` from the
-reporting library, along with any need to reconcile a parsed copy of the
-outcomes against the file the student actually sees.
+So `results.json` is read exactly once per run, at the end, to splice
+feedback into. That removes the `submission_file` table, `record_outcome`
+from the reporting library, and any need to reconcile a parsed copy of
+the outcomes against the file the student actually sees.
 
 `ResultsPackager` therefore **splices rather than authors**: it reads the
 file her framework wrote, appends the AI feedback, and writes the result.
@@ -151,8 +152,6 @@ or empty, and the failure lands silently on their screen rather than in a
 log. Treat the model's text as untrusted input on the way in too, so
 length-cap it and escape it when inserting, since it ends up in a file
 the platform renders.
-
-
 
 ### AD-7. `ai_needed` defaults ON; the suite opts targets out
 
@@ -212,7 +211,7 @@ the line, and it falls out of the schema rather than needing a rule.
 run is now permanent for that submission. The reason that is acceptable
 is in the failure taxonomy below. The rate-limit spike that makes
 `IMMEDIATE` risky is a deadline-hour phenomenon, and `NIGHTLY` grades at
-3am against a serialised trigger, so the main driver of transient failure
+3am against a serialized trigger, so the main driver of transient failure
 is largely absent there.
 
 ### AD-9. The token guard
@@ -339,7 +338,7 @@ introduces a clock dependence for no benefit.
 **Failure mode to report.** If the trigger sets the flag but the rerun
 never happens, tomorrow's trigger simply tries again, so that case is
 harmless. If the trigger fails to set the flag at all, nothing ever
-grades and it looks exactly like "no feedback needed" — the same class of
+grades and it looks exactly like "no feedback needed", the same class of
 silent failure as a missed click, and it belongs in the same
 `trigger_run` reporting.
 
@@ -401,10 +400,9 @@ misdiagnosing the method it can see.
 **A practical risk to watch.** A student who leaves a copy of a file
 somewhere in their submission turns a multiple-match into a feedback
 failure for that target. If that proves common, the fix is to narrow what
-counts as a candidate — excluding test roots, or directories the
-assignment does not expect — rather than to start guessing between
+counts as a candidate, for instance excluding test roots or directories
+the assignment does not expect, rather than to start guessing between
 candidates.
-
 
 ---
 
@@ -437,10 +435,10 @@ about scheduling. A deterministic failure returns the same result every
 attempt, so it should not be retried at all.
 
 **Failures 1 and 6 are correlated with the deadline**, so the failure
-rate is not uniform — it spikes exactly when the most students are
+rate is not uniform. It spikes exactly when the most students are
 affected. That is the strongest argument for preferring `NIGHTLY` in a
-large course, since `NIGHTLY` grades at 3am against a serialised trigger
-and misses the spike entirely. It is also an argument for serialising
+large course, since `NIGHTLY` grades at 3am against a serialized trigger
+and misses the spike entirely. It is also an argument for serializing
 rather than fanning out the provider calls within a run.
 
 ---
@@ -469,7 +467,7 @@ OQ-16 (AD-10, once outcomes became part of her report).
 
 The SRS specifies no instructor authentication at all, which is fine for
 a prototype on synthetic data. And in `IMMEDIATE` mode student code
-reaches a third-party LLM within seconds of submission — it is no longer
+reaches a third-party LLM within seconds of submission. It is no longer
 retained by us (AD-6), but it does leave the institution. Retention,
 access and consent need answers before a live section. Pitt has people
 whose job this is.

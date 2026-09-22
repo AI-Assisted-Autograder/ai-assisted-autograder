@@ -141,12 +141,13 @@ tests ..> wrapper
 tests ..> trigger
 
 note as N_OWN #FFF8DC
-  **The instructor owns the two yellow boxes.**
-  It is an ordinary JUnit or pytest suite. We do
-  not generate it, invoke it, or constrain how
-  it is structured. It imports the reporting
-  library and calls us with the target names the
-  instructor registered in the web app.
+  **The instructor owns both yellow boxes**, the
+  autograder script and the test suite it runs.
+  The suite is ordinary JUnit or pytest. We do
+  not generate it, invoke it, or constrain how it
+  is structured. It imports the reporting library
+  and calls us with the target names she
+  registered in the web app.
 
   The marking logic lives here too. Every
   registered target wants feedback by default,
@@ -176,17 +177,16 @@ note as N_WRAP #FFF8DC
 end note
 
 note as N_AIP #FFF8DC
-  Invoked by the instructor's autograder script
-  as a separate command after her suite exits,
-  not from inside her test code.
-
-  Invoked by the instructor's script in EVERY
-  run, including the submission run of a NIGHTLY
-  assignment. It asks the service for one action
-  and performs it: GRADE, DEFER or REEMIT.
+  A separate command her autograder script
+  invokes after the test suite exits, never called
+  from inside her test code. It runs in EVERY
+  autograder run, including the submission run of
+  a NIGHTLY assignment, where it asks the service
+  for one action and performs it: GRADE, DEFER or
+  REEMIT.
 
   It holds no policy. Grading mode, the nightly
-  authorisation flag and the token guard are all
+  authorization flag and the token guard are all
   derived server-side, because this code ships
   inside the instructor's autograder zip and is
   the hardest thing in the system to update.
@@ -194,9 +194,9 @@ end note
 
 note as N_TRIG #FFF8DC
   Log in, then click Rerun Autograder once per
-  submission that still has tasks marked
-  ai_needed. It does NOT call an LLM and does
-  NOT write feedback.
+  submission that still has an ungraded
+  submission_target marked ai_needed. It does NOT
+  call an LLM and does NOT write feedback.
 end note
 
 note as N_KEYS #FFF8DC

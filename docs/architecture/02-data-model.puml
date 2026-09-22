@@ -336,7 +336,7 @@ entity "trigger_run" as run #EDE0F0 {
   started_at : timestamptz
   finished_at : timestamptz
   status : text
-  submissions_authorised : integer
+  submissions_authorized : integer
   submissions_rerun : integer
   submissions_failed_to_trigger : integer
   log_uri : text
@@ -370,7 +370,8 @@ note as N1 #FFF8DC
   marker of exactly which submission was graded.
 
   First thing the autograder does, before any
-  task query and before any LLM call:
+  submission_target query and before any LLM
+  call:
 
     if ai_graded_submitted_at IS NOT NULL
        AND ai_graded_submitted_at = submitted_at:
@@ -484,7 +485,8 @@ note as N2 #FFF8DC
   In NIGHTLY mode the first write has no AI
   feedback at all, which reads correctly as
   "not graded yet". A one-line "feedback arrives
-  by tomorrow morning" marker per pending task
+  by tomorrow morning" marker per ungraded
+  target
   is a courtesy worth adding, but nothing
   depends on it.
 end note

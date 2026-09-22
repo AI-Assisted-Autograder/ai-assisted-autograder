@@ -29,9 +29,9 @@ which are the ones that constrain other people's code.
 suite *is* the autograder. Her `run_autograder` then invokes our AI phase
 as a separate command, in every run. We never invoke her tests. (AD-2)
 
-**The AI phase holds no policy.** It asks the service for one action —
-`GRADE`, `DEFER` or `REEMIT` — and performs it. Grading mode, the nightly
-authorisation flag and the token guard are all derived server-side,
+**The AI phase holds no policy.** It asks the service for one action,
+`GRADE`, `DEFER` or `REEMIT`, and performs it. Grading mode, the nightly
+authorization flag and the token guard are all derived server-side,
 because that code ships inside the instructor's autograder zip and is the
 hardest thing to update. (AD-11)
 
@@ -62,8 +62,8 @@ read once at the end only to splice feedback in (AD-6).
 
 **Her suite reports outcomes; we never derive them.**
 `add_test_result(target, status, functional_test_feedback)` stores
-`status` for the dashboard — the only functional pass/fail record the
-system holds — and `functional_test_feedback` for the prompt (AD-10).
+`status` for the dashboard, which is the only functional pass/fail record
+the system holds, and `functional_test_feedback` for the prompt (AD-10).
 Prompts carry the rubric, the source file derived from the target
 identifier (AD-12), a listing of the other files, and that feedback
 string.
