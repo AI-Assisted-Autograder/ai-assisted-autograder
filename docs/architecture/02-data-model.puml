@@ -9,14 +9,18 @@
 '     on submission. The instructor's test suite opts targets out during
 '     functional testing. There is no resolution step.
 '
-' NOT stored here: functional test outcomes and student source files.
-' Those live in results.json and on the container filesystem.
+' NOT stored here: student source files. Those stay on the container
+' filesystem and are read from disk when building a prompt.
 '
-' Nor are raw outcomes used to build prompts. ai_needed already says the
-' target wants feedback. What the prompt CAN carry is test_context: any
-' diagnostic the instructor's suite chooses to pass us during testing.
-' The AI phase reads results.json only to splice feedback into it.
-' See the dashboard note at the bottom.
+' Functional outcomes ARE stored, as test_result rows, but only because
+' the instructor's suite reports them for the dashboard. We never derive
+' them ourselves.
+'
+' results.json is never parsed to build a prompt. The prompt carries
+' test_result.functional_test_feedback: whatever diagnostic her suite
+' report. test_result.status is stored for the dashboard and is the only
+' functional pass/fail record we hold. The AI phase reads results.json
+' only to splice feedback into it.
 ' =====================================================================
 
 title Logical Data Model
@@ -54,7 +58,7 @@ entity "assignment" as assignment #DCEFD9 {
   --
   language is what makes the source
   file derivable from a target's
-  identifier (AD-12). It cannot be
+  identifier, see AD-12. It cannot be
   inferred reliably: "foo.bar" is
   ambiguous between a Python module
   path and a Java package.
@@ -216,39 +220,55 @@ entity "submission_target" as subtgt #FBE6D4 {
 }
 
 ' ---------------------------------------------------------------------
-' Generated feedback
+' AI-generated feedback
 ' ---------------------------------------------------------------------
-entity "test_context" as tctx #FBE6D4 {
+entity "test_result" as tres #FBE6D4 {
   * id : uuid <<PK>>
   --
   * submission_target_id : uuid <<FK>>
-  * note : text
+  * status : text <<PASS|FAIL|ERROR|SKIP>>
+  functional_test_feedback : text
   recorded_at : timestamptz
   --
   OPTIONAL. Written during functional
   testing when the instructor's suite
-  calls add_test_context on a target.
+  calls add_test_result on a target.
+  --
+  status is what the DASHBOARD needs.
+  It is the only record of functional
+  pass/fail that we hold.
+  functional_test_feedback is what the
+  PROMPT needs: the failing input,
+  expected versus actual, whichever
+  branch ran. It is what her test
+  already worked out and would
+  otherwise throw away.
+  Two needs, one call, because she
+  knows both at the same moment.
   --
   A child table rather than a column
   because a target usually has several
-  tests, and more than one may have
-  something worth saying. Rows are
-  rendered into the prompt in
-  recorded_at order.
+  tests. Rows are rendered into the
+  prompt in recorded_at order.
   --
   No test_name column. Nothing would
-  join on it or validate it, and the
-  instructor can name the test inside
-  the note if it helps the model.
+  join on it or validate it, and she
+  can name the test inside the note if
+  it helps the model.
   --
-  Read by the AI phase and rendered into
-  the prompt. Cap the length per row and
-  per target: this text is billed as
-  input tokens on every provider call
-  for that target.
+  **Her report, not our parse.**
+  results.json remains the
+  student-facing record and is still
+  never read to build a prompt. See
+  AD-6.
+  --
+  Cap its length per row and per
+  target: it is billed as input tokens
+  on every provider call for that
+  target.
 }
 
-entity "feedback" as fb #D6E4F0 {
+entity "ai_feedback" as aifb #D6E4F0 {
   * id : uuid <<PK>>
   --
   * submission_target_id : uuid <<FK>>
@@ -256,7 +276,7 @@ entity "feedback" as fb #D6E4F0 {
   * provider : text
   * model_name : text
   prompt_version : text
-  feedback_text : text
+  body : text
   suggested_score : numeric
   confidence : numeric
   is_selected : boolean
@@ -269,9 +289,20 @@ entity "feedback" as fb #D6E4F0 {
   comparison is a query, not a re-run.
   is_selected marks the row written
   into results.json.
+  --
+  Named ai_feedback, not feedback, to
+  contrast with
+  test_result.functional_test_feedback.
+  Two unqualified senses of "feedback"
+  in one schema is worse than a longer
+  name.
+  --
+  The body column is not called
+  feedback_text: inside a table already
+  named ai_feedback that would stutter.
 }
 
-entity "feedback_comparison" as cmp #D6E4F0 {
+entity "ai_feedback_comparison" as aicmp #D6E4F0 {
   * id : uuid <<PK>>
   --
   * submission_target_id : uuid <<FK>>
@@ -283,10 +314,10 @@ entity "feedback_comparison" as cmp #D6E4F0 {
   FR-27, FR-28, NFR-12
 }
 
-entity "feedback_review" as review #DCEFD9 {
+entity "ai_feedback_review" as aireview #DCEFD9 {
   * id : uuid <<PK>>
   --
-  * feedback_id : uuid <<FK>>
+  * ai_feedback_id : uuid <<FK>>
   reviewer : text
   instructor_rating : integer
   instructor_comment : text
@@ -325,11 +356,11 @@ assignment ||--o{ sub
 target ||--o{ rubric
 target ||--o{ subtgt
 sub ||--o{ subtgt
-subtgt ||--o{ tctx
-subtgt ||--o{ fb
-subtgt ||--o| cmp
-rubric ||--o{ fb
-fb ||--o{ review
+subtgt ||--o{ tres
+subtgt ||--o{ aifb
+subtgt ||--o| aicmp
+rubric ||--o{ aifb
+aifb ||--o{ aireview
 
 note as N1 #FFF8DC
   **ai_graded_submitted_at: the token guard**
@@ -418,7 +449,8 @@ note as N1b #FFF8DC
 end note
 
 note as N_CTX #FFF8DC
-  **test_context is untrusted input to a prompt.**
+  **functional_test_feedback is untrusted input
+  to a prompt.**
   Assertion messages routinely embed the
   student's own output, and sometimes their
   source. A student can therefore influence what
@@ -511,27 +543,18 @@ note as N3 #FFF8DC
 end note
 
 note as N4 #FFF8DC
-  **OQ-16: the dashboard gap.**
-  Functional test outcomes are no longer stored.
-  results.json carries them to the student, and
-  the AI phase parses them to build prompts, but
-  nothing persists them.
+  **The dashboard reads test_result.status.**
+  It is the only functional pass/fail record the
+  system holds, and it exists because the
+  instructor's suite reports it rather than
+  because we parse anything.
 
-  That leaves FR-8, FR-9 and FR-10 partly
-  unserved: the instructor dashboard can show AI
-  feedback and suggested scores, but not raw
-  functional pass/fail, and "submissions with
-  deductions" can only be derived from AI scores.
-
-  Two ways out, and it needs deciding before
-  Student B builds the dashboard:
-  (a) Accept it. The dashboard is about feedback
-      quality, and Gradescope already shows the
-      instructor test results.
-  (b) Have the AI phase POST the outcomes it
-      parsed, as context alongside the feedback.
-      Costs one table and one request, and makes
-      the dashboard self-contained.
+  Coverage therefore depends on her calling
+  add_test_result. The call is optional, so a
+  suite that never uses it leaves the dashboard's
+  pass/fail column empty. Worth stating in the
+  instructor guide, so an empty column does not
+  look like a bug.
 end note
 
 @enduml

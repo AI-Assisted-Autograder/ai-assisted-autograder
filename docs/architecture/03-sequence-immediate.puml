@@ -62,10 +62,10 @@ loop for each test the instructor wrote
     api --> wrap : 200
   end
 
-  opt the test found something worth telling the model
-    ti -> wrap : add_test_context(target, note)
-    wrap -> api : POST .../test-context
-    api -> db : INSERT test_context
+  opt report the outcome, and anything worth telling the model
+    ti -> wrap : add_test_result(target, status,\nfunctional_test_feedback)
+    wrap -> api : POST .../test-result
+    api -> db : INSERT test_result
     api --> wrap : 201
   end
 end
@@ -75,13 +75,18 @@ note over ti #FFF8DC
   explicitly, so the identifier check covers
   them equally.
 
-  add_test_context is where a diagnostic the
-  test already computed gets carried into the
-  prompt: the failing input, the expected and
-  actual values, a hint about which branch was
-  taken. The instructor decides what is worth
-  saying, which is better than us guessing from
-  raw output.
+  add_test_result does two jobs at the moment she
+  knows both. status is stored for the dashboard
+  and is the only functional pass/fail record the
+  system holds. functional_test_feedback is
+  carried into the prompt: the failing input,
+  expected versus actual, a hint about which
+  branch ran.
+
+  Neither is inferred from ai_not_needed. A
+  passing target she still wants commented on,
+  and a failing target she opts out of, are both
+  legitimate.
 end note
 
 note over wrap #FFF8DC
@@ -113,7 +118,7 @@ end note
 script -> aip : invoke AI phase
 aip -> api : GET /submissions/{id}/action
 api -> db : read grading_mode,\nai_authorized_at,\nai_graded_submitted_at
-api --> aip : 200 {action: GRADE,\ntargets[], rubric, feedback_guidance,\ntest_context[], providers[]}
+api --> aip : 200 {action: GRADE,\ntargets[], rubric, feedback_guidance,\ntest_result[], providers[]}
 
 note over api #FFF8DC
   **The container asks what to do; it does not
@@ -138,17 +143,17 @@ note over api #FFF8DC
 end note
 
 loop for each target with ai_needed
-  aip -> aip : build prompt from the rubric,\nthe feedback guidance, the source file\nderived from identifier + kind + language,\na listing of the other files,\nand any test_context
+  aip -> aip : build prompt from the rubric,\nthe feedback guidance, the source file\nderived from identifier + kind + language,\na listing of the other files,\nand any functional_test_feedback
 
   note right of aip #FFF8DC
     Nothing is parsed out of results.json to get
     here. ai_needed said this target wants
-    feedback, and test_context carries whatever
+    feedback, and test_result carries whatever
     diagnostic the instructor chose to pass us.
     The model locates the target in the source
     and reasons from the rubric.
 
-    test_context is untrusted: assertion messages
+    test_result is untrusted: assertion messages
     routinely embed the student's own output.
     Delimit it, label it as test output, cap its
     length, and keep the rubric authoritative
@@ -167,7 +172,7 @@ loop for each target with ai_needed
   end
 
   aip -> api : POST /feedback\n{target, responses[], comparison, selected}
-  api -> db : insert feedback (one row per provider),\ninsert feedback_comparison,\nSET completed_at = now
+  api -> db : insert ai_feedback (one per provider),\ninsert ai_feedback_comparison,\nSET completed_at = now
   api --> aip : 201
 end
 

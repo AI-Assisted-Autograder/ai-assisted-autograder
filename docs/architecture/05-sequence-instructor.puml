@@ -41,7 +41,7 @@ note right of instr #FFF8DC
   **The identifiers registered here are a
   contract with her test suite.** She passes
   these exact strings to ai_not_needed and
-  add_test_context. Rename one and her suite
+  add_test_result. Rename one and her suite
   stops matching, so the API rejects unknown
   names loudly. See AD-3.
 
@@ -99,7 +99,7 @@ end note
 instr -> fe : open results dashboard
 fe -> be : GET /assignments/{id}/results\n?filter=has_deduction
 be -> repo : list_results()
-repo -> db : SELECT joining submission,\nsubmission_target, feedback
+repo -> db : SELECT joining submission,\nsubmission_target, test_result, ai_feedback
 db --> repo : rows
 be --> fe : 200 {results}
 fe --> instr : submissions needing attention
@@ -107,26 +107,30 @@ fe --> instr : submissions needing attention
 instr -> fe : drill into one submission
 fe -> be : GET /submissions/{id}
 be -> repo : get_submission_detail()
-repo -> db : SELECT all feedback rows\n(every provider), comparison,\nai_needed, completed_at, last_error
+repo -> db : SELECT test_result rows,\nai_feedback rows (every provider),\nai_feedback_comparison, ai_needed,\ncompleted_at, last_error
 db --> repo : detail
 be --> fe : 200 {detail}
 fe --> instr : side-by-side provider feedback,\nconfidence, and AI status\n[FR-27, NFR-12]
 
 note right of fe #FFF8DC
-  Three columns tell the blank-looking cases
-  apart: ai_needed false means her suite opted
-  the target out; completed_at NULL means the
-  nightly rerun has not happened yet; last_error
-  set means the attempt ran and failed, and the
-  student has already been told so in
-  results.json.
+  test_result.status gives the dashboard raw
+  functional pass/fail, so FR-8, FR-9 and FR-10
+  are servable without deriving anything from AI
+  scores.
 
-  **OQ-16 bites here.** Functional test outcomes
-  are no longer stored, so this dashboard can
-  show AI feedback and suggested scores but not
-  raw pass/fail. Decide whether that is
-  acceptable, or whether the AI phase should POST
-  the outcomes it parsed, before building it.
+  Three more columns tell the blank-looking
+  feedback cases apart: ai_needed false means her
+  suite opted the target out; completed_at NULL
+  means the nightly rerun has not happened yet;
+  last_error set means the attempt ran and
+  failed, and the student has already been told
+  so in results.json.
+
+  Coverage depends on her calling add_test_result.
+  It is optional, so a suite that never calls it
+  leaves this view empty. Say so in the
+  instructor guide rather than letting an empty
+  dashboard look like a bug.
 end note
 
 == Rate feedback quality [FR-11] ==
@@ -134,7 +138,7 @@ end note
 instr -> fe : rate feedback (1-5 + comment)
 fe -> be : POST /feedback/{id}/review
 be -> repo : create_review()
-repo -> db : INSERT feedback_review
+repo -> db : INSERT ai_feedback_review
 
 note over instr, db #FFF8DC
   **OQ-3, open:** can the instructor EDIT

@@ -1,4 +1,4 @@
-uml-docs 20260922-0253Z
+uml-docs 20260922-0311Z
 
 Decisions (see DECISIONS.md):
   AD-1   Grading mode is per assignment
@@ -6,23 +6,30 @@ Decisions (see DECISIONS.md):
   AD-3   Target identifiers are a checked contract
   AD-4   The autograder container holds the LLM API key
   AD-5   results.json is written before grading starts
-  AD-6   Functional test outcomes are not stored
+  AD-6   results.json is never parsed
   AD-7   ai_needed defaults ON; the suite opts targets out
   AD-8   IMMEDIATE never defers to the nightly run
   AD-9   The token guard
-  AD-10  Optional test context feeds the prompt
+  AD-10  The suite reports outcomes and test feedback
   AD-11  The container asks the service what to do
   AD-12  Source files are derived from the identifier, not configured
 
+Reporting library, both calls optional:
+  ai_not_needed(target)
+  add_test_result(target, status, functional_test_feedback)
+
+Naming: test_result.functional_test_feedback is what the instructor's
+suite reports; ai_feedback (+ _comparison, _review) is what the model
+produces. Both are feedback, so both are qualified.
+
 Open questions, in the order they block work:
-  OQ-16  Test outcomes are unstored. Does the dashboard need them (FR...
-  OQ-3   Can the instructor edit or approve generated feedback before...
+  OQ-3   Can the instructor edit or approve generated feedback befo...
   OQ-1   What exactly is a "deduction" (FR-10)?
   OQ-2   How is confidence defined and computed (FR-28)?
   OQ-4   Are all submission attempts graded, or only the latest?
   OQ-5   In-run retry count and backoff schedule
   OQ-6   Exact Gradescope `results.json` schema
-  OQ-7   Gradescope authentication for the trigger, and where that cr...
+  OQ-7   Gradescope authentication for the trigger, and where that ...
   OQ-8   Web framework, database, cloud host
   OQ-9   Instructor authentication and authorization
   OQ-10  Student data retention and FERPA posture

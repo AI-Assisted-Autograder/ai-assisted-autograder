@@ -117,7 +117,7 @@ gs_ui --> script : container runs\nrun_autograder
 script --> tests_i : 1. run the test suite
 script --> aigrade : 2. invoke the AI phase
 
-tests_i --> wrapper : ai_not_needed(target)\nadd_test_context(target, note)
+tests_i --> wrapper : ai_not_needed(target)\nadd_test_result(target, status,\nfunctional_test_feedback)
 wrapper ..> IReport : HTTPS
 
 aigrade --> packager
@@ -154,8 +154,9 @@ note as N_OWN #FFF8DC
   ai_not_needed: on passing tests, on a subset,
   on any condition she can express in code.
 
-  She can also pass a diagnostic her test already
-  computed, via add_test_context, which is
+  She can also report the outcome via
+  add_test_result: status for the dashboard, and
+  an optional functional_test_feedback string
   carried into the prompt.
 
   run_autograder is hers as well: it decides to

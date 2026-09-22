@@ -47,7 +47,7 @@ package "Reporting Library (Student C)" #FBE6D4 {
 
   interface IReportingClient <<abstract>> {
     +ai_not_needed(target) : None
-    +add_test_context(target, note) : None
+    +add_test_result(target, status,\n functional_test_feedback) : None
     --
     The entire surface the instructor
     touches. Two optional calls. Test
@@ -55,10 +55,13 @@ package "Reporting Library (Student C)" #FBE6D4 {
     her own framework, so there is no
     record_outcome.
     --
-    add_test_context carries a diagnostic
-    her test already computed into the
-    prompt: the failing input, expected
-    versus actual, which branch ran.
+    add_test_result does two jobs at the
+    moment she knows both: status is
+    stored for the dashboard and is the
+    only functional pass/fail record the
+    system holds; the
+    functional_test_feedback string is
+    carried into the prompt.
     --
     Initialises the run on first use:
     upserts the submission and creates
@@ -127,7 +130,7 @@ package "AI Phase entrypoint (Student C)" #FBE6D4 {
     --
     Raw test outcomes are not an input.
     ai_needed says the target wants
-    feedback, and test_context carries
+    feedback, and test_result carries
     any diagnostic the instructor chose
     to pass us.
   }
@@ -162,13 +165,13 @@ package "AI Phase entrypoint (Student C)" #FBE6D4 {
     She keeps whatever produces her results.json
     today; we only add to it.
 
-    It also means results.json is the only record
-    of the functional test run, since nothing
-    persists those outcomes. That is OQ-16.
+    Functional outcomes are persisted separately,
+    as test_result rows her suite reported, so the
+    dashboard does not depend on this file.
 
     Note this class is the ONLY reader of the
     file. Prompts are built from the rubric, the
-    student's source and test_context, so nothing
+    student's source and test_result, so nothing
     needs to match a results.json entry to a
     target.
 
@@ -295,11 +298,12 @@ package "AI Grading (Student A)" #D6E4F0 {
   }
 
   class PromptBuilder {
-    +build(rubric, guidance,\n test_context, resolved) : str
+    +build(rubric, guidance,\n functional_test_feedback, resolved) : str
     +version : str
     --
-    test_context arrives as an ordered
-    list of notes and is UNTRUSTED.
+    functional_test_feedback arrives as
+    an ordered list of strings and is
+    UNTRUSTED.
     Delimit it, label it as test output,
     cap its length, and keep the rubric
     authoritative over anything it says.
@@ -337,7 +341,7 @@ package "Service Boundary (Student B)" #DCEFD9 {
   interface IGradingClient <<abstract>> {
     +init_run(platform_submission_id, submitted_at) : InitResult
     +set_ai_not_needed(submission_id, target) : None
-    +add_test_context(submission_id, target, note) : None
+    +add_test_result(submission_id, target,\n status, functional_test_feedback) : None
     +get_action(platform_submission_id) : ActionResult
     +post_feedback(submission_id, target, result) : None
     +mark_ai_failed(submission_id, target, error) : None
@@ -365,10 +369,10 @@ package "Service Boundary (Student B)" #DCEFD9 {
     +upsert_submission(ref) : str
     +create_targets_default_needed(submission_id) : SubmissionTargetRef[]
     +set_ai_not_needed(submission_id, target) : bool
-    +add_test_context(task_id, note) : None
+    +add_test_result(submission_target_id,\n status, functional_test_feedback) : None
     +decide_action(submission_id) : ActionResult
     +authorise_for_grading(submission_id) : None
-    +get_test_context(task_id) : TestContext[]
+    +get_test_results(submission_target_id) : TestResult[]
     +save_feedback(submission_id, target, result) : None
     +mark_target_failed(submission_id, target, error) : None
     +mark_ai_complete_if_all_done(submission_id) : bool
@@ -443,7 +447,7 @@ note as N2 #FFF8DC
   to interpret.
 
   What remains worth testing is that both
-  set_ai_not_needed and add_test_context reject
+  set_ai_not_needed and add_test_result reject
   an unregistered target name. That is the one
   place a typo in her suite silently changes what
   gets billed or loses a diagnostic, and where

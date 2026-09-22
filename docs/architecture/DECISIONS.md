@@ -115,14 +115,18 @@ If Phase 2 dies outright, that file is what the student sees. Since test
 outcomes are not stored anywhere else (AD-6), losing it to an LLM failure
 would lose the test results entirely.
 
-### AD-6. Functional test outcomes are not stored
+### AD-6. results.json is never parsed
 
 Test results reach the student through `results.json`, written by her own
-framework. Nothing about the test run reaches our database, and nothing
-about it feeds a prompt either.
+framework. We never parse that file to learn what happened.
+
+**Amended by AD-10:** outcomes *are* stored, as `test_result` rows, but
+only because her suite reports them. The direction is what matters. She
+tells us; we do not derive it. `results.json` remains the student-facing
+record and is still read only to splice feedback into.
 
 The prompt is built from the target's rubric, its feedback guidance, the
-student's source code on the container filesystem, and any `test_context`
+student's source code on the container filesystem, and any `test_result` note
 the instructor's suite chose to record (AD-10). `ai_needed` being true
 already carries the only thing a raw outcome had to convey, namely that
 this target wants feedback. The model locates the target in the source
@@ -131,10 +135,9 @@ and reasons from the rubric.
 `results.json` is therefore read exactly once per run, at the end, to
 splice the feedback into.
 
-This removes the `test_outcome` table, the `submission_file` table,
-`record_outcome` from the reporting library (now a one-method interface),
-and any need to reconcile a database copy of the outcomes against the
-file the student actually sees.
+This removes the `submission_file` table and `record_outcome` from the
+reporting library, along with any need to reconcile a parsed copy of the
+outcomes against the file the student actually sees.
 
 `ResultsPackager` therefore **splices rather than authors**: it reads the
 file her framework wrote, appends the AI feedback, and writes the result.
@@ -149,7 +152,7 @@ log. Treat the model's text as untrusted input on the way in too, so
 length-cap it and escape it when inserting, since it ends up in a file
 the platform renders.
 
-The cost is OQ-16.
+
 
 ### AD-7. `ai_needed` defaults ON; the suite opts targets out
 
@@ -230,19 +233,32 @@ of attempts, so one broken target cannot hold a submission in the nightly
 queue forever.
 Once set it is never cleared.
 
-### AD-10. Optional test context feeds the prompt
+### AD-10. The suite reports outcomes and test feedback
 
 The reporting library has a second optional call:
 
 ```
-add_test_context(target, note)
+add_test_result(target, status, functional_test_feedback)
 ```
 
-During functional testing the instructor's suite can record any
-diagnostic it already computed: the failing input, expected versus
-actual, which branch was taken. It is stored in `test_context`, keyed to
-the same `submission_target` row as `ai_needed`, and rendered into the prompt
-by the AI phase.
+During functional testing her suite reports the outcome and, optionally,
+any diagnostic it already computed: the failing input, expected versus
+actual, which branch was taken. Stored in `test_result`, keyed to the
+same `submission_target` row as `ai_needed`.
+
+The two fields serve different consumers, which is why one call carries
+both. `status` is stored for the instructor dashboard and is the only
+functional pass/fail record the system holds, which resolves OQ-16.
+`functional_test_feedback` is rendered into the prompt by the AI phase.
+
+The name is deliberately explicit even though it stutters against the
+table name. The `ai_feedback` table is named for the
+same reason: two unqualified senses of "feedback" in one schema is worse
+than two longer names.
+
+Neither is inferred from `ai_not_needed`. A passing target she still
+wants commented on, and a failing target she opts out of, are both
+legitimate, so the outcome and the decision stay independent.
 
 This is how the prompt gets test detail without anyone parsing
 `results.json`. She names the target explicitly, so the identifier check
@@ -433,7 +449,6 @@ rather than fanning out the provider calls within a run.
 
 | ID | Question | Blocks | Owner |
 | --- | --- | --- | --- |
-| OQ-16 | Test outcomes are unstored. Does the dashboard need them (FR-8/9/10), or is feedback-only enough? | B's dashboard, possibly one table | Instructor + B |
 | OQ-3 | Can the instructor edit or approve generated feedback before the student sees it? | state machine, B's dashboard, whether IMMEDIATE is offered at all | Instructor |
 | OQ-1 | What exactly is a "deduction" (FR-10)? | B's dashboard query | Instructor |
 | OQ-2 | How is confidence defined and computed (FR-28)? | A's engine, B's UI | A |
@@ -447,29 +462,8 @@ rather than fanning out the provider calls within a run.
 | ~~OQ-17~~ | ~~Linking results.json entries to grading targets~~ | **DISSOLVED**: prompts do not use test outcomes, so there is nothing to link | -- |
 
 Resolved: OQ-11 (AD-4), OQ-12 (AD-3), OQ-13 (AD-2), OQ-14 and OQ-15
-(dissolved by AD-7 and AD-8), OQ-17 (dissolved by AD-6), OQ-18 (AD-12).
-
-### OQ-16: the dashboard gap
-
-Outcomes now live only in `results.json`. Gradescope shows them to the
-student and the AI phase parses them for prompts, but nothing persists
-them.
-
-FR-8, FR-9 and FR-10 want a dashboard showing how students are doing and
-filtering to submissions with deductions. Unstored outcomes mean that
-dashboard can show AI feedback and suggested scores but not raw
-functional pass/fail, and "has a deduction" can only be derived from AI
-scores.
-
-**(a) Accept it.** The dashboard's job is feedback quality (FR-11), and
-Gradescope already shows the instructor her own test results.
-
-**(b) Have the AI phase POST the outcomes it parsed**, stored alongside
-the feedback as context. Costs one table and one request, and keeps the
-dashboard self-contained without reintroducing Phase 1 database writes.
-
-Needs deciding before Student B builds the dashboard, since it determines
-whether there is a table to query.
+(dissolved by AD-7 and AD-8), OQ-17 (dissolved by AD-6), OQ-18 (AD-12),
+OQ-16 (AD-10, once outcomes became part of her report).
 
 ### OQ-9 and OQ-10 deserve a flag
 
@@ -504,7 +498,8 @@ Student D should revise section 3.4, which predates these decisions:
 `submission_target` is the join row between a submission and a
 registered grading target: one per `(submission_id,
 grading_target_id)` pair, carrying `ai_needed` and `completed_at`. Child
-tables (`test_context`, `feedback`, `feedback_comparison`) hang off it,
+tables (`test_result`, `ai_feedback`, `ai_feedback_comparison`) hang off
+it,
 because everything they record is per-pair rather than per-submission or
 per-target.
 
@@ -513,6 +508,16 @@ was a job queue with `PENDING`, `IN_PROGRESS`, atomic claiming and
 competing workers. All of that was deleted, and the name outlived it. A
 "task" implies a queue and a worker that no longer exist;
 `submission_target` says what the row actually is.
+
+`ai_feedback`, `ai_feedback_comparison` and `ai_feedback_review` carry
+the `ai_` prefix to contrast with `test_result.functional_test_feedback`.
+Both are feedback; only one is generated by a model. The children were
+renamed too rather than left as `feedback_comparison`, because a child
+whose name does not match its parent invites the question of which table
+it belongs to.
+
+Inside `ai_feedback` the text column is `body`, not `feedback_text`,
+which would stutter against the table name.
 
 State is derived rather than stored. `completed_at` and `last_error`
 already determine whether a row is waiting, done or failed, so an

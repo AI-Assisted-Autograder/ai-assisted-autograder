@@ -46,10 +46,10 @@ loop for each test
     wrap -> api : POST .../ai-not-needed
     api -> db : UPDATE submission_target\nSET ai_needed = FALSE
   end
-  opt the test found something worth telling the model
-    ti -> wrap : add_test_context(target, note)
-    wrap -> api : POST .../test-context
-    api -> db : INSERT test_context
+  opt report the outcome, and anything worth telling the model
+    ti -> wrap : add_test_result(target, status,\nfunctional_test_feedback)
+    wrap -> api : POST .../test-result
+    api -> db : INSERT test_result
   end
 end
 
@@ -164,7 +164,7 @@ end note
 script -> aip : invoke AI phase
 aip -> api : GET /submissions/{id}/action
 api -> db : read grading_mode,\nai_authorized_at,\nai_graded_submitted_at
-api --> aip : 200 {action, targets[], rubric,\nfeedback_guidance, test_context[],\nproviders[]}
+api --> aip : 200 {action, targets[], rubric,\nfeedback_guidance, test_result[],\nproviders[]}
 
 alt action = REEMIT (already graded)
   note over aip #FFF8DC
@@ -179,11 +179,12 @@ alt action = REEMIT (already graded)
 
 else action = GRADE
   loop for each target with ai_needed
-    aip -> aip : build prompt from the rubric,\nthe feedback guidance, the source file\nderived from identifier + kind + language,\na listing of the other files,\nand any test_context
+    aip -> aip : build prompt from the rubric,\nthe feedback guidance, the source file\nderived from identifier + kind + language,\na listing of the other files,\nand any functional_test_feedback
 
     note right of aip #FFF8DC
-      test_context survives the container being
-      destroyed, because it is in the database.
+      functional_test_feedback survives the
+      container being destroyed, because it is in
+      the database.
       That is what makes it usable in NIGHTLY
       mode, where the rerun happens hours later
       in a fresh container.
@@ -201,7 +202,7 @@ else action = GRADE
     end
 
     aip -> api : POST /feedback
-    api -> db : insert feedback rows,\ninsert feedback_comparison,\nSET completed_at = now
+    api -> db : insert ai_feedback rows,\ninsert ai_feedback_comparison,\nSET completed_at = now
     api --> aip : 201
   end
 

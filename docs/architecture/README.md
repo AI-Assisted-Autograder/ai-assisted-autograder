@@ -57,8 +57,21 @@ never rerun, and the AI phase re-checks it to catch reruns the trigger
 did not cause. (AD-9)
 
 `results.json` is written before grading starts, so an AI failure cannot
-cost the student their test results. Since nothing else stores those
-outcomes, that early write is load-bearing. (AD-5)
+cost the student their test results (AD-5). We never parse it back; it is
+read once at the end only to splice feedback in (AD-6).
+
+**Her suite reports outcomes; we never derive them.**
+`add_test_result(target, status, functional_test_feedback)` stores
+`status` for the dashboard — the only functional pass/fail record the
+system holds — and `functional_test_feedback` for the prompt (AD-10).
+Prompts carry the rubric, the source file derived from the target
+identifier (AD-12), a listing of the other files, and that feedback
+string.
+
+`functional_test_feedback` is **untrusted**: assertion messages routinely
+embed the student's own output, so it is a prompt injection surface. Delimit it,
+label it as test output, cap its length, and keep the rubric
+authoritative.
 
 ## Failure handling
 
