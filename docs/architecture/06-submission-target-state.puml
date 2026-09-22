@@ -1,0 +1,98 @@
+@startuml 06-submission-target-state
+' =====================================================================
+' submission_target lifecycle
+' Traces to: FR-18, FR-29, FR-30, NFR-6
+'
+' One row per (submission, registered target). The states below are
+' DERIVED from two columns, not stored in a status enum:
+'
+'   ai_needed     does this target want AI feedback
+'   completed_at  when the AI phase finished with this row, NULL if it
+'                 has not run yet. Set on success AND on failure.
+'   last_error    set only if that finish was a failure
+'
+' Both grading modes behave identically here. IMMEDIATE and NIGHTLY
+' differ only in WHEN the AI phase runs.
+' =====================================================================
+
+title submission_target -- derived states
+
+skinparam shadowing false
+skinparam defaultFontName Helvetica
+
+state "Wants feedback" as WANTS
+state "Opted out" as OPTED
+state "Feedback produced" as DONE
+state "Attempted and failed" as FAILED
+
+[*] --> WANTS : the submission first reports in.\nOne row per registered target,\nai_needed = TRUE
+
+WANTS : ai_needed TRUE, completed_at NULL.
+WANTS : In NIGHTLY mode this is exactly what the
+WANTS : trigger queries. In IMMEDIATE it lasts
+WANTS : only until the AI phase runs, moments
+WANTS : later in the same container.
+
+OPTED : ai_needed FALSE.
+OPTED : Her suite called ai_not_needed, usually
+OPTED : because the test passed. No tokens spent.
+
+DONE : completed_at set, last_error NULL.
+DONE : Feedback rows exist and have been spliced
+DONE : into results.json.
+
+FAILED : completed_at set, last_error recorded.
+FAILED : The AI phase retried inside the run and
+FAILED : still failed, so it appended a note to
+FAILED : results.json saying feedback could not
+FAILED : be generated.
+
+WANTS --> OPTED : her suite calls\nai_not_needed(target)\nduring functional testing
+WANTS --> DONE : AI phase produced feedback
+WANTS --> FAILED : AI phase failed after\nits in-run retries
+
+DONE --> [*]
+OPTED --> [*]
+FAILED --> [*]
+
+note right of FAILED #FFF8DC
+  **Failure is terminal, in both modes.**
+  There is no cross-night retry and no attempt
+  counter. Retries happen inside one AI phase
+  run, with backoff on transient errors and none
+  on deterministic ones, and never outlive the
+  process.
+
+  This is why completed_at is set here too.
+  Leaving it NULL would mean the NIGHTLY trigger
+  picked the row up again every night forever,
+  since its query is exactly "ai_needed and
+  completed_at IS NULL".
+
+  What DOES get retried the next night is work
+  that was never attempted, because the trigger
+  job failed or a service was down. Those rows
+  still have completed_at NULL. "The job did not
+  run" self-heals; "grading ran and failed" does
+  not.
+end note
+
+note as N2 #FFF8DC
+  **Two questions, two mechanisms**
+  ai_needed asks whether this target wants
+  feedback. It is the token saving, and the
+  instructor controls it from her own test suite.
+
+  submission.ai_graded_submitted_at asks whether
+  this submission is finished. The nightly
+  trigger filters on it, so a graded submission
+  is never rerun, and the AI phase re-checks it
+  to catch reruns the trigger did not cause.
+  (AD-9)
+
+  Set that guard once every ai_needed row has
+  completed_at set, whether it succeeded or
+  failed.
+end note
+
+@enduml

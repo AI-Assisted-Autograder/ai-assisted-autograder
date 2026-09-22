@@ -112,26 +112,30 @@ package "AI Phase entrypoint (Student C)" #FBE6D4 {
     run_autograder invokes after her
     test suite exits.
     --
-    Asks which targets still want
-    feedback, grades those when
-    grading_mode is IMMEDIATE, then
-    parses results.json and splices the
-    feedback onto the end.
+    Asks the service for ONE action and
+    performs it:
+      GRADE   generate and splice
+      DEFER   splice a "deferred" note
+      REEMIT  splice stored feedback
+    --
+    It does not know the grading mode,
+    the authorisation rule or the token
+    guard. All three are derived
+    server-side, so changing any of them
+    needs no re-upload of the
+    instructor's autograder zip.
     --
     Raw test outcomes are not an input.
     ai_needed says the target wants
     feedback, and test_context carries
     any diagnostic the instructor chose
     to pass us.
-    --
-    In NIGHTLY mode it does nothing on
-    the submission run; the work happens
-    on the triggered rerun.
   }
 
   class ResultsPackager {
     +parse(path) : PlatformResults
     +splice(results, feedback) : dict
+    +append_deferred(results) : dict
     +append_error(results, message) : dict
     --
     The only code that knows the
@@ -312,8 +316,9 @@ package "Service Boundary (Student B)" #DCEFD9 {
     +init_run(platform_submission_id, submitted_at) : InitResult
     +set_ai_not_needed(submission_id, target) : None
     +add_test_context(submission_id, target, note) : None
-    +get_ai_needed(submission_id) : AiNeededResult
+    +get_action(platform_submission_id) : ActionResult
     +post_feedback(submission_id, target, result) : None
+    +mark_ai_failed(submission_id, target, error) : None
     +mark_ai_complete(submission_id) : bool
     +get_selected_feedback(submission_id) : FeedbackPackage
     +list_submissions_pending_ai(mode) : SubmissionLocator[]
@@ -339,9 +344,11 @@ package "Service Boundary (Student B)" #DCEFD9 {
     +create_targets_default_needed(submission_id) : SubmissionTargetRef[]
     +set_ai_not_needed(submission_id, target) : bool
     +add_test_context(task_id, note) : None
-    +list_ai_needed(submission_id) : SubmissionTargetRef[]
+    +decide_action(submission_id) : ActionResult
+    +authorise_for_grading(submission_id) : None
     +get_test_context(task_id) : TestContext[]
     +save_feedback(submission_id, target, result) : None
+    +mark_target_failed(submission_id, target, error) : None
     +mark_ai_complete_if_all_done(submission_id) : bool
     +get_selected_feedback(...) : FeedbackPackage
     +list_submissions_pending_ai(mode) : SubmissionLocator[]
@@ -360,6 +367,28 @@ IReportingClient ..> IGradingClient : over HTTPS
 AIGradingComponent ..> IGradingClient
 AiPhaseEntrypoint ..> IGradingClient
 NightlyTrigger ..> IGradingClient
+
+note as N_ACTION #FFF8DC
+  **Why one action endpoint rather than several
+  queries.**
+  In NIGHTLY mode the same autograder script runs
+  twice and the database looks identical both
+  times, so the container cannot tell Phase 1
+  from Phase 3 locally. The trigger cannot tell
+  it either: all the trigger does is click a
+  button.
+
+  So the trigger sets submission.ai_authorized_at
+  before clicking, and the service derives the
+  action from grading_mode, that flag and the
+  token guard together.
+
+  Keeping the derivation server-side is the point.
+  The container ships inside the instructor's
+  autograder zip, which is the hardest artifact
+  in the system to update, and every adopting
+  institution has its own copy.
+end note
 
 note as N1 #FFF8DC
   **Why IGradingClient and IGradingRepository
@@ -400,13 +429,17 @@ note as N2 #FFF8DC
 end note
 
 note as N3 #FFF8DC
-  **mark_ai_complete is conditional on purpose.**
-  It sets ai_graded_submitted_at only when no
-  task is still NEEDED, and returns whether it
-  did. Setting it unconditionally would strand
-  failed targets permanently ungraded, because
-  the guard short-circuits before the task query
-  ever runs.
+  **Both outcomes must be recorded.**
+  save_feedback and mark_target_failed each set
+  completed_at on the row. A failure that left
+  completed_at NULL would be picked up by the
+  nightly trigger every night forever, since its
+  query is exactly "ai_needed and completed_at
+  IS NULL".
+
+  mark_ai_complete then sets the submission guard
+  once every ai_needed row has completed_at set,
+  and returns whether it did.
 end note
 
 note as N4 #FFF8DC

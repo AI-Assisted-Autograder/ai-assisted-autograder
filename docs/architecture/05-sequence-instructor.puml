@@ -100,9 +100,11 @@ fe --> instr : side-by-side provider feedback,\nconfidence, and AI status\n[FR-2
 note right of fe #FFF8DC
   Three columns tell the blank-looking cases
   apart: ai_needed false means her suite opted
-  the target out; completed_at NULL with no
-  last_error means feedback is still coming;
-  last_error set means the attempt failed.
+  the target out; completed_at NULL means the
+  nightly rerun has not happened yet; last_error
+  set means the attempt ran and failed, and the
+  student has already been told so in
+  results.json.
 
   **OQ-16 bites here.** Functional test outcomes
   are no longer stored, so this dashboard can

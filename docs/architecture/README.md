@@ -27,7 +27,13 @@ which are the ones that constrain other people's code.
 
 **We ship a library, not a runner.** The instructor's own JUnit or pytest
 suite *is* the autograder. Her `run_autograder` then invokes our AI phase
-as a separate command. We never invoke her tests. (AD-2)
+as a separate command, in every run. We never invoke her tests. (AD-2)
+
+**The AI phase holds no policy.** It asks the service for one action —
+`GRADE`, `DEFER` or `REEMIT` — and performs it. Grading mode, the nightly
+authorisation flag and the token guard are all derived server-side,
+because that code ships inside the instructor's autograder zip and is the
+hardest thing to update. (AD-11)
 
 **Functional test outcomes are not stored.** They go to `results.json`
 through her existing framework, and the AI phase parses them back to

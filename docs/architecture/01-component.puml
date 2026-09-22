@@ -179,14 +179,16 @@ note as N_AIP #FFF8DC
   as a separate command after her suite exits,
   not from inside her test code.
 
-  Parses the results.json her framework wrote,
-  asks which targets still want feedback, grades
-  those if grading_mode is IMMEDIATE, and splices
-  the feedback onto the end of results.json.
+  Invoked by the instructor's script in EVERY
+  run, including the submission run of a NIGHTLY
+  assignment. It asks the service for one action
+  and performs it: GRADE, DEFER or REEMIT.
 
-  Functional test outcomes never reach our
-  database. results.json is the record, and this
-  phase reads it back.
+  It holds no policy. Grading mode, the nightly
+  authorisation flag and the token guard are all
+  derived server-side, because this code ships
+  inside the instructor's autograder zip and is
+  the hardest thing in the system to update.
 end note
 
 note as N_TRIG #FFF8DC

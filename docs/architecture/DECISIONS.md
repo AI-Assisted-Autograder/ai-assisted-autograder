@@ -171,11 +171,41 @@ instructor guide prominently.
 
 ### AD-8. IMMEDIATE never defers to the nightly run
 
-If AI generation fails in `IMMEDIATE` mode, the AI phase appends a note
-to `results.json` saying feedback could not be generated, and stops. The
-student keeps their test results and gets an honest explanation.
+Failure is handled identically in both grading modes. The AI phase
+retries inside its run, with backoff on transient errors and no retry on
+deterministic ones. If it still fails, it appends a note to
+`results.json` saying feedback could not be generated and sets
+`completed_at` with `last_error`. The student keeps their test results
+and gets an honest explanation.
 
-Retry across nights applies only to `NIGHTLY` mode.
+Nothing is carried to another night. There is no `attempt_count` and no
+cross-night retry, in either mode. `IMMEDIATE` and `NIGHTLY` differ only
+in *when* the AI phase runs, never in what it does when generation
+fails.
+
+**Two things follow, and both are load-bearing.**
+
+`completed_at` is set on the failure path too. Leaving it NULL would mean
+the nightly trigger picked the row up again every night forever, since
+its query is exactly `ai_needed AND completed_at IS NULL`.
+
+The trigger query also filters on `grading_mode = 'NIGHTLY'`. A failed
+`IMMEDIATE` row already has `completed_at` set so it would be excluded
+anyway, but a container killed before the AI phase ran would not be, and
+sweeping that up would contradict the mode the instructor chose.
+
+**What does still get retried** is work that was never attempted: the
+trigger job failed, our service was down, Gradescope was. Those rows
+still have `completed_at` NULL and the next night picks them up. "The
+job did not run" self-heals; "grading ran and failed" does not. That is
+the line, and it falls out of the schema rather than needing a rule.
+
+**What this gives up**, honestly: a transient failure during a nightly
+run is now permanent for that submission. The reason that is acceptable
+is in the failure taxonomy below. The rate-limit spike that makes
+`IMMEDIATE` risky is a deadline-hour phenomenon, and `NIGHTLY` grades at
+3am against a serialised trigger, so the main driver of transient failure
+is largely absent there.
 
 ### AD-9. The token guard
 
@@ -240,6 +270,58 @@ test output, keep the rubric authoritative over anything it says, cap the
 length per row and per target, and do not let it take over the role of
 the guidance. The length cap is also a cost control, since this text is
 billed as input tokens on every provider call for that target.
+### AD-11. The container asks the service what to do
+
+The instructor's autograder script is one script, so it invokes the AI
+phase in every run, including the submission run of a `NIGHTLY`
+assignment. The AI phase therefore has to behave differently in
+situations it cannot distinguish locally.
+
+It does not try. It asks:
+
+```
+GET /submissions/{platform_submission_id}/action
+  -> GRADE | DEFER | REEMIT
+```
+
+| Situation | Action |
+| --- | --- |
+| `IMMEDIATE` | `GRADE` |
+| `NIGHTLY`, `ai_authorized_at` NULL | `DEFER` |
+| `NIGHTLY`, `ai_authorized_at` set | `GRADE` |
+| Already graded (AD-9 guard) | `REEMIT` |
+
+`DEFER` splices a section into `results.json` saying feedback will
+arrive by the next morning, and spends nothing.
+
+**Why the container cannot work this out itself.** In `NIGHTLY` mode the
+same script runs twice and the database looks identical both times: rows
+with `ai_needed` set and `completed_at` NULL. The trigger cannot tell the
+container either, because all the trigger does is click a button in a
+web UI. So the nightly job sets `submission.ai_authorized_at` **before**
+clicking rerun, and the service derives the action from the mode, that
+flag and the guard together.
+
+Order matters. Set the flag after the click and the container can start,
+ask, and get `DEFER` again.
+
+**Why server-side.** The AI phase ships inside the instructor's
+autograder zip, which is the hardest artifact in the system to update and
+which every adopting institution has its own copy of. Policy held there
+would need a coordinated re-upload to change. Policy held in the service
+changes once.
+
+Alternatives rejected: counting autograder runs, which breaks the moment
+an instructor reruns to debug something; anything time-based, which
+introduces a clock dependence for no benefit.
+
+**Failure mode to report.** If the trigger sets the flag but the rerun
+never happens, tomorrow's trigger simply tries again, so that case is
+harmless. If the trigger fails to set the flag at all, nothing ever
+grades and it looks exactly like "no feedback needed" — the same class of
+silent failure as a missed click, and it belongs in the same
+`trigger_run` reporting.
+
 
 ---
 
@@ -264,13 +346,19 @@ because it bears on the choice of grading mode.
 6. **Autograder timeout** kills the container, in which case nothing runs
    and AD-5's early write is what survives.
 
-Two consequences. **Classify before retrying**: a deterministic failure
-returns the same result every attempt, so it should not consume
-`attempt_count`. And **failures 1 and 6 are correlated with the
-deadline**, so the failure rate is not uniform — it spikes exactly when
-the most students are affected. That is the strongest argument for
-preferring `NIGHTLY` in a large course, and an argument for serialising
-rather than fanning out the provider calls.
+Two consequences.
+
+**Classify before retrying.** Retries happen inside a single AI phase run
+(AD-8), so this is about whether to spend a few seconds of backoff, not
+about scheduling. A deterministic failure returns the same result every
+attempt, so it should not be retried at all.
+
+**Failures 1 and 6 are correlated with the deadline**, so the failure
+rate is not uniform — it spikes exactly when the most students are
+affected. That is the strongest argument for preferring `NIGHTLY` in a
+large course, since `NIGHTLY` grades at 3am against a serialised trigger
+and misses the spike entirely. It is also an argument for serialising
+rather than fanning out the provider calls within a run.
 
 ---
 
@@ -282,7 +370,7 @@ rather than fanning out the provider calls.
 | OQ-1 | What exactly is a "deduction" (FR-10)? | B's dashboard query | Instructor |
 | OQ-2 | How is confidence defined and computed (FR-28)? | A's engine, B's UI | A |
 | OQ-4 | Are all submission attempts graded, or only the latest? | cost | Instructor |
-| OQ-5 | Retry policy: attempt cap and the transient/deterministic split | A and C will otherwise write two | D |
+| OQ-5 | In-run retry count and backoff schedule | A's provider adapters | A |
 | OQ-6 | Exact Gradescope `results.json` schema | C's packager, D's tests | C |
 | OQ-7 | Gradescope authentication for the trigger, and where that credential lives | C's trigger | C |
 | OQ-8 | Web framework, database, cloud host | B cannot start | B |
@@ -358,11 +446,10 @@ competing workers. All of that was deleted, and the name outlived it. A
 "task" implies a queue and a worker that no longer exist;
 `submission_target` says what the row actually is.
 
-State is derived rather than stored. `completed_at`, `last_error` and
-`attempt_count` already determine whether a row is waiting, done or
-failed, so an `ai_status` enum could only agree with them or contradict
-them. The derived states are drawn in
-`06-submission-target-state.puml`.
+State is derived rather than stored. `completed_at` and `last_error`
+already determine whether a row is waiting, done or failed, so an
+`ai_status` enum could only agree with them or contradict them. The
+derived states are drawn in `06-submission-target-state.puml`.
 
 ---
 

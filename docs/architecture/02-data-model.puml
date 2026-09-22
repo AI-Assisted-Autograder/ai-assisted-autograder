@@ -136,6 +136,7 @@ entity "submission" as sub #FBE6D4 {
   * platform_submission_id : text
   student_identifier : text
   * submitted_at : timestamptz
+  ai_authorized_at : timestamptz
   * ai_graded_submitted_at : timestamptz
   is_active_attempt : boolean
   first_seen_at : timestamptz
@@ -157,7 +158,6 @@ entity "submission_target" as subtgt #FBE6D4 {
   * grading_target_id : uuid <<FK>>
   * ai_needed : boolean <<default TRUE>>
   completed_at : timestamptz
-  attempt_count : integer
   last_error : text
   --
   unique: submission_id,
@@ -178,17 +178,27 @@ entity "submission_target" as subtgt #FBE6D4 {
   out, so a reason would carry no
   information.
   --
-  No ai_status enum either. The state
-  is already implied by three columns
-  that have to exist anyway:
-    completed_at set
-      -> feedback exists
-    completed_at NULL, last_error NULL
+  No ai_status enum either. Two columns
+  say everything:
+    completed_at NULL
       -> not attempted yet
-    completed_at NULL, last_error set
-      -> the attempt failed
-  An enum alongside these could only
-  agree with them or contradict them.
+    completed_at set, last_error NULL
+      -> feedback produced
+    completed_at set, last_error set
+      -> attempted and failed; the
+         message went to results.json
+  --
+  completed_at means "the AI phase
+  finished with this row", not "it
+  succeeded". Both outcomes are
+  terminal, because there is no
+  cross-night retry: a failure gets the
+  same message in both grading modes.
+  --
+  No attempt_count either. Retries
+  happen inside a single AI phase run
+  and never outlive the process, so
+  there is nothing to persist.
 }
 
 ' ---------------------------------------------------------------------
@@ -281,6 +291,7 @@ entity "trigger_run" as run #EDE0F0 {
   started_at : timestamptz
   finished_at : timestamptz
   status : text
+  submissions_authorised : integer
   submissions_rerun : integer
   submissions_failed_to_trigger : integer
   log_uri : text
@@ -321,9 +332,9 @@ note as N1 #FFF8DC
        AND ai_graded_submitted_at = submitted_at:
        skip AI grading, re-emit stored feedback
 
-  Set it only once every ai_needed row for the
-  submission either has completed_at set or has
-  run out of attempts. Setting it on
+  Set it once every ai_needed row for the
+  submission has completed_at set, whether that
+  row succeeded or failed. Setting it on
   partial success would strand the failed
   targets permanently ungraded.
 
@@ -337,6 +348,38 @@ note as N1 #FFF8DC
   stops selecting it, and the autograder skips
   the AI component if invoked for any other
   reason.
+end note
+
+note as N_AUTH #FFF8DC
+  **ai_authorized_at: how the container tells
+  Phase 1 from Phase 3.**
+  In NIGHTLY mode the same autograder script runs
+  twice, and the database looks identical both
+  times: rows with ai_needed set and completed_at
+  NULL. The container has no local way to know
+  which run it is in, and the trigger cannot pass
+  it anything, since all the trigger does is
+  click a button.
+
+  So the trigger records authorization BEFORE
+  clicking rerun. Phase 1 finds it NULL and
+  defers; Phase 3 finds it set and grades.
+
+  Order matters: set it before the click, or the
+  container can start and ask before the flag
+  lands.
+
+  Idempotent by design. If the flag is set but
+  the rerun never happens, tomorrow's trigger
+  simply tries again. The dangerous case is the
+  trigger failing to set it at all, which looks
+  exactly like "no feedback needed" -- so it
+  belongs in the same trigger_run reporting as a
+  failed click.
+  --
+  IMMEDIATE never uses this column. The decision
+  is derived server-side, so the container does
+  not know the rule.
 end note
 
 note as N1b #FFF8DC

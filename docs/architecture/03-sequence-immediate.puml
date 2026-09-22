@@ -111,9 +111,31 @@ end note
 == Phase 2: AI feedback ==
 
 script -> aip : invoke AI phase
-aip -> api : GET /submissions/{id}/ai-needed
-api -> db : SELECT submission_target WHERE ai_needed,\njoin rubric WHERE is_current,\njoin test_context
-api --> aip : 200 {targets[], rubric,\nfeedback_guidance,\ntest_context[]}
+aip -> api : GET /submissions/{id}/action
+api -> db : read grading_mode,\nai_authorized_at,\nai_graded_submitted_at
+api --> aip : 200 {action: GRADE,\ntargets[], rubric,\nfeedback_guidance,\ntest_context[]}
+
+note over api #FFF8DC
+  **The container asks what to do; it does not
+  work it out.** One endpoint returns one of:
+    GRADE   generate feedback now
+    DEFER   write a "deferred" section and stop
+    REEMIT  splice the feedback already stored
+
+  Deriving it server-side:
+    IMMEDIATE                     -> GRADE
+    NIGHTLY, not yet authorised   -> DEFER
+    NIGHTLY, authorised           -> GRADE
+    already graded (AD-9 guard)   -> REEMIT
+
+  This collapses the mode rule, the nightly
+  authorisation check and the token guard into
+  one decision in one place. It matters because
+  the container is the hardest thing to update:
+  it lives inside the instructor's autograder
+  zip, so policy held there would need every
+  adopter to re-upload when it changed.
+end note
 
 loop for each target with ai_needed
   aip -> aip : build prompt from the rubric,\nthe feedback guidance, the student's\ncode on disk, and any test_context
@@ -151,7 +173,7 @@ end
 
 alt feedback generated
   aip -> api : POST /submissions/{id}/ai-complete
-  api -> db : UPDATE submission\nSET ai_graded_submitted_at = submitted_at\nWHERE every ai_needed row is done\nor out of attempts
+  api -> db : UPDATE submission\nSET ai_graded_submitted_at = submitted_at\nWHERE every ai_needed row has\ncompleted_at set
   api --> aip : 200 {guard_set}
   aip -> aip : parse results.json and splice\nthe feedback onto the end
 
@@ -161,19 +183,28 @@ alt feedback generated
     re-running the autograder to debug something
     would re-bill every target on the submission.
 
-    Conditional on every ai_needed row being done
-    or out of attempts, so a partial failure
-    leaves it NULL and the state stays honest.
+    Conditional on every ai_needed row having
+    completed_at set. Since failure sets it too,
+    a submission where some targets failed still
+    gets its guard, which is correct: nothing
+    further will be attempted.
   end note
 
-else failed after retries
+else failed after in-run retries
+  aip -> api : POST /submissions/{id}/ai-failed\n{target, error}
+  api -> db : SET completed_at = now,\nlast_error = error
+  api --> aip : 200
   aip -> aip : append a note that AI feedback\ncould not be generated
   note right of aip #FFF8DC
-    No deferral to the nightly run. IMMEDIATE
-    means immediate: the student gets their test
-    results plus an honest note, and that is the
-    end of it. See the failure taxonomy below for
-    what actually goes wrong.
+    completed_at is set on the failure path too,
+    so the row is terminal and no later run will
+    pick it up. last_error distinguishes it from
+    a success for the dashboard.
+
+    NIGHTLY does exactly the same thing (AD-8).
+    The only difference between the modes is WHEN
+    the AI phase runs, never what it does on
+    failure.
   end note
 end
 

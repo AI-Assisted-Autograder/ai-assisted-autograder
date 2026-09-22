@@ -1,4 +1,4 @@
-uml-docs 20260922-0130Z
+uml-docs 20260922-0208Z
 
 Decisions reflected (see DECISIONS.md):
   AD-1   Grading mode is per assignment
@@ -11,18 +11,20 @@ Decisions reflected (see DECISIONS.md):
   AD-8   IMMEDIATE never defers to the nightly run
   AD-9   The token guard
   AD-10  Optional test context feeds the prompt
+  AD-11  The container asks the service what to do
 
 Reporting library surface, both calls optional:
   ai_not_needed(target)
   add_test_context(target, note)
 
-submission_target is the (submission x grading_target) join row,
-carrying ai_needed and completed_at. There is no status enum: state is
-derived from completed_at, last_error and attempt_count.
+The AI phase runs in EVERY autograder run and holds no policy. It asks
+GET /submissions/{id}/action and gets GRADE, DEFER or REEMIT. The
+nightly trigger sets submission.ai_authorized_at BEFORE clicking
+rerun; that flag is how the service tells a submission run from a
+triggered rerun.
 
-Prompts use the rubric, the feedback guidance, the student's source,
-and any test_context notes. Raw test outcomes are neither stored nor
-parsed. results.json is read once at the end, to splice feedback into,
-by deterministic code.
+submission_target: ai_needed, completed_at, last_error. No status enum
+and no attempt counter. Retries live inside one run; failure is
+terminal and reported in results.json in both modes.
 
 If a rendered diagram disagrees with this file, the rendering is stale.

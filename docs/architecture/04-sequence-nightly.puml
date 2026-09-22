@@ -56,46 +56,74 @@ end
 ti --> script : suite exits
 script -> gs : write results.json\n(functional test results)
 
-note over script #FFF8DC
-  grading_mode is NIGHTLY, so the AI phase is not
-  invoked now. The submission_target rows still
-  rows marked ai_needed with completed_at still
-  NULL are what tonight's trigger looks for.
+script -> aip : invoke AI phase
 
-  Unlike IMMEDIATE, this results.json is not
-  overwritten in this run. The rerun produces a
-  fresh one.
+note over script #FFF8DC
+  **The same script runs in both phases**, so it
+  invokes the AI phase here too. The script has
+  no idea which phase it is in, and does not need
+  to.
 end note
 
-gs --> stud : test results now,\nfeedback tomorrow
+aip -> api : GET /submissions/{id}/action
+api -> db : read grading_mode,\nai_authorized_at,\nai_graded_submitted_at
+api --> aip : 200 {action: DEFER}
+
+note over api #FFF8DC
+  NIGHTLY, and ai_authorized_at is NULL, so the
+  answer is DEFER. No LLM call and no tokens.
+
+  completed_at stays NULL on every ai_needed row,
+  which is exactly what tonight's trigger
+  queries.
+end note
+
+aip -> aip : parse results.json and splice\na "feedback deferred" section
+aip -> gs : write the new results.json
+gs --> stud : test results now, and a note\nthat feedback arrives by\ntomorrow morning
 
 == Phase 2: nightly -- trigger a rerun per submission ==
 
 cron -> trig : invoke
 trig -> api : POST /trigger-runs (start)
-trig -> api : GET /submissions/pending-ai
-api -> db : SELECT submission JOIN submission_target\nWHERE ai_needed AND completed_at IS NULL\nAND attempt_count < 3\nAND ai_graded_submitted_at IS NULL
+trig -> api : GET /submissions/pending-ai?mode=NIGHTLY
+api -> db : SELECT submission JOIN submission_target\nJOIN assignment\nWHERE assignment.grading_mode = 'NIGHTLY'\nAND ai_needed AND completed_at IS NULL\nAND ai_graded_submitted_at IS NULL
 db --> api : submission list
 api --> trig : 200 {submissions[] with platform ids}
 
 note right of api #FFF8DC
-  **OQ-15.** The query deliberately does not
-  filter on grading_mode. Any submission with a
-  task still NEEDED qualifies, including one from
-  an IMMEDIATE assignment whose grading failed.
-  That failure self-heals overnight and the
-  student gets feedback next morning instead of
-  at once.
+  **Restricted to NIGHTLY assignments**, and to
+  rows with completed_at NULL, which means never
+  attempted.
 
-  Filtering on grading_mode = NIGHTLY instead
-  would leave such a task stuck forever, the
-  submission permanently half-graded, nothing
-  retrying it. Ratify this choice.
+  A row the AI phase already attempted has
+  completed_at set whether it succeeded or
+  failed, so it will not come back tomorrow.
+  Failure is terminal and reported in
+  results.json, exactly as in IMMEDIATE (AD-8).
+
+  What this query DOES pick up again is work
+  that was never attempted, because the trigger
+  job itself failed, or our service was down, or
+  Gradescope was. That is the right line: "the
+  job did not run" self-heals, "grading ran and
+  failed" does not.
 end note
 
 trig -> gs : log in
 
 loop for each submission needing AI grading
+  trig -> api : POST /submissions/{id}/authorise
+  api -> db : SET ai_authorized_at = now
+  api --> trig : 200
+
+  note right of trig #FFF8DC
+    **Authorise BEFORE clicking.** The container
+    can start and ask for its action within
+    seconds, so a flag set afterwards would race
+    and the rerun would DEFER again.
+  end note
+
   trig -> gs : open the submission,\nclick "Rerun Autograder"
   gs --> trig : accepted
   trig -> api : POST /trigger-runs/{id}/record\n{platform_submission_id, ok}
@@ -134,11 +162,11 @@ note over script #FFF8DC
 end note
 
 script -> aip : invoke AI phase
-aip -> api : GET /submissions/{id}/ai-needed
-api -> db : SELECT submission_target\nWHERE ai_needed AND completed_at IS NULL,\njoin rubric WHERE is_current,\njoin test_context
-api --> aip : 200 {targets[], rubric,\nfeedback_guidance, test_context[],\nai_graded_submitted_at}
+aip -> api : GET /submissions/{id}/action
+api -> db : read grading_mode,\nai_authorized_at,\nai_graded_submitted_at
+api --> aip : 200 {action, targets[], rubric,\nfeedback_guidance, test_context[]}
 
-alt already graded on an earlier night
+alt action = REEMIT (already graded)
   note over aip #FFF8DC
     **The token guard.** Reruns happen for
     reasons other than our trigger: an instructor
@@ -149,7 +177,7 @@ alt already graded on an earlier night
   api --> aip : 200 {stored feedback}
   aip -> aip : parse results.json and splice\nthe stored feedback in
 
-else work remains
+else action = GRADE
   loop for each target with ai_needed
     aip -> aip : build prompt from the rubric,\nthe feedback guidance, the student's\ncode on disk, and any test_context
 
@@ -178,7 +206,7 @@ else work remains
   end
 
   aip -> api : POST /submissions/{id}/ai-complete
-  api -> db : UPDATE submission\nSET ai_graded_submitted_at = submitted_at\nWHERE every ai_needed row is done\nor out of attempts
+  api -> db : UPDATE submission\nSET ai_graded_submitted_at = submitted_at\nWHERE every ai_needed row has\ncompleted_at set
   api --> aip : 200 {guard_set}
   aip -> aip : parse results.json and splice\nthe feedback onto the end
 end
@@ -187,29 +215,27 @@ aip -> gs : write the new results.json
 gs --> stud : feedback now visible
 
 note over trig, db #FFF8DC
-  **OQ-5, retry policy in NIGHTLY mode.**
-  Unlike IMMEDIATE, a failure here can wait for
-  tomorrow, so retrying across nights is worth
-  having:
-  1. A transient failure (429, 5xx, timeout)
-     leaves completed_at NULL, records
-     last_error and increments attempt_count.
-     The next night retries while
-     attempt_count < 3.
-  2. A deterministic failure (context overflow,
-     refusal, unparseable output) should set
-     attempt_count straight to the cap, since
-     retrying reaches the same answer at three
-     times the cost.
-  3. A row out of attempts counts as settled for
-     the guard, so one broken target cannot hold
-     a submission in the queue forever. Surface
-     it on the dashboard.
-  4. If the trigger cannot find or click a
+  **Retry behaviour is identical to IMMEDIATE.**
+  The AI phase retries inside the run, with
+  backoff on transient errors and no retry on
+  deterministic ones. If it still fails, the
+  failure message goes into results.json and
+  completed_at is set. Nothing is carried to
+  another night.
+
+  Two consequences worth stating:
+  1. The rate-limit argument that makes IMMEDIATE
+     risky barely applies here. NIGHTLY grades at
+     3am against a serialised trigger, not during
+     a deadline-hour submission spike, so the
+     main driver of transient failure is largely
+     absent.
+  2. If the trigger cannot find or click a
      submission's rerun button, record it on
-     trigger_run and surface it. A silent trigger
-     failure looks identical to "no feedback
-     needed".
+     trigger_run and surface it. Nothing was
+     attempted, so tomorrow will retry it, but a
+     silent trigger failure otherwise looks
+     identical to "no feedback needed".
 end note
 
 @enduml
