@@ -53,6 +53,38 @@ jobs:
             "https://github.com/plantuml/plantuml/releases/download/v${PLANTUML_VERSION}/plantuml-${PLANTUML_VERSION}.jar" \
             -o ~/.plantuml/plantuml.jar
 
+      # DECISIONS.md carries a generated table of contents. Fail if it no
+      # longer matches the headings, so a renamed section cannot leave a
+      # stale link behind.
+      - name: Check DECISIONS.md table of contents
+        run: |
+          python3 - docs/architecture/DECISIONS.md <<'PYEOF'
+          import re, sys
+          s = open(sys.argv[1]).read()
+          def anchor(t):
+              t = t.lower()
+              t = re.sub(r'[^\w\s-]', '', t)
+              return re.sub(r'\s+', '-', t.strip())
+          want = []
+          for m in re.finditer(r'^(#{2,3}) (.+)$', s, re.M):
+              lvl, title = len(m.group(1)), m.group(2)
+              if title == 'Contents':
+                  continue
+              want.append(f"{'  '*(lvl-2)}- [{title}](#{anchor(title)})")
+          block = re.search(r'^## Contents\n\n(.*?)\n\n---', s, re.M | re.S)
+          if not block:
+              print('::error file=docs/architecture/DECISIONS.md::no Contents block')
+              sys.exit(1)
+          have = block.group(1).split('\n')
+          if have != want:
+              print('::error file=docs/architecture/DECISIONS.md::table of contents is stale')
+              for l in set(want) - set(have):
+                  print(f'  missing: {l.strip()}')
+              for l in set(have) - set(want):
+                  print(f'  extra:   {l.strip()}')
+              sys.exit(1)
+          PYEOF
+
       # PlantUML names output from the "@startuml <name>" directive, not
       # from the filename. If they drift, a rename produces output under
       # the old name and the stale file looks legitimate.

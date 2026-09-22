@@ -61,6 +61,41 @@ check_sequence_notes() {
   return "${bad}"
 }
 
+# DECISIONS.md carries a generated table of contents. Verify it still
+# matches the headings, so a renamed or added section cannot leave a
+# stale link behind.
+check_toc() {
+  python3 - "${SRC_DIR}/DECISIONS.md" <<'PYEOF'
+import re, sys
+p = sys.argv[1]
+s = open(p).read()
+def anchor(t):
+    t = t.lower()
+    t = re.sub(r'[^\w\s-]', '', t)
+    return re.sub(r'\s+', '-', t.strip())
+want = []
+for m in re.finditer(r'^(#{2,3}) (.+)$', s, re.M):
+    lvl, title = len(m.group(1)), m.group(2)
+    if title == 'Contents':
+        continue
+    want.append(f"{'  '*(lvl-2)}- [{title}](#{anchor(title)})")
+block = re.search(r'^## Contents\n\n(.*?)\n\n---', s, re.M | re.S)
+if not block:
+    print('error: DECISIONS.md has no Contents block', file=sys.stderr)
+    sys.exit(1)
+have = block.group(1).split('\n')
+if have != want:
+    print('error: DECISIONS.md table of contents is stale.', file=sys.stderr)
+    for line in set(want) - set(have):
+        print(f'       missing: {line.strip()}', file=sys.stderr)
+    for line in set(have) - set(want):
+        print(f'       extra:   {line.strip()}', file=sys.stderr)
+    sys.exit(1)
+PYEOF
+}
+
+echo 'Checking DECISIONS.md table of contents...'
+check_toc
 echo 'Checking @startuml names match filenames...'
 check_names
 echo 'Checking sequence-diagram note syntax...'

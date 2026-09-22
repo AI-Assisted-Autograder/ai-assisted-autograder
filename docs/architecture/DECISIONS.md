@@ -6,6 +6,30 @@ contributor needs when the constraint stops making obvious sense.
 
 ---
 
+## Contents
+
+- [Decisions](#decisions)
+  - [AD-1. Grading mode is per assignment](#ad-1-grading-mode-is-per-assignment)
+  - [AD-2. The instructor's test suite is the autograder](#ad-2-the-instructors-test-suite-is-the-autograder)
+  - [AD-3. Target identifiers are a checked contract](#ad-3-target-identifiers-are-a-checked-contract)
+  - [AD-4. The autograder container holds the LLM API key](#ad-4-the-autograder-container-holds-the-llm-api-key)
+  - [AD-5. `results.json` is written before grading starts](#ad-5-resultsjson-is-written-before-grading-starts)
+  - [AD-6. results.json is never parsed](#ad-6-resultsjson-is-never-parsed)
+  - [AD-7. `ai_needed` defaults ON; the suite opts targets out](#ad-7-ai_needed-defaults-on-the-suite-opts-targets-out)
+  - [AD-8. Failure is terminal, identically in both modes](#ad-8-failure-is-terminal-identically-in-both-modes)
+  - [AD-9. A graded submission is never graded again](#ad-9-a-graded-submission-is-never-graded-again)
+  - [AD-10. The suite reports outcomes and test feedback](#ad-10-the-suite-reports-outcomes-and-test-feedback)
+  - [AD-11. The container asks the service what to do](#ad-11-the-container-asks-the-service-what-to-do)
+  - [AD-12. Source files are derived from the identifier, not configured](#ad-12-source-files-are-derived-from-the-identifier-not-configured)
+  - [AD-13. Platform: FastAPI, PostgreSQL, Oracle Cloud](#ad-13-platform-fastapi-postgresql-oracle-cloud)
+- [Why AI generation fails](#why-ai-generation-fails)
+- [Open questions](#open-questions)
+  - [OQ-9 and OQ-10 deserve a flag](#oq-9-and-oq-10-deserve-a-flag)
+- [Changes to make in the SRS](#changes-to-make-in-the-srs)
+- [Naming](#naming)
+
+---
+
 ## Decisions
 
 ### AD-1. Grading mode is per assignment
@@ -210,7 +234,7 @@ is in the failure taxonomy below. The rate-limit spike that makes
 3am against a serialized trigger, so the main driver of transient failure
 is largely absent there.
 
-### AD-9. The token guard
+### AD-9. A graded submission is never graded again
 
 `submission.ai_graded_submitted_at` records the submission time that AI
 grading last completed for. The AI phase checks it before doing any work.
@@ -428,10 +452,13 @@ means running it on the compute instance. Student D inherits backups,
 upgrades and process supervision, and OQ-10 inherits the question of
 where student-data backups live.
 
-*The instances are ARM.* Ampere A1 is aarch64, and GitHub's default
-runners are x86. Container images built in CI will not run on the host
-unless they are arm64 or multi-arch. Worth settling in the first week,
-because the failure looks like an unrelated deployment problem.
+*The instances are ARM.* Ampere A1 is aarch64, so container images must
+be arm64. This is a per-job label in the workflow, not a repository
+setting: `runs-on: ubuntu-24.04-arm`. Free and unlimited on public
+repositories, and available in private ones against the plan's minute
+allocation. Build jobs that produce deployment images should use it;
+jobs that only run tests need not, though matching production
+architecture is the safer default.
 
 *The free allowance shrank.* Oracle reduced Always Free Ampere A1 from
 4 OCPU / 24 GB to 2 OCPU / 12 GB during 2026, and instances above the new

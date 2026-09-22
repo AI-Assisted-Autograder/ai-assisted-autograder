@@ -1,6 +1,6 @@
-uml-docs 20260922-1118Z
+uml-docs 20260922-1125Z
 
-Decisions (see DECISIONS.md):
+Decisions (see DECISIONS.md, which has a table of contents):
   AD-1   Grading mode is per assignment
   AD-2   The instructor's test suite is the autograder
   AD-3   Target identifiers are a checked contract
@@ -9,7 +9,7 @@ Decisions (see DECISIONS.md):
   AD-6   results.json is never parsed
   AD-7   ai_needed defaults ON; the suite opts targets out
   AD-8   Failure is terminal, identically in both modes
-  AD-9   The token guard
+  AD-9   A graded submission is never graded again
   AD-10  The suite reports outcomes and test feedback
   AD-11  The container asks the service what to do
   AD-12  Source files are derived from the identifier, not configured
