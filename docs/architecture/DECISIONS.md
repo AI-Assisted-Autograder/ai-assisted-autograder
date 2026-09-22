@@ -51,7 +51,7 @@ be a rewrite rather than an adoption.
 
 Consequences:
 
-- No `ITestRunner` interface. Running tests is not our job.
+- Running tests is not our job, so we ship no test-runner interface.
 - The **AI phase** is a command her `run_autograder` invokes after the
   suite exits, not something called from inside her test code, so she
   never has to remember a teardown.
@@ -172,7 +172,7 @@ opposite risk profile from requiring an explicit request: nothing goes
 silently unexplained, but a forgotten opt-out is expensive. Put it in the
 instructor guide prominently.
 
-### AD-8. IMMEDIATE never defers to the nightly run
+### AD-8. Failure is terminal, identically in both modes
 
 Failure is handled identically in both grading modes. The AI phase
 retries inside its run, with backoff on transient errors and no retry on
@@ -222,11 +222,12 @@ of exactly which submission was graded. A new attempt gets a new
 guard suppresses only re-grading of an already-graded attempt.
 
 It matters because reruns happen for reasons other than our trigger: an
-instructor debugging the autograder, a TA re-running a flaky test. Set it
-only when every `ai_needed` row either has `completed_at` set or is out
-of attempts, so one broken target cannot hold a submission in the nightly
-queue forever.
-Once set it is never cleared.
+instructor debugging the autograder, a TA re-running a flaky test.
+
+Set it once every `ai_needed` row has `completed_at` set, which includes
+rows that failed. Once set it is never cleared. Because failure is
+terminal (AD-8), a submission whose targets all finished, successfully or
+not, is finished for good and leaves the nightly queue.
 
 ### AD-10. The suite reports outcomes and test feedback
 
@@ -243,7 +244,7 @@ same `submission_target` row as `ai_needed`.
 
 The two fields serve different consumers, which is why one call carries
 both. `status` is stored for the instructor dashboard and is the only
-functional pass/fail record the system holds, which resolves OQ-16.
+functional pass/fail record the system holds.
 `functional_test_feedback` is rendered into the prompt by the AI phase.
 
 The name is deliberately explicit even though it stutters against the
@@ -441,30 +442,27 @@ rather than fanning out the provider calls within a run.
 
 ## Open questions
 
+Ordered by what they block. IDs are stable, so they are not sequential.
+
 | ID | Question | Blocks | Owner |
 | --- | --- | --- | --- |
-| OQ-3 | Can the instructor edit or approve generated feedback before the student sees it? | state machine, B's dashboard, whether IMMEDIATE is offered at all | Instructor |
-| OQ-1 | What exactly is a "deduction" (FR-10)? | B's dashboard query | Instructor |
-| OQ-2 | How is confidence defined and computed (FR-28)? | A's engine, B's UI | A |
-| OQ-4 | Are all submission attempts graded, or only the latest? | cost | Instructor |
-| OQ-5 | In-run retry count and backoff schedule | A's provider adapters | A |
+| OQ-8 | Web framework, database, cloud host | B cannot start without these | B |
 | OQ-6 | Exact Gradescope `results.json` schema | C's packager, D's tests | C |
 | OQ-7 | Gradescope authentication for the trigger, and where that credential lives | C's trigger | C |
-| OQ-8 | Web framework, database, cloud host | B cannot start | B |
+| OQ-3 | Can the instructor edit or approve generated feedback before the student sees it? | state machine, B's dashboard, whether IMMEDIATE is offered at all | Instructor |
+| OQ-4 | Are all submission attempts graded, or only the latest? | cost | Instructor |
+| OQ-1 | What exactly is a "deduction" (FR-10)? | B's dashboard query | Instructor |
+| OQ-2 | How is confidence defined and computed (FR-28)? | A's engine, B's UI | A |
+| OQ-5 | In-run retry count and backoff schedule | A's provider adapters | A |
 | OQ-9 | Instructor authentication and authorization | B's backend | B |
 | OQ-10 | Student data retention and FERPA posture | deployment | Instructor |
-| ~~OQ-17~~ | ~~Linking results.json entries to grading targets~~ | **DISSOLVED**: prompts do not use test outcomes, so there is nothing to link | -- |
-
-Resolved: OQ-11 (AD-4), OQ-12 (AD-3), OQ-13 (AD-2), OQ-14 and OQ-15
-(dissolved by AD-7 and AD-8), OQ-17 (dissolved by AD-6), OQ-18 (AD-12),
-OQ-16 (AD-10, once outcomes became part of her report).
 
 ### OQ-9 and OQ-10 deserve a flag
 
 The SRS specifies no instructor authentication at all, which is fine for
 a prototype on synthetic data. And in `IMMEDIATE` mode student code
-reaches a third-party LLM within seconds of submission. It is no longer
-retained by us (AD-6), but it does leave the institution. Retention,
+reaches a third-party LLM within seconds of submission. We do not retain
+it (AD-6), but it does leave the institution. Retention,
 access and consent need answers before a live section. Pitt has people
 whose job this is.
 

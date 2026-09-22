@@ -121,12 +121,10 @@ package "AI Phase entrypoint (Student C)" #FBE6D4 {
       DEFER   splice a "deferred" note
       REEMIT  splice stored feedback
     --
-    It does not know the grading mode,
-    the authorization rule or the token
-    guard. All three are derived
-    server-side, so changing any of them
-    needs no re-upload of the
-    instructor's autograder zip.
+    It holds no policy: grading mode,
+    the authorization rule and the token
+    guard are all derived server-side.
+    See the note below.
     --
     Raw test outcomes are not an input.
     ai_needed says the target wants

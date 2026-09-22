@@ -492,47 +492,49 @@ end note
 note as N2b #FFF8DC
   **An unregistered target name is an error.**
   If the instructor's suite calls ai_not_needed
-  with a name not registered on this assignment,
-  the API rejects it with a 4xx naming it and
-  listing the registered ones, and the library
-  raises so her test run fails.
+  or add_test_result with a name not registered
+  on this assignment, the API rejects it with a
+  4xx naming it and listing the registered ones,
+  and the library raises so her test run fails.
 
-  This is now the only identifier check that can
-  exist. Since ai_needed defaults to TRUE,
-  there is no longer a "registered but never
-  reported" case to detect: a target the suite
-  never mentions simply keeps its default and
-  gets graded.
+  This is the only identifier check available.
+  Because ai_needed defaults to TRUE, a target
+  the suite never mentions keeps its default and
+  gets graded, so there is no "registered but
+  never reported" case to catch.
 
-  A narrower case survives: a target she renamed
-  in the web app but never opts out will not
-  trigger this check at all, since no call
-  mentions it. The consequence is mild, though:
-  it simply gets graded, and prompts do not
-  depend on matching anything in results.json.
+  One case slips through: a target she renamed in
+  the web app but never opts out is never named
+  by any call, so nothing rejects it. The
+  consequence is mild. It simply gets graded, and
+  file resolution (AD-12) will fail loudly if the
+  identifier no longer matches the submission
+  layout.
 end note
 
 note as N2c #FFF8DC
-  **Open decisions still outstanding**
-  OQ-1  "deduction" (FR-10) undefined. Derive as
-        a view, not a column:
-        feedback.suggested_score < max_score,
-        since test outcomes are no longer in
-        the database. See the dashboard note.
-  OQ-2  confidence (FR-28) has a column but no
-        agreed semantics.
+  **Open decisions that touch this schema**
+  OQ-1  "deduction" (FR-10) is undefined.
+        Derive it as a view rather than adding a
+        column. Both inputs are now available:
+        a failing test_result.status, or
+        ai_feedback.suggested_score below the
+        target's max_score.
+  OQ-2  confidence has a column but no agreed
+        semantics.
   OQ-4  resubmissions. As drawn every attempt is
-        graded. is_active_attempt exists if a
-        latest-only policy is chosen.
+        graded, and is_active_attempt is the
+        column a latest-only policy would use.
 end note
 
 note as N3 #FFF8DC
   **Student code and FERPA**
-  Student source code is no longer stored here:
-  it stays on the autograder container and is
-  read from disk when building a prompt. What
-  this schema does hold is student identifiers
-  and the AI feedback written about their work.
+  Student source code stays on the autograder
+  container and is read from disk when building
+  a prompt, so it is not in this schema. What is
+  here is student identifiers, functional
+  outcomes, and the AI feedback written about
+  their work.
 
   In IMMEDIATE mode their code still reaches a
   third-party LLM within seconds of submission,
