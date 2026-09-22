@@ -164,7 +164,7 @@ end note
 script -> aip : invoke AI phase
 aip -> api : GET /submissions/{id}/action
 api -> db : read grading_mode,\nai_authorized_at,\nai_graded_submitted_at
-api --> aip : 200 {action, targets[], rubric,\nfeedback_guidance, test_context[]}
+api --> aip : 200 {action, targets[], rubric,\nfeedback_guidance, test_context[],\nproviders[]}
 
 alt action = REEMIT (already graded)
   note over aip #FFF8DC
@@ -179,7 +179,7 @@ alt action = REEMIT (already graded)
 
 else action = GRADE
   loop for each target with ai_needed
-    aip -> aip : build prompt from the rubric,\nthe feedback guidance, the student's\ncode on disk, and any test_context
+    aip -> aip : build prompt from the rubric,\nthe feedback guidance, the source file\nderived from identifier + kind + language,\na listing of the other files,\nand any test_context
 
     note right of aip #FFF8DC
       test_context survives the container being

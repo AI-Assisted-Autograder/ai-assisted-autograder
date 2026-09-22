@@ -17,10 +17,10 @@ participant "Web Backend\n/ REST API" as be #DCEFD9
 participant "Repository\nLayer" as repo #DCEFD9
 database "Grading DB" as db #DCEFD9
 
-== Configure an assignment and its grading mode [FR-1, FR-6] ==
+== Configure an assignment: grading mode and language [FR-1, FR-6] ==
 
-instr -> fe : create assignment,\nchoose IMMEDIATE or NIGHTLY
-fe -> be : POST /assignments\n{platform_assignment_id, name,\ngrading_mode}
+instr -> fe : create assignment,\nchoose IMMEDIATE or NIGHTLY,\nchoose the language
+fe -> be : POST /assignments\n{platform_assignment_id, name,\ngrading_mode, language}
 be -> repo : create_assignment()
 repo -> db : INSERT assignment
 be --> fe : 201 {assignment_id}
@@ -40,9 +40,10 @@ note right of instr #FFF8DC
 
   **The identifiers registered here are a
   contract with her test suite.** She passes
-  these exact strings to ai_not_needed. Rename
-  one and her suite stops matching, so the API
-  rejects unknown names loudly. See OQ-12.
+  these exact strings to ai_not_needed and
+  add_test_context. Rename one and her suite
+  stops matching, so the API rejects unknown
+  names loudly. See AD-3.
 
   For the instructor guide: IMMEDIATE puts LLM
   latency inside the platform's autograder
@@ -57,12 +58,26 @@ loop for each method or class to grade
   fe -> be : POST /assignments/{id}/targets
   be -> repo : create_target()
   repo -> db : INSERT grading_target
-
-  instr -> fe : designate relevant files (globs)
-  fe -> be : POST /targets/{id}/file-patterns
-  be -> repo : set_file_patterns()
-  repo -> db : INSERT target_file_pattern
 end
+
+note over instr #FFF8DC
+  She does not designate source files. The AI
+  phase derives the file from the target's
+  identifier, its kind and the assignment's
+  language (AD-12), so a pattern here would
+  restate what she already typed.
+
+  A FILE-kind target's identifier IS the glob,
+  which covers the case where one target spans
+  several files.
+
+  Resolution must land on exactly one file.
+  Zero or several is a feedback failure the
+  student sees, so an identifier that does not
+  match the assignment's layout shows up
+  quickly rather than producing vague feedback
+  nobody can account for.
+end note
 
 == Attach rubric and feedback guidance [FR-4, FR-5, FR-13] ==
 
@@ -125,12 +140,20 @@ note over instr, db #FFF8DC
   **OQ-3, open:** can the instructor EDIT
   generated feedback before the student sees it?
 
-  This is now mode-dependent, which makes it
-  harder than before. In nightly mode an
-  approval gate is possible between the marking
-  and the rerun. In immediate mode there is no
-  window: feedback reaches the student in the
-  same autograder run that generates it.
+  Mode-dependent. In NIGHTLY there is now a
+  natural place to put an approval gate: the
+  instructor approving a submission IS setting
+  ai_authorized_at, which AD-11 already uses as
+  the signal to grade. So "hold until approved"
+  needs no new mechanism, just a different actor
+  setting the same flag.
+
+  In IMMEDIATE there is no window at all:
+  feedback reaches the student in the same run
+  that generates it. If review-before-release
+  turns out to be required, that is an argument
+  against offering IMMEDIATE, not a feature to
+  add.
 
   If review-before-release is required, it is an
   argument against offering immediate mode at

@@ -1,6 +1,6 @@
-uml-docs 20260922-0208Z
+uml-docs 20260922-0253Z
 
-Decisions reflected (see DECISIONS.md):
+Decisions (see DECISIONS.md):
   AD-1   Grading mode is per assignment
   AD-2   The instructor's test suite is the autograder
   AD-3   Target identifiers are a checked contract
@@ -12,19 +12,19 @@ Decisions reflected (see DECISIONS.md):
   AD-9   The token guard
   AD-10  Optional test context feeds the prompt
   AD-11  The container asks the service what to do
+  AD-12  Source files are derived from the identifier, not configured
 
-Reporting library surface, both calls optional:
-  ai_not_needed(target)
-  add_test_context(target, note)
-
-The AI phase runs in EVERY autograder run and holds no policy. It asks
-GET /submissions/{id}/action and gets GRADE, DEFER or REEMIT. The
-nightly trigger sets submission.ai_authorized_at BEFORE clicking
-rerun; that flag is how the service tells a submission run from a
-triggered rerun.
-
-submission_target: ai_needed, completed_at, last_error. No status enum
-and no attempt counter. Retries live inside one run; failure is
-terminal and reported in results.json in both modes.
+Open questions, in the order they block work:
+  OQ-16  Test outcomes are unstored. Does the dashboard need them (FR...
+  OQ-3   Can the instructor edit or approve generated feedback before...
+  OQ-1   What exactly is a "deduction" (FR-10)?
+  OQ-2   How is confidence defined and computed (FR-28)?
+  OQ-4   Are all submission attempts graded, or only the latest?
+  OQ-5   In-run retry count and backoff schedule
+  OQ-6   Exact Gradescope `results.json` schema
+  OQ-7   Gradescope authentication for the trigger, and where that cr...
+  OQ-8   Web framework, database, cloud host
+  OQ-9   Instructor authentication and authorization
+  OQ-10  Student data retention and FERPA posture
 
 If a rendered diagram disagrees with this file, the rendering is stale.

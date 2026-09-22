@@ -91,7 +91,7 @@ package "Reporting Library (Student C)" #FBE6D4 {
     web app and again in the suite. A mismatch
     must fail the instructor's test run loudly,
     not record an outcome against nothing.
-    See OQ-12.
+    See AD-3.
   end note
 }
 
@@ -272,8 +272,30 @@ package "AI Grading (Student A)" #D6E4F0 {
     API key and no bill.
   }
 
+  class FileResolver {
+    +resolve(identifier, kind,\n language, submission_dir) : Resolved
+    --
+    Derives the source file from the
+    identifier (AD-12). Returns exactly
+    ONE file plus a listing of the other
+    files in the submission, names only.
+    --
+    Zero matches and multiple matches
+    are both FAILURES. Neither is passed
+    to the model: grading with no file
+    invents feedback from the rubric,
+    and picking between candidates may
+    grade a file the tests never
+    exercised.
+    --
+    Pure function of its inputs, so it
+    is cheap to unit-test across the
+    nasty cases: inner classes, a copy
+    under a test root, a stray backup.
+  }
+
   class PromptBuilder {
-    +build(rubric, guidance,\n test_context, source) : str
+    +build(rubric, guidance,\n test_context, resolved) : str
     +version : str
     --
     test_context arrives as an ordered

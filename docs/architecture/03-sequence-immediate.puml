@@ -113,7 +113,7 @@ end note
 script -> aip : invoke AI phase
 aip -> api : GET /submissions/{id}/action
 api -> db : read grading_mode,\nai_authorized_at,\nai_graded_submitted_at
-api --> aip : 200 {action: GRADE,\ntargets[], rubric,\nfeedback_guidance,\ntest_context[]}
+api --> aip : 200 {action: GRADE,\ntargets[], rubric, feedback_guidance,\ntest_context[], providers[]}
 
 note over api #FFF8DC
   **The container asks what to do; it does not
@@ -138,7 +138,7 @@ note over api #FFF8DC
 end note
 
 loop for each target with ai_needed
-  aip -> aip : build prompt from the rubric,\nthe feedback guidance, the student's\ncode on disk, and any test_context
+  aip -> aip : build prompt from the rubric,\nthe feedback guidance, the source file\nderived from identifier + kind + language,\na listing of the other files,\nand any test_context
 
   note right of aip #FFF8DC
     Nothing is parsed out of results.json to get
@@ -190,21 +190,27 @@ alt feedback generated
     further will be attempted.
   end note
 
-else failed after in-run retries
+else failed: no feedback, or no single source file
   aip -> api : POST /submissions/{id}/ai-failed\n{target, error}
   api -> db : SET completed_at = now,\nlast_error = error
   api --> aip : 200
   aip -> aip : append a note that AI feedback\ncould not be generated
   note right of aip #FFF8DC
+    Two things land here. Generation failing after
+    its in-run retries, and file resolution
+    yielding zero or several candidates instead of
+    one (AD-12). Both append a message naming the
+    target and the problem, and the student sees
+    it.
+
     completed_at is set on the failure path too,
-    so the row is terminal and no later run will
-    pick it up. last_error distinguishes it from
-    a success for the dashboard.
+    so the row is terminal and no later run picks
+    it up. last_error distinguishes it from a
+    success for the dashboard.
 
     NIGHTLY does exactly the same thing (AD-8).
-    The only difference between the modes is WHEN
-    the AI phase runs, never what it does on
-    failure.
+    The modes differ only in WHEN the AI phase
+    runs, never in what it does on failure.
   end note
 end
 

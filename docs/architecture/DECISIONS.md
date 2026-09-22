@@ -23,10 +23,15 @@ grades nothing. Each night a job runner logs in with browser automation
 and clicks "Rerun Autograder" on every submission that still has work.
 During that rerun the AI phase does the grading.
 
-`results.json` writes follow from the mode: once for `IMMEDIATE`, twice
-for `NIGHTLY` (test results on the submission run, feedback on the
-rerun). In `NIGHTLY` mode the first write has no AI feedback at all,
-which reads correctly to a student as "not graded yet".
+`results.json` is written **twice per autograder run**: once by her
+framework with the test results (AD-5), once by the AI phase after it
+splices in whatever AD-11 told it to add. So `IMMEDIATE` writes it twice
+in total and `NIGHTLY` four times, twice on the submission run and twice
+on the rerun.
+
+In `NIGHTLY` mode the submission run's second write carries a "feedback
+deferred" section rather than feedback, so the student is told what is
+coming rather than left with an unexplained gap.
 
 For the instructor guide: `IMMEDIATE` puts LLM latency inside the
 platform's autograder timeout, and submissions spike before a deadline.
@@ -322,6 +327,68 @@ grades and it looks exactly like "no feedback needed" — the same class of
 silent failure as a missed click, and it belongs in the same
 `trigger_run` reporting.
 
+### AD-12. Source files are derived from the identifier, not configured
+
+There is no `target_file_pattern` table. The AI phase works out which
+source file to read from the target's `identifier`, its `kind`, and the
+assignment's `language`:
+
+| `kind` | identifier | derived glob |
+| --- | --- | --- |
+| `METHOD` | `edu.pitt.cs.Statistics#median` | `**/Statistics.java` |
+| `CLASS` | `edu.pitt.cs.Statistics` | `**/Statistics.java` |
+| `FILE` | `src/**/*.java` | itself, used as a glob |
+
+A configured pattern would restate what the instructor already entered,
+and the two could then disagree with her having to maintain both. This is
+the same shape as the policy enum that AD-7 removed.
+
+Letting a `FILE` identifier *be* a glob also covers the multi-file case,
+which was the only argument for making the patterns a one-to-many table.
+
+**`assignment.language` exists because of this.** The file extension and
+the package-to-path convention are not inferable from the identifier
+alone: `foo.bar` is ambiguous between a Python module path and a Java
+package. Keep the derivation in one small per-language mapping rather
+than scattered through the prompt builder, so adding a language is one
+table entry rather than an archaeology exercise.
+
+**Resolution must yield exactly one file.** Zero matches and more than
+one match are both failures, taken down the AD-8 failure path: the AI
+phase records `last_error`, sets `completed_at`, and appends a message to
+`results.json` naming the target and the problem. The student sees it.
+
+Deliberately strict, because both alternatives are worse. Grading with no
+source file produces feedback invented from the rubric alone. Picking one
+of several candidates means silently grading a file that may not be the
+one the tests exercised, and the feedback then confidently describes the
+wrong code. "Could not resolve a source file for `Statistics#median`" is
+a configuration problem someone can fix; a plausible paragraph about the
+wrong file is not.
+
+The cause is usually the instructor's identifier or the assignment's file
+layout rather than anything the student did, so the message should say so
+plainly, as the unregistered-target error does (AD-3).
+
+**Inner and nested classes.** `Outer$Inner` and `Outer.Inner` live in
+`Outer.java`. Derivation stops at the outermost class rather than taking
+the last segment. Getting this wrong turns every nested-class target into
+a zero-match failure.
+
+**Cross-file causes.** A `METHOD` target can fail because of a helper in
+another file. Only the resolved file's contents go into the prompt, so
+the prompt also carries a **listing of the other files in the
+submission**, names only. That costs few tokens and lets the model say
+the cause may lie outside what it was shown instead of confidently
+misdiagnosing the method it can see.
+
+**A practical risk to watch.** A student who leaves a copy of a file
+somewhere in their submission turns a multiple-match into a feedback
+failure for that target. If that proves common, the fix is to narrow what
+counts as a candidate — excluding test roots, or directories the
+assignment does not expect — rather than to start guessing between
+candidates.
+
 
 ---
 
@@ -367,6 +434,7 @@ rather than fanning out the provider calls within a run.
 | ID | Question | Blocks | Owner |
 | --- | --- | --- | --- |
 | OQ-16 | Test outcomes are unstored. Does the dashboard need them (FR-8/9/10), or is feedback-only enough? | B's dashboard, possibly one table | Instructor + B |
+| OQ-3 | Can the instructor edit or approve generated feedback before the student sees it? | state machine, B's dashboard, whether IMMEDIATE is offered at all | Instructor |
 | OQ-1 | What exactly is a "deduction" (FR-10)? | B's dashboard query | Instructor |
 | OQ-2 | How is confidence defined and computed (FR-28)? | A's engine, B's UI | A |
 | OQ-4 | Are all submission attempts graded, or only the latest? | cost | Instructor |
@@ -378,8 +446,8 @@ rather than fanning out the provider calls within a run.
 | OQ-10 | Student data retention and FERPA posture | deployment | Instructor |
 | ~~OQ-17~~ | ~~Linking results.json entries to grading targets~~ | **DISSOLVED**: prompts do not use test outcomes, so there is nothing to link | -- |
 
-Resolved: OQ-3 (no post-hoc feedback requests), OQ-11 (AD-4),
-OQ-12 (AD-3), OQ-13 (AD-2), OQ-14 and OQ-15 (dissolved by AD-7 and AD-8).
+Resolved: OQ-11 (AD-4), OQ-12 (AD-3), OQ-13 (AD-2), OQ-14 and OQ-15
+(dissolved by AD-7 and AD-8), OQ-17 (dissolved by AD-6), OQ-18 (AD-12).
 
 ### OQ-16: the dashboard gap
 

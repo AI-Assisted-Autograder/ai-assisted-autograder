@@ -45,11 +45,19 @@ entity "assignment" as assignment #DCEFD9 {
   * platform : text <<GRADESCOPE>>
   * platform_assignment_id : text
   * grading_mode : text <<IMMEDIATE|NIGHTLY>>
+  * language : text <<JAVA|PYTHON|...>>
   name : text
   is_active : boolean
   created_at : timestamptz
   --
   unique: platform, platform_assignment_id
+  --
+  language is what makes the source
+  file derivable from a target's
+  identifier (AD-12). It cannot be
+  inferred reliably: "foo.bar" is
+  ambiguous between a Python module
+  path and a Java package.
   --
   grading_mode decides WHEN AI grading
   happens, for the whole assignment:
@@ -75,6 +83,11 @@ entity "grading_target" as target #DCEFD9 {
   --
   FR-2, FR-3.
   --
+  identifier plus kind plus the
+  assignment's language determine which
+  source file the AI phase reads. There
+  is no file-pattern table: see AD-12.
+  --
   No feedback_mode column. A target the
   instructor never wants AI feedback on
   simply is not registered, so a NEVER
@@ -82,15 +95,6 @@ entity "grading_target" as target #DCEFD9 {
   Whether a given SUBMISSION gets
   feedback on this target is
   submission_target.ai_needed.
-}
-
-entity "target_file_pattern" as tfile #DCEFD9 {
-  * id : uuid <<PK>>
-  --
-  * grading_target_id : uuid <<FK>>
-  * path_glob : text
-  --
-  FR-7
 }
 
 entity "rubric" as rubric #DCEFD9 {
@@ -124,6 +128,11 @@ entity "llm_provider_config" as pcfg #DCEFD9 {
   container's environment, so this
   table says WHAT to call and the
   container supplies the credential.
+  --
+  Returned to the AI phase as part of
+  the AD-11 action response, since that
+  is already the one call the container
+  makes before doing any work.
 }
 
 ' ---------------------------------------------------------------------
@@ -139,14 +148,19 @@ entity "submission" as sub #FBE6D4 {
   ai_authorized_at : timestamptz
   * ai_graded_submitted_at : timestamptz
   is_active_attempt : boolean
-  first_seen_at : timestamptz
-  last_autograder_run_at : timestamptz
   --
   unique: assignment_id,
           platform_submission_id
   --
   FR-18, FR-29, FR-30, NFR-6.
   See the guard note below.
+  --
+  is_active_attempt is UNUSED as drawn.
+  It exists only in case OQ-4 is settled
+  as "grade the latest attempt only".
+  If OQ-4 lands the other way, delete
+  it rather than leaving a column
+  nothing reads.
 }
 
 
@@ -308,7 +322,6 @@ entity "trigger_run" as run #EDE0F0 {
 course ||--o{ assignment
 assignment ||--o{ target
 assignment ||--o{ sub
-target ||--o{ tfile
 target ||--o{ rubric
 target ||--o{ subtgt
 sub ||--o{ subtgt
