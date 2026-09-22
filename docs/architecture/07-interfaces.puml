@@ -5,9 +5,15 @@
 '
 ' Shaped by AD-2: we ship a library, not a runner. The instructor's
 ' test suite calls us, and her run_autograder invokes our AI phase.
-' There is therefore no ITestRunner and no IMarkingHook -- running
-' tests and deciding what needs feedback are both ordinary code in her
-' suite.
+' There is no ITestRunner: running tests is not our job.
+'
+' IReportingClient is down to ONE method. Test results go to
+' results.json through her own framework, so we never record outcomes.
+' Her only call to us opts a target OUT of AI feedback, because
+' ai_needed defaults to TRUE.
+'
+' ResultsPackager splices rather than authors: it reads the
+' results.json her framework wrote and appends the AI feedback.
 ' =====================================================================
 
 title Key Interfaces and Extension Points
@@ -40,12 +46,24 @@ package "Written by the instructor" #FFF2CC {
 package "Reporting Library (Student C)" #FBE6D4 {
 
   interface IReportingClient <<abstract>> {
-    +record_outcome(target, test_name,\n status, output, earned_score) : None
-    +request_ai_feedback(target, note) : None
+    +ai_not_needed(target) : None
+    +add_test_context(target, note) : None
     --
     The entire surface the instructor
-    touches. Two calls. Keep it this
-    small.
+    touches. Two optional calls. Test
+    results go to results.json through
+    her own framework, so there is no
+    record_outcome.
+    --
+    add_test_context carries a diagnostic
+    her test already computed into the
+    prompt: the failing input, expected
+    versus actual, which branch ran.
+    --
+    Initialises the run on first use:
+    upserts the submission and creates
+    one submission_target per registered
+    target with ai_needed = TRUE.
   }
 
   class JavaReporter {
@@ -94,42 +112,68 @@ package "AI Phase entrypoint (Student C)" #FBE6D4 {
     run_autograder invokes after her
     test suite exits.
     --
-    Resolves marks, errors if a
-    registered target was never
-    reported, writes a tests-only
-    results.json, then grades the marked
-    tasks if grading_mode is IMMEDIATE
-    or leaves them NEEDED if NIGHTLY,
-    and overwrites results.json.
+    Asks which targets still want
+    feedback, grades those when
+    grading_mode is IMMEDIATE, then
+    parses results.json and splices the
+    feedback onto the end.
+    --
+    Raw test outcomes are not an input.
+    ai_needed says the target wants
+    feedback, and test_context carries
+    any diagnostic the instructor chose
+    to pass us.
+    --
+    In NIGHTLY mode it does nothing on
+    the submission run; the work happens
+    on the triggered rerun.
   }
 
   class ResultsPackager {
-    +to_platform_json(pkg, pending) : dict
+    +parse(path) : PlatformResults
+    +splice(results, feedback) : dict
+    +append_error(results, message) : dict
     --
     The only code that knows the
     platform's results.json schema.
     --
-    Called TWICE per grading run: once
-    with test results only before
-    grading starts, once with the full
-    content after. Last write wins, so a
-    container killed mid-grading leaves
-    the student with test results rather
-    than a bare autograder error.
+    Does NOT author results.json, and no
+    model output shapes it. The
+    instructor's framework wrote the
+    file; this parses it, inserts the
+    feedback string and score as values,
+    and writes it back. Deterministic
+    and unit-testable with no LLM in the
+    loop.
     --
-    `pending` is the tasks still NEEDED.
-    A courtesy marker for each is worth
-    emitting in NIGHTLY mode.
+    append_error is the failure path: the
+    student keeps their test results and
+    an honest note that feedback could
+    not be generated.
   }
 
   note as N_PKG #FFF8DC
-    In NIGHTLY mode the first results.json has no
-    AI feedback at all, which reads correctly as
-    "not graded yet". A one-line marker per
-    pending task saying feedback arrives by the
-    next morning is a courtesy rather than a
-    correctness requirement, but it saves the
-    student wondering.
+    Splicing rather than authoring leaves the
+    instructor's existing autograder setup intact.
+    She keeps whatever produces her results.json
+    today; we only add to it.
+
+    It also means results.json is the only record
+    of the functional test run, since nothing
+    persists those outcomes. That is OQ-16.
+
+    Note this class is the ONLY reader of the
+    file. Prompts are built from the rubric, the
+    student's source and test_context, so nothing
+    needs to match a results.json entry to a
+    target.
+
+    The model's contribution is a string and a
+    number, inserted by this class. It never
+    emits JSON and never sees the file's
+    structure. Splicing must stay deterministic:
+    this is the code path between an LLM and a
+    student's grade report.
   end note
 
   AiPhaseEntrypoint --> ResultsPackager
@@ -225,8 +269,16 @@ package "AI Grading (Student A)" #D6E4F0 {
   }
 
   class PromptBuilder {
-    +build(rubric, guidance,\n outcomes, files) : str
+    +build(rubric, guidance,\n test_context, source) : str
     +version : str
+    --
+    test_context arrives as an ordered
+    list of notes and is UNTRUSTED.
+    Delimit it, label it as test output,
+    cap its length, and keep the rubric
+    authoritative over anything it says.
+    Assertion messages routinely embed
+    the student's own output.
   }
 
   class ResponseComparator {
@@ -257,9 +309,11 @@ AiPhaseEntrypoint --> AIGradingComponent
 package "Service Boundary (Student B)" #DCEFD9 {
 
   interface IGradingClient <<abstract>> {
-    +resolve_marks(platform_submission_id) : ResolveResult
-    +get_feedback_request(task_id) : FeedbackRequest
-    +post_feedback(task_id, result) : None
+    +init_run(platform_submission_id, submitted_at) : InitResult
+    +set_ai_not_needed(submission_id, target) : None
+    +add_test_context(submission_id, target, note) : None
+    +get_ai_needed(submission_id) : AiNeededResult
+    +post_feedback(submission_id, target, result) : None
     +mark_ai_complete(submission_id) : bool
     +get_selected_feedback(submission_id) : FeedbackPackage
     +list_submissions_pending_ai(mode) : SubmissionLocator[]
@@ -282,11 +336,12 @@ package "Service Boundary (Student B)" #DCEFD9 {
   interface IGradingRepository <<abstract>> {
     +get_assignment_config(...) : AssignmentConfig
     +upsert_submission(ref) : str
-    +record_outcome(...) : None
-    +record_ai_request(submission_id, target) : None
-    +resolve_marks_and_create_tasks(submission_id) : ResolveResult
-    +build_feedback_request(task_id) : FeedbackRequest
-    +save_feedback(task_id, result) : None
+    +create_targets_default_needed(submission_id) : SubmissionTargetRef[]
+    +set_ai_not_needed(submission_id, target) : bool
+    +add_test_context(task_id, note) : None
+    +list_ai_needed(submission_id) : SubmissionTargetRef[]
+    +get_test_context(task_id) : TestContext[]
+    +save_feedback(submission_id, target, result) : None
     +mark_ai_complete_if_all_done(submission_id) : bool
     +get_selected_feedback(...) : FeedbackPackage
     +list_submissions_pending_ai(mode) : SubmissionLocator[]
@@ -315,7 +370,7 @@ note as N1 #FFF8DC
   database credentials inside the autograder
   zip.
 
-  Note the asymmetry decided in AD-5: the
+  Note the asymmetry decided in AD-4: the
   container DOES hold the instructor's LLM API
   key, and does NOT hold a database credential.
   It reaches our data only through this client,
@@ -330,23 +385,18 @@ note as N1 #FFF8DC
 end note
 
 note as N2 #FFF8DC
-  **resolve_marks_and_create_tasks is where cost
-  control lives.** It applies each target's
-  feedback_mode and, under AUTOGRADER, the
-  requests the instructor's suite made during
-  this run. It can only run after her suite has
-  exited, because only then is the full request
-  set known.
+  **Cost control is now almost nothing.**
+  ai_needed starts TRUE and the instructor's
+  suite turns individual targets off. There is no
+  resolution step to get wrong and no policy enum
+  to interpret.
 
-  It also returns the registered targets that
-  received no outcome. That is an error, not a
-  warning: the AI phase exits non-zero and the
-  autograder run fails.
-
-  Pure function of policy plus requests, so it
-  is the cheapest thing in the system to
-  unit-test and the most expensive to get wrong.
-  Student D should cover it first.
+  What remains worth testing is that both
+  set_ai_not_needed and add_test_context reject
+  an unregistered target name. That is the one
+  place a typo in her suite silently changes what
+  gets billed or loses a diagnostic, and where
+  Student D's tests earn their keep here.
 end note
 
 note as N3 #FFF8DC

@@ -1,107 +1,107 @@
 # Architecture
 
 UML documentation for the Automated Code Feedback system. Sources are
-PlantUML (`.puml`); rendered SVG and PNG are committed under
-`rendered/` by the `Render UML` GitHub Actions workflow.
+PlantUML (`.puml`); rendered SVG and PNG are committed under `rendered/`
+by the `Render UML` GitHub Actions workflow.
 
 Edit the `.puml` sources, never the images. The workflow re-renders on
-every push to `main` and fails a pull request whose committed images
-are stale.
+every push to `main` and fails a pull request whose committed images are
+stale.
 
 ## Diagrams
 
 | File | Type | What it answers |
 | --- | --- | --- |
 | `01-component.puml` | Component | The modules, who owns each, and the interfaces between them |
-| `02-data-model.puml` | ERD | The database schema, which every module shares |
-| `03-sequence-immediate.puml` | Sequence | A submission run, with IMMEDIATE targets graded inline |
-| `04-sequence-nightly.puml` | Sequence | NIGHTLY targets, graded on a per-submission rerun |
-| `05-sequence-instructor.puml` | Sequence | Configuring an assignment and reviewing results |
-| `06-grading-task-state.puml` | State machine | Which targets need AI feedback, who decides, and how retries work |
+| `02-data-model.puml` | ERD | The database schema, and what deliberately is not in it |
+| `03-sequence-immediate.puml` | Sequence | A submission run in IMMEDIATE mode |
+| `04-sequence-nightly.puml` | Sequence | NIGHTLY mode, across submission and triggered rerun |
+| `05-sequence-instructor.puml` | Sequence | Registering targets and reviewing results |
+| `06-submission-target-state.puml` | State machine | Which targets want AI feedback, and how retries work |
 | `07-interfaces.puml` | Class | The exact signatures each student codes against |
 
-Read 03 and 04 first. The two grading modes are the central design
-decision (see `DECISIONS.md`, AD-1) and everything else follows from
-them. After that, `02` and `07` are the two you will keep returning to,
-because they constrain other people's code.
+Read `03` first; it is the whole system in one page. Then `02` and `07`,
+which are the ones that constrain other people's code.
 
-## The two things to internalise
+## The three things to internalise
 
-**We ship a library, not a runner.** The instructor's own JUnit or
-pytest suite is the autograder. It imports our reporting library and
-calls `record_outcome` and `request_ai_feedback` with the target names
-she registered in the web app. We never invoke her tests. Her
-`run_autograder` then invokes our AI phase as a separate command, which
-resolves the marks and writes `results.json`. See `DECISIONS.md`, AD-2.
+**We ship a library, not a runner.** The instructor's own JUnit or pytest
+suite *is* the autograder. Her `run_autograder` then invokes our AI phase
+as a separate command. We never invoke her tests. (AD-2)
 
-**Two settings, easily confused.** `assignment.grading_mode`
-(`IMMEDIATE` or `NIGHTLY`) says *when* AI grading happens.
-`grading_target.feedback_mode` (`NEVER`, `ALWAYS`, `AUTOGRADER`) says
-*whether* a given target gets feedback at all. See AD-4.
+**Functional test outcomes are not stored.** They go to `results.json`
+through her existing framework, and the AI phase parses them back to
+build prompts. The AI phase splices feedback onto the end of that file
+rather than authoring it. (AD-6)
+
+**`ai_needed` defaults ON.** Every registered target wants AI feedback;
+her suite calls `ai_not_needed(target)` to opt individual ones out,
+usually because the test passed. There is no policy enum. This is
+fail-open on cost, so a forgotten opt-out is expensive. (AD-7)
+
+## Cost and correctness
+
+`submission_target.ai_needed` asks whether a target wants feedback. It starts
+TRUE and her suite turns targets off, so this is the main cost lever and
+it lives in her code.
+
+`submission.ai_graded_submitted_at` asks whether a submission is
+finished. The nightly trigger filters on it, so a graded submission is
+never rerun, and the AI phase re-checks it to catch reruns the trigger
+did not cause. (AD-9)
+
+`results.json` is written before grading starts, so an AI failure cannot
+cost the student their test results. Since nothing else stores those
+outcomes, that early write is load-bearing. (AD-5)
 
 ## Failure handling
 
-`results.json` is written twice per grading run: test results only before
-grading starts, then the full version after (AD-6). A container killed
-mid-grading therefore leaves the student with their test results rather
-than a bare autograder error.
+Failures are classified before retry. Transient ones (429, 5xx, quota)
+are worth retrying; deterministic ones (context overflow, refusal,
+unparseable output) are not, since they reach the same answer at three
+times the cost.
 
-Failures are classified before retry. Transient ones (429, 5xx, timeout,
-killed container) consume `attempt_count` and retry overnight;
-deterministic ones (context overflow, refusal, unparseable output) go
-straight to `GAVE_UP`. The taxonomy is in `DECISIONS.md` under AD-6, and
-it matters more than it looks: the most likely failure is rate limiting
-during the deadline-hour submission spike, which hits many students at
-once.
+`IMMEDIATE` never defers: after in-run retries the AI phase appends a
+note to `results.json` saying feedback could not be generated. Only
+`NIGHTLY` retries across nights. (AD-8)
 
-## Cost control
-
-The AI grading component runs **inside the LMS autograder container in
-both modes**. The only difference is when. The nightly job logs in and
-clicks "Rerun Autograder"; it does not generate feedback.
-
-Two fields do the cost control, and they answer different questions.
-
-`grading_task.ai_needed` answers *does this target deserve feedback*.
-The AI phase resolves it from the target's `feedback_mode`
-(`AUTOGRADER`, `ALWAYS`, `NEVER`) and, under `AUTOGRADER`, from the
-requests the instructor's suite made during the run. A target nobody
-asked about is never sent to an LLM.
-
-`submission.ai_graded_submitted_at` answers *is this submission
-finished*. The nightly trigger filters on it, so a fully graded
-submission is never rerun, and the AI phase re-checks it to catch reruns
-the trigger did not cause.
+The taxonomy in `DECISIONS.md` matters more than it looks. The most
+likely failure is rate limiting during the deadline-hour spike, against
+one shared instructor key, which hits many students at once.
 
 ## Ownership
 
 | Student | Owns | Publishes | Consumes |
 | --- | --- | --- | --- |
-| A | AI grading component, LLM adapters, prompts, confidence | `ILLMProvider`, `FakeProvider` | `IGradingClient` |
+| A | AI grading phase, LLM adapters, prompts, confidence | `ILLMProvider`, `FakeProvider` | `IGradingClient` |
 | B | Web frontend and backend, DB schema, migrations, repository | `IGradingClient`, `IGradingRepository`, fakes for both | -- |
-| C | Reporting library, AI phase entrypoint, packager, nightly trigger | `IReportingClient`, `ILearningPlatform`, fakes for both | `IGradingClient` |
+| C | Reporting library (one method), AI phase entrypoint, results splicer, nightly trigger | `IReportingClient`, `ILearningPlatform`, fakes for both | `IGradingClient` |
 | D | SRS, test suite, CI and cron workflows, documentation | CI workflows, fixtures | all of the above |
 
 Two rules that follow:
 
 1. **Student B is the only person who writes SQL.** A and C reach data
-   through `IGradingClient` over HTTPS, because their code runs in
-   Gradescope's container, not ours.
+   through `IGradingClient` over HTTPS, because their code runs in the
+   platform's container, not ours.
 2. **`IGradingClient` and `IGradingRepository` stay separate
-   interfaces.** Collapsing them means shipping database credentials
-   inside the autograder zip. The container holds the instructor's LLM
-   API key (AD-5) but never a database credential.
+   interfaces.** Collapsing them means shipping database credentials in
+   the autograder zip. The container holds the instructor's LLM API key
+   (AD-4) but never a database credential.
 
 ## Rendering locally
 
 ```bash
 ./docs/architecture/render.sh          # SVG + PNG into rendered/
-./docs/architecture/render.sh --check  # syntax check only
+./docs/architecture/render.sh --check  # validate only, no output
 ```
 
-Requires `java` and `graphviz`. The PlantUML jar downloads itself on
-first run. You do not need any of this to contribute: edit a `.puml`
-and push, and CI renders it.
+Requires `java` and `graphviz`; the PlantUML jar downloads itself on
+first run. You do not need any of this to contribute: edit a `.puml` and
+push, and CI renders it. `--check` is worth running before pushing,
+because it catches two things PlantUML itself reports only as "some
+diagram description contains errors": `@startuml` names drifting from
+filenames, and floating `note as` in a sequence diagram, where notes must
+be attached with `note over`.
 
 ## Editor support
 
@@ -112,9 +112,12 @@ and push, and CI renders it.
 
 ## Conventions
 
-- One diagram per file, prefixed with a two-digit order.
+- One diagram per file, prefixed with a two-digit order. The
+  `@startuml <name>` directive must match the filename, since PlantUML
+  names its output from the directive rather than the file.
 - Requirements a diagram implements are cited by ID in a comment at the
   top, so a reader can trace back to the SRS.
 - Open decisions are yellow notes inside the diagram they affect, and
   tracked in `DECISIONS.md`. Resolving one means updating both.
-- Colours are ownership, not layer. Keep them consistent.
+- Colours are ownership, not layer. Yellow is the instructor's own code,
+  which we neither write nor invoke.

@@ -1,15 +1,18 @@
 @startuml 03-sequence-immediate
 ' =====================================================================
-' A submission run, with IMMEDIATE targets graded inline.
+' A submission run in IMMEDIATE mode.
 ' Traces to: FR-19..FR-28, FR-32..FR-36
 '
-' Two things to note about ownership:
-'  * The instructor's autograder script drives both phases. It runs her
-'    test suite, then invokes our AI phase. We do not own run_autograder.
-'  * Her suite calls US. We never enumerate targets and invoke tests.
+' Two things that keep this short:
+'  * Functional test results live in results.json, not the database.
+'    The AI phase parses them back out. Phase 1 touches the database
+'    only to record which targets still want AI feedback.
+'  * ai_needed defaults to TRUE for every registered target. The
+'    instructor's suite turns it OFF for targets that need no
+'    commentary. There is nothing to "resolve" afterwards.
 ' =====================================================================
 
-title Submission Run -- IMMEDIATE targets graded inline
+title Submission Run -- IMMEDIATE mode
 
 skinparam shadowing false
 skinparam defaultFontName Helvetica
@@ -31,102 +34,104 @@ participant "LLM\nProviders" as llm #E8E8E8
 stud -> gs : submit code
 gs -> script : run_autograder
 
-note over script #FFF2CC
-  The instructor owns this script. It invokes
-  her test suite, then invokes our AI phase as a
-  separate command. Ordering and error handling
-  are hers.
-end note
-
-== Phase 1: functional testing. Her suite reports to us. ==
+== Phase 1: functional testing ==
 
 script -> ti : run the test suite
+ti -> wrap : first call initialises the run
+wrap -> api : POST /submissions\n{platform_submission_id, submitted_at}
+api -> db : upsert submission,\ninsert submission_target per registered target\nwith ai_needed = TRUE
+api --> wrap : 200 {submission_id}
+
+note over api #FFF8DC
+  **ai_needed defaults to ON.** Every registered
+  target starts wanting feedback, and the suite
+  opts targets out. Fail-open on cost: an
+  instructor who never opts anything out pays
+  for feedback on every target of every
+  submission. Safer pedagogically, more
+  expensive by default. Say so in the
+  instructor guide.
+end note
 
 loop for each test the instructor wrote
   ti -> ti : run the assertion
-  ti -> wrap : record_outcome(target,\ntest_name, status, output)
-  wrap -> api : POST /outcomes\n{platform_submission_id, submitted_at,\n target, test_name, status, output}
-  api -> db : upsert submission\n(idempotent on platform_submission_id)
-  api -> db : insert test_outcome
-  api --> wrap : 200
+  opt this target needs no AI commentary\n(e.g. the test passed)
+    ti -> wrap : ai_not_needed(target)
+    wrap -> api : POST .../ai-not-needed
+    api -> db : UPDATE submission_target\nSET ai_needed = FALSE
+    api --> wrap : 200
+  end
+
+  opt the test found something worth telling the model
+    ti -> wrap : add_test_context(target, note)
+    wrap -> api : POST .../test-context
+    api -> db : INSERT test_context
+    api --> wrap : 201
+  end
 end
 
-note right of wrap #FFF8DC
-  **Unknown target names fail loudly.** The API
-  rejects an identifier not registered on this
-  assignment with a 4xx naming it and listing
-  the registered ones, and the library raises
-  rather than swallowing it. A typo must fail
-  the instructor's test run, never record an
-  outcome against nothing.
+note over ti #FFF8DC
+  Both calls are optional and both name a target
+  explicitly, so the identifier check covers
+  them equally.
+
+  add_test_context is where a diagnostic the
+  test already computed gets carried into the
+  prompt: the failing input, the expected and
+  actual values, a hint about which branch was
+  taken. The instructor decides what is worth
+  saying, which is better than us guessing from
+  raw output.
 end note
 
-opt her marking logic decides this target needs feedback
-  ti -> wrap : request_ai_feedback(target)
-  wrap -> api : POST /ai-requests {target}
-  api -> db : record the request\n(honoured only if policy\n= AUTOGRADER)
-  api --> wrap : 200
-  note right of ti #FFF8DC
-    Under AUTOGRADER this call IS the decision.
-    Failures only, a subset, a superset, a
-    partial-credit threshold: all just code she
-    writes here. That is why no ON_FAILURE
-    policy exists.
-  end note
-end
+note over wrap #FFF8DC
+  **An unregistered target name fails loudly.**
+  The API rejects a name not registered on this
+  assignment with a 4xx naming it and listing
+  the registered ones, and the library raises
+  rather than swallowing it, so the instructor's
+  test run fails. A typo that silently succeeds
+  would mean feedback appearing on a target she
+  meant to exclude, with nothing to explain it.
+end note
 
 ti --> script : suite exits
 
-== Phase 2: the autograder script invokes the AI phase ==
+script -> gs : write results.json\n(functional test results)
+
+note over script #FFF8DC
+  **The defensive write.** Test results reach the
+  student here, before any LLM is involved. If
+  Phase 2 dies outright, this file is what they
+  see. Nothing about the test run is stored in
+  the database, so results.json is the only
+  record of it, and the AI phase parses it back.
+end note
+
+== Phase 2: AI feedback ==
 
 script -> aip : invoke AI phase
-aip -> api : POST /submissions/{id}/resolve-marks
-api -> db : for each REGISTERED target,\nresolve ai_needed from feedback_mode:\nALWAYS -> true, NEVER -> false,\nAUTOGRADER -> was it requested
-api -> db : insert grading_task rows
+aip -> api : GET /submissions/{id}/ai-needed
+api -> db : SELECT submission_target WHERE ai_needed,\njoin rubric WHERE is_current,\njoin test_context
+api --> aip : 200 {targets[], rubric,\nfeedback_guidance,\ntest_context[]}
 
-alt a registered target has no recorded outcome
-  api --> aip : 409 {missing_targets[]}
-  aip --> script : exit non-zero with a diagnostic
+loop for each target with ai_needed
+  aip -> aip : build prompt from the rubric,\nthe feedback guidance, the student's\ncode on disk, and any test_context
+
   note right of aip #FFF8DC
-    An error, not a silent skip. The message must
-    say the assignment is misconfigured and the
-    student need do nothing, because on
-    Gradescope the student sees it too.
+    Nothing is parsed out of results.json to get
+    here. ai_needed said this target wants
+    feedback, and test_context carries whatever
+    diagnostic the instructor chose to pass us.
+    The model locates the target in the source
+    and reasons from the rubric.
+
+    test_context is untrusted: assertion messages
+    routinely embed the student's own output.
+    Delimit it, label it as test output, cap its
+    length, and keep the rubric authoritative
+    over anything it says.
   end note
-else all registered targets reported
-  api --> aip : 200 {grading_mode: IMMEDIATE,\ntasks needing AI,\nai_graded_submitted_at}
-end
-
-note over aip #FFF8DC
-  The guard is checked even here. An instructor
-  or TA re-running the autograder later must not
-  re-bill the LLM.
-end note
-
-== Defensive write: test results first ==
-
-aip -> aip : package results.json\n(test results only)
-aip -> gs : write results.json
-
-note right of aip #FFF8DC
-  Written BEFORE grading starts, and overwritten
-  after. Last write wins, so a container killed
-  mid-grading leaves the student with their test
-  results rather than a bare autograder error.
-  The tests already succeeded and are already in
-  the database; there is no reason to lose them
-  to an LLM failure.
-
-  Costs one extra file write.
-end note
-
-== AI grading ==
-
-loop for each task with ai_needed
-  aip -> api : GET /tasks/{id}/request
-  api -> db : SELECT rubric, guidance,\ntest_outcome, submission_file
-  api --> aip : 200 {FeedbackRequest}
-  aip -> aip : build prompt\n(rubric + guidance +\noutcomes + code)
 
   group Multi-provider fan-out [FR-23, FR-27]
     par
@@ -139,75 +144,88 @@ loop for each task with ai_needed
     aip -> aip : compare, estimate confidence,\nselect one
   end
 
-  aip -> api : POST /tasks/{id}/feedback\n{responses[], comparison, selected}
-  api -> db : insert feedback (one row per provider),\ninsert feedback_comparison,\nUPDATE ai_status = DONE
+  aip -> api : POST /feedback\n{target, responses[], comparison, selected}
+  api -> db : insert feedback (one row per provider),\ninsert feedback_comparison,\nSET completed_at = now
   api --> aip : 201
 end
 
-note right of aip #FFF8DC
-  grading_mode is IMMEDIATE, so every task marked
-  ai_needed is graded here and now. Nothing is
-  deferred to a rerun and the guard is set below.
-end note
+alt feedback generated
+  aip -> api : POST /submissions/{id}/ai-complete
+  api -> db : UPDATE submission\nSET ai_graded_submitted_at = submitted_at\nWHERE every ai_needed row is done\nor out of attempts
+  api --> aip : 200 {guard_set}
+  aip -> aip : parse results.json and splice\nthe feedback onto the end
 
-note over aip #FFF8DC
-  **Why an IMMEDIATE grading fails, and whether
-  retrying helps.**
+  note right of api #FFF8DC
+    **The guard is set here, and only here in
+    IMMEDIATE mode.** Without it, an instructor
+    re-running the autograder to debug something
+    would re-bill every target on the submission.
 
-  Transient, worth retrying overnight:
-   1. Rate limiting. Every submission for the
-      assignment uses ONE instructor API key, and
-      everyone submits in the last hour before
-      the deadline. A burst of concurrent
-      containers on one key makes 429 the
-      expected case, not an edge case.
-   2. Autograder timeout kills the container
-      mid-grading. LLM latency sits inside the
-      platform's fixed timeout, and rate limiting
-      makes latency worse, during the same spike.
-   3. Provider 5xx.
-   4. Quota or billing exhausted mid-term.
+    Conditional on every ai_needed row being done
+    or out of attempts, so a partial failure
+    leaves it NULL and the state stays honest.
+  end note
 
-  Deterministic, retrying only burns tokens:
-   5. Context overflow. A student submits an
-      enormous file and the prompt exceeds the
-      model limit.
-   6. Model refuses, or returns output the
-      parser cannot read.
+else failed after retries
+  aip -> aip : append a note that AI feedback\ncould not be generated
+  note right of aip #FFF8DC
+    No deferral to the nightly run. IMMEDIATE
+    means immediate: the student gets their test
+    results plus an honest note, and that is the
+    end of it. See the failure taxonomy below for
+    what actually goes wrong.
+  end note
+end
 
-  Note that 1 and 2 are CORRELATED WITH THE
-  DEADLINE. The failure rate is not uniform: it
-  spikes exactly when the most students are
-  affected. That is a sharper argument against
-  IMMEDIATE for large courses than latency
-  alone, and it is why OQ-15 matters.
-end note
-
-aip -> api : POST /submissions/{id}/ai-complete
-api -> db : UPDATE submission\nSET ai_graded_submitted_at = submitted_at\nWHERE NO task is still NEEDED
-api --> aip : 200 {guard_set}
-
-aip -> api : GET /submissions/{id}/feedback
-api -> db : SELECT feedback WHERE is_selected
-api --> aip : 200 {items[], total_score}
-aip -> aip : package results.json\n(tests + AI feedback) [FR-35]
-aip -> gs : OVERWRITE results.json
-gs --> stud : test results and\nAI feedback together
+aip -> gs : write the new results.json
 
 note over aip, llm #FFF8DC
-  **Constraint specific to IMMEDIATE targets.**
-  This all happens inside the platform's
-  autograder timeout, and submissions spike
-  before a deadline. Targets times providers
-  times LLM latency adds up.
+  **The model never touches results.json.**
+  Its entire output is a string and a number.
+  Parsing, inserting and writing the file are
+  ordinary deterministic code in the AI phase.
 
-  Mitigations: set feedback_mode = NEVER on
-  targets that need no commentary, keep the
-  AUTOGRADER logic narrow so few targets are
-  marked, and consider capping IMMEDIATE
-  assignments to a single provider, using
-  multi-provider comparison only in NIGHTLY
-  mode.
+  Do not be tempted to have the model emit the
+  JSON, or a whole results.json, however
+  convenient the prompt looks. One malformed or
+  truncated response and the student's grade
+  report is corrupt or empty, and the failure
+  arrives silently on their screen rather than
+  in a log.
+
+  Treat the model's text as untrusted input on
+  the way in as well: length-cap it, and escape
+  it when inserting, since it lands in a file
+  the platform renders.
+end note
+gs --> stud : test results, and either\nAI feedback or a note\nexplaining its absence
+
+note over aip, llm #FFF8DC
+  **Why Phase 2 fails, and whether retrying helps.**
+
+  Transient, worth a retry inside this run:
+   1. Rate limiting. Every submission for the
+      assignment uses ONE instructor API key, and
+      everyone submits in the last hour before the
+      deadline. A burst of concurrent containers
+      on one key makes 429 the expected case.
+   2. Provider 5xx.
+   3. Quota or billing exhausted mid-term.
+
+  Not worth retrying:
+   4. Context overflow on an enormous submission.
+   5. Model refuses, or returns unparseable output.
+   6. The container hits the platform's autograder
+      timeout, in which case nothing runs at all
+      and the defensive write is what survives.
+
+  Note that 1 and 6 are CORRELATED WITH THE
+  DEADLINE, so the failure rate is not uniform. It
+  spikes exactly when the most students are
+  affected. That is the strongest argument for
+  preferring NIGHTLY in a large course, and an
+  argument for serialising rather than fanning out
+  the provider calls.
 end note
 
 @enduml

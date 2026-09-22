@@ -26,22 +26,26 @@ repo -> db : INSERT assignment
 be --> fe : 201 {assignment_id}
 
 note right of instr #FFF8DC
-  Two separate settings, easily confused:
+  **grading_mode is the only mode setting**, and
+  it is on the assignment. IMMEDIATE grades
+  during the submission run; NIGHTLY defers to a
+  triggered rerun.
 
-  **grading_mode** on the ASSIGNMENT says WHEN.
-  IMMEDIATE grades during the submission run,
-  NIGHTLY defers to a triggered rerun. One
-  choice for the whole assignment, so a
-  submission is wholly one or the other.
+  There is no per-target feedback setting. Every
+  registered target wants AI feedback by default,
+  and the instructor's test suite opts individual
+  targets out at run time by calling
+  ai_not_needed. A target she never wants
+  feedback on simply is not registered here.
 
-  **feedback_mode** on each TARGET says WHETHER.
-  NEVER, ALWAYS, or AUTOGRADER.
+  **The identifiers registered here are a
+  contract with her test suite.** She passes
+  these exact strings to ai_not_needed. Rename
+  one and her suite stops matching, so the API
+  rejects unknown names loudly. See OQ-12.
 
-  Both live in the database, so changing either
-  needs no re-upload of the autograder zip.
-
-  Guidance for the instructor guide: IMMEDIATE
-  adds LLM latency inside the autograder
+  For the instructor guide: IMMEDIATE puts LLM
+  latency inside the platform's autograder
   timeout, and submissions spike before a
   deadline. Large courses should prefer NIGHTLY.
 end note
@@ -49,7 +53,7 @@ end note
 == Define grading targets [FR-2, FR-3, FR-7] ==
 
 loop for each method or class to grade
-  instr -> fe : add target\n(identifier, kind, max_score,\nfeedback_mode)
+  instr -> fe : add target\n(identifier, kind, max_score)
   fe -> be : POST /assignments/{id}/targets
   be -> repo : create_target()
   repo -> db : INSERT grading_target
@@ -59,27 +63,6 @@ loop for each method or class to grade
   be -> repo : set_file_patterns()
   repo -> db : INSERT target_file_pattern
 end
-
-note right of instr #FFF8DC
-  feedback_mode is the instructor's control over
-  token spend:
-    AUTOGRADER (default) -- her test suite calls
-      request_ai_feedback for the targets it
-      wants graded, so correct code costs
-      nothing unless she says otherwise.
-    ALWAYS -- every submission, for style or
-      design feedback no test can detect.
-    NEVER -- targets graded purely by tests.
-
-  **The target identifiers registered here are a
-  contract with her test suite.** She passes
-  these exact strings to record_outcome and
-  request_ai_feedback. Rename a target in the
-  web app and her suite stops matching, so the
-  UI should make renaming visibly consequential
-  and the API should reject unknown names
-  loudly. See OQ-12.
-end note
 
 == Attach rubric and feedback guidance [FR-4, FR-5, FR-13] ==
 
@@ -101,7 +84,7 @@ end note
 instr -> fe : open results dashboard
 fe -> be : GET /assignments/{id}/results\n?filter=has_deduction
 be -> repo : list_results()
-repo -> db : SELECT joining submission,\ntest_outcome, grading_task, feedback
+repo -> db : SELECT joining submission,\nsubmission_target, feedback
 db --> repo : rows
 be --> fe : 200 {results}
 fe --> instr : submissions needing attention
@@ -109,17 +92,24 @@ fe --> instr : submissions needing attention
 instr -> fe : drill into one submission
 fe -> be : GET /submissions/{id}
 be -> repo : get_submission_detail()
-repo -> db : SELECT outcomes, all feedback rows\n(every provider), comparison,\nai_needed, ai_needed_reason, ai_status
+repo -> db : SELECT all feedback rows\n(every provider), comparison,\nai_needed, completed_at, last_error
 db --> repo : detail
 be --> fe : 200 {detail}
 fe --> instr : side-by-side provider feedback,\nconfidence, and AI status\n[FR-27, NFR-12]
 
 note right of fe #FFF8DC
-  Surfacing ai_needed_reason alongside ai_status
-  matters: it is how the instructor tells
-  "correct code, nothing to say" from "feedback
-  is late" from "this target gave up". Without
-  the reason, all three render as a blank cell.
+  Three columns tell the blank-looking cases
+  apart: ai_needed false means her suite opted
+  the target out; completed_at NULL with no
+  last_error means feedback is still coming;
+  last_error set means the attempt failed.
+
+  **OQ-16 bites here.** Functional test outcomes
+  are no longer stored, so this dashboard can
+  show AI feedback and suggested scores but not
+  raw pass/fail. Decide whether that is
+  acceptable, or whether the AI phase should POST
+  the outcomes it parsed, before building it.
 end note
 
 == Rate feedback quality [FR-11] ==
@@ -135,8 +125,8 @@ note over instr, db #FFF8DC
 
   This is now mode-dependent, which makes it
   harder than before. In nightly mode an
-  approval gate is possible between PENDING and
-  the rerun. In immediate mode there is no
+  approval gate is possible between the marking
+  and the rerun. In immediate mode there is no
   window: feedback reaches the student in the
   same autograder run that generates it.
 

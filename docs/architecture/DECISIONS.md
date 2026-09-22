@@ -1,515 +1,401 @@
 # Architecture decisions and open questions
 
+Decisions that are settled, then questions that block implementation.
+Each decision records why, because the reasoning is what a future
+contributor needs when the constraint stops making obvious sense.
+
 ---
 
-## AD-1. How functional test outcomes and AI feedback move through the LMS
+## Decisions
 
-**Status: DECIDED** by the instructor, 2026. Supersedes the earlier
-two-pass proposal, and supersedes SRS section 3.4, which was ambiguous
-on this point and should be rewritten to match.
+### AD-1. Grading mode is per assignment
 
-The instructor chooses a **grading mode per assignment** (`IMMEDIATE`
-or `NIGHTLY`), and separately a **feedback mode per target** (`NEVER`,
-`ALWAYS`, `AUTOGRADER`). The two answer different questions: grading
-mode says *when*, feedback mode says *whether*. See AD-4.
+`assignment.grading_mode` is `IMMEDIATE` or `NIGHTLY`. It decides *when*
+AI grading happens, for the whole assignment, so a submission is wholly
+one or the other.
 
-**IMMEDIATE.** The AI phase grades the marked targets during the
-submission run, invoked by the instructor's autograder script after her
-test suite exits. Functional tests, AI feedback, `results.json`, done in
-one pass.
+**IMMEDIATE.** The instructor's autograder script invokes the AI phase
+straight after her test suite exits. Functional tests, AI feedback,
+`results.json`, done in one pass.
 
-**NIGHTLY.** The submission run records outcomes and marks the work but
-grades nothing. Every night a job runner uses browser automation to log
-in and click "Rerun Autograder" on each submission that still has marked
-work. During that rerun the AI phase grades the marked targets.
+**NIGHTLY.** The submission run records which targets want feedback but
+grades nothing. Each night a job runner logs in with browser automation
+and clicks "Rerun Autograder" on every submission that still has work.
+During that rerun the AI phase does the grading.
 
-### What this means structurally
+`results.json` writes follow from the mode: once for `IMMEDIATE`, twice
+for `NIGHTLY` (test results on the submission run, feedback on the
+rerun). In `NIGHTLY` mode the first write has no AI feedback at all,
+which reads correctly to a student as "not graded yet".
 
-The AI grading component lives **inside the autograder container in
-both modes**. Only the timing differs. Three consequences that shaped
-the diagrams:
-
-1. **The nightly job runner is thin.** It logs in, finds nightly-mode
-   assignments with pending work, and clicks a button. It does not call
-   an LLM and does not write feedback. Anything more belongs in the
-   autograder script.
-
-2. **There is no separate delivery step.** Feedback is written into
-   `results.json` in the same run that generates it, so the `delivery`
-   table and the delivery states from the earlier revision are gone.
-
-3. **The marks are per-target, so the unit with a lifecycle is the
-   submission-and-target pair.** That is the `grading_task` entity. The
-   trigger job queries it to decide which submissions to rerun, and the
-   rerun grades only the marked targets.
+For the instructor guide: `IMMEDIATE` puts LLM latency inside the
+platform's autograder timeout, and submissions spike before a deadline.
+Large courses should prefer `NIGHTLY`, and `IMMEDIATE` assignments are
+worth capping to a single provider.
 
 ### AD-2. The instructor's test suite is the autograder
 
-**Status: DECIDED** by the instructor.
-
-We ship a **library, not a runner**. The instructor's own JUnit or
-pytest suite is the autograder. It imports our reporting library and
-calls us:
-
-```
-record_outcome(target, test_name, status, output)
-request_ai_feedback(target)
-```
-
-She knows the target identifiers because she registered them in the web
-app. We never enumerate targets and invoke tests ourselves.
+We ship a **library, not a runner**. Her own JUnit or pytest suite is the
+autograder. It imports our reporting library and calls us; we never
+invoke her tests.
 
 This is an inversion of control relative to a framework, and it is the
-right call for an OER: adopting instructors already have test suites and
-a way of structuring them, and a system that insists on driving them
-would be a rewrite rather than an adoption.
+right call for an OER. Adopting instructors already have test suites and
+a way of structuring them. A system that insisted on driving them would
+be a rewrite rather than an adoption.
 
 Consequences:
 
-- There is no `ITestRunner` interface. Running tests is not our job.
+- No `ITestRunner` interface. Running tests is not our job.
 - The **AI phase** is a command her `run_autograder` invokes after the
-  suite exits. It resolves the marks, grades what the mode and guard
-  warrant, and writes `results.json`. Not called from inside her test
-  code, so she never has to remember a teardown.
-- Target identifiers are a **contract expressed as strings** across a
-  process boundary. See OQ-12; this is the sharpest new edge.
+  suite exits, not something called from inside her test code, so she
+  never has to remember a teardown.
+- Target identifiers are a contract expressed as strings across a
+  process boundary. See AD-3.
 
-### The AI-needed marker, and instructor control over it
+### AD-3. Target identifiers are a checked contract
 
-`grading_task.ai_needed` is the per-submission, per-target marker,
-resolved by the AI phase. It is the main token saving in the
-system: a target nobody asked feedback for is never sent to an LLM.
+Identifiers are typed once into the web app and again into her test
+suite, with no compiler between them. So `ai_not_needed` rejects a name
+not registered on the assignment with a 4xx naming it and listing the
+registered ones, and the library raises rather than swallowing it. Her
+test run fails on the first bad call.
 
-`grading_target.feedback_mode`, set per target in the web app:
+Since `ai_needed` defaults to TRUE (AD-7), there is no "registered but
+never reported" case to detect — a target the suite never mentions keeps
+its default and gets graded. That does leave one softer failure: a target
+renamed in the web app but not in the suite will be graded with no test
+outcome in the prompt, so the feedback is vague rather than absent, which
+is harder to spot. That case is narrow, and mild: the target simply gets
+graded, since prompts do not depend on matching anything in
+`results.json`.
 
-| `feedback_mode` | Behaviour |
+Recommended but not decided: the web app offers a copy-paste block of an
+assignment's exact identifiers, so the second typing is a paste.
+
+### AD-4. The autograder container holds the LLM API key
+
+The AI phase calls the providers directly from inside the platform's
+container, using the instructor's own key. Our service never proxies an
+LLM call and never sees a provider key.
+
+| Credential | Where it lives |
 | --- | --- |
-| `AUTOGRADER` | The instructor's suite decides per submission, by calling `request_ai_feedback`. The default. |
-| `ALWAYS` | Mark every submission regardless of outcome. For style or design feedback no test can detect. |
-| `NEVER` | Never mark. For targets graded purely by tests. |
+| LLM provider API key | The container's environment. The instructor's own key. |
+| Database credential | Only our cloud host. Never in the container. |
+| Per-assignment service token | The container, scoped to one assignment's rows. |
 
-**There is deliberately no `ON_FAILURE` value.** Marking on failure is
-one line in the instructor's suite, and any variant (a subset of
-failures, a superset, a partial-credit threshold, a cross-target
-condition) is equally expressible there. A policy value would only
-duplicate what her code already states, and would then need a way to say
-"ignore the dropdown".
+**Why this suits an OER.** Each adopting institution uses its own key and
+pays its own LLM bill directly to the provider. Nobody has to run a
+metered service, meter per-course usage, or handle another institution's
+billing. Proxying through our service would have made us the billing
+intermediary for every adopter, a far larger operational commitment than
+a grading tool should carry.
 
-`ai_needed_reason` records which rule decided (`AUTOGRADER_REQUEST`,
-`POLICY_ALWAYS`, `POLICY_NEVER`, `NOT_REQUESTED`). Store it.
+**What it costs**, for the instructor guide rather than the code: the key
+is visible to anyone with access to the assignment's autograder
+configuration, which in practice includes TAs; rotation means touching
+every assignment carrying it; and how the key reaches the container
+depends on what secret facility the platform offers. If the only route is
+the uploaded autograder zip, say so plainly, because a key in a zip is a
+key in every backup of that zip. Confirm what Gradescope provides before
+writing that section.
 
-### The token-waste guard
+### AD-5. `results.json` is written before grading starts
 
-Rerun is **per submission**, not a bulk action over the assignment, so
-the nightly trigger clicks rerun only on submissions that still have
-PENDING grading tasks. It never touches an already-graded one.
+The instructor's framework writes `results.json` with the functional test
+results as Phase 1 ends. Only then does the AI phase run.
 
-Reruns still happen for reasons outside our control, though: an
-instructor debugging the autograder, a TA re-running a flaky test. None
-of those should re-bill the LLM. So the autograder script carries a
-guard, checked before it queries tasks and before any LLM call:
+If Phase 2 dies outright, that file is what the student sees. Since test
+outcomes are not stored anywhere else (AD-6), losing it to an LLM failure
+would lose the test results entirely.
 
-```
-submission.ai_graded_submitted_at == submission.submitted_at
-  -> skip AI grading, re-emit the stored feedback
-```
+### AD-6. Functional test outcomes are not stored
+
+Test results reach the student through `results.json`, written by her own
+framework. Nothing about the test run reaches our database, and nothing
+about it feeds a prompt either.
+
+The prompt is built from the target's rubric, its feedback guidance, the
+student's source code on the container filesystem, and any `test_context`
+the instructor's suite chose to record (AD-10). `ai_needed` being true
+already carries the only thing a raw outcome had to convey, namely that
+this target wants feedback. The model locates the target in the source
+and reasons from the rubric.
+
+`results.json` is therefore read exactly once per run, at the end, to
+splice the feedback into.
+
+This removes the `test_outcome` table, the `submission_file` table,
+`record_outcome` from the reporting library (now a one-method interface),
+and any need to reconcile a database copy of the outcomes against the
+file the student actually sees.
+
+`ResultsPackager` therefore **splices rather than authors**: it reads the
+file her framework wrote, appends the AI feedback, and writes the result.
+That is what leaves an adopter's existing autograder setup intact.
+
+**The model never touches `results.json`.** Its entire output is a string
+and a number; parsing, inserting and writing are deterministic code. Do
+not have the model emit JSON, however convenient the prompt looks: one
+malformed or truncated response and the student's grade report is corrupt
+or empty, and the failure lands silently on their screen rather than in a
+log. Treat the model's text as untrusted input on the way in too, so
+length-cap it and escape it when inserting, since it ends up in a file
+the platform renders.
+
+The cost is OQ-16.
+
+### AD-7. `ai_needed` defaults ON; the suite opts targets out
+
+`submission_target.ai_needed` is created **TRUE** for every registered target
+when a submission first reports in. During functional testing the suite
+calls `ai_not_needed(target)` for targets that need no commentary,
+typically because their test passed. The AI phase grades whatever is
+still true.
+
+No policy enum, no resolution step. Earlier revisions had
+`ai_feedback_policy`, then `feedback_mode`, with values like
+`ON_FAILURE`, `NEVER`, `ALWAYS`, `AUTOGRADER`, plus a hook interface and
+a resolve step to combine them. All of it collapsed into one boolean with
+a default. `NEVER` was redundant because a target the instructor never
+wants feedback on simply is not registered; the rest were redundant
+because any rule she wants is one line of her own code at the opt-out
+call.
+
+**The default is fail-open on cost.** An instructor who opts nothing out
+pays for feedback on every target of every submission. That is the
+opposite risk profile from requiring an explicit request: nothing goes
+silently unexplained, but a forgotten opt-out is expensive. Put it in the
+instructor guide prominently.
+
+### AD-8. IMMEDIATE never defers to the nightly run
+
+If AI generation fails in `IMMEDIATE` mode, the AI phase appends a note
+to `results.json` saying feedback could not be generated, and stops. The
+student keeps their test results and gets an honest explanation.
+
+Retry across nights applies only to `NIGHTLY` mode.
+
+### AD-9. The token guard
+
+`submission.ai_graded_submitted_at` records the submission time that AI
+grading last completed for. The AI phase checks it before doing any work.
 
 A rerun re-executes the container against the same submitted files, so
-`submitted_at` does not change on rerun. That makes it a reliable
-marker of exactly which submission was graded. A new student attempt
-gets a new `platform_submission_id` and its own row, so it is graded
-normally; the guard suppresses only re-grading of an already-graded
-attempt.
+`submitted_at` does not change on rerun, which makes it a reliable marker
+of exactly which submission was graded. A new attempt gets a new
+`platform_submission_id` and its own row, so it is graded normally; the
+guard suppresses only re-grading of an already-graded attempt.
 
-`ai_graded_submitted_at` is set **only when no task is still
-`NEEDED`**, counting `GAVE_UP` as settled so one permanently broken
-target cannot hold a submission in the nightly queue forever. On
-partial failure it stays NULL, so the next nightly trigger picks the
-submission up and retries only the tasks still marked `NEEDED`. Once
-set it is never cleared.
+It matters because reruns happen for reasons other than our trigger: an
+instructor debugging the autograder, a TA re-running a flaky test. Set it
+only when every `ai_needed` row either has `completed_at` set or is out
+of attempts, so one broken target cannot hold a submission in the nightly
+queue forever.
+Once set it is never cleared.
 
-Two fields, two questions. `ai_needed` answers *does this target
-deserve feedback*, and the instructor controls it. `ai_graded_submitted_at`
-answers *is this submission finished*.
+### AD-10. Optional test context feeds the prompt
 
-### Trade-offs to communicate in the instructor guide
+The reporting library has a second optional call:
 
-Immediate mode gives fast feedback but puts LLM latency inside the LMS
-autograder timeout, and submissions spike before a deadline. Multiple
-providers times multiple targets may not fit. Consider capping immediate
-mode to one provider.
+```
+add_test_context(target, note)
+```
 
-Nightly mode absorbs the spike, makes multi-provider comparison cheap,
-and leaves a window for instructor review before release. Students wait
-until morning and see two separate result postings for one submission.
+During functional testing the instructor's suite can record any
+diagnostic it already computed: the failing input, expected versus
+actual, which branch was taken. It is stored in `test_context`, keyed to
+the same `submission_target` row as `ai_needed`, and rendered into the prompt
+by the AI phase.
+
+This is how the prompt gets test detail without anyone parsing
+`results.json`. She names the target explicitly, so the identifier check
+from AD-3 covers this call exactly as it covers `ai_not_needed`, and
+there is no linkage to infer.
+
+It also gives better material than raw output would. She knows which
+assertion matters and can say so in one line; we would be guessing from a
+stack trace.
+
+A child table rather than a column, because a target usually has several
+tests and more than one may have something worth saying. Rows are
+rendered into the prompt in `recorded_at` order.
+
+There is no `test_name` field. Nothing would join on it or validate it,
+and she can name the test inside the note if it helps the model. Keeping
+it would also have invited the assumption that it must match a
+`results.json` entry, which is the kind of implied contract this design
+has been removing.
+
+**Treat it as untrusted.** Assertion messages routinely embed the
+student's own output, sometimes their source. A student can therefore
+influence what lands in this text, which makes it a prompt injection
+surface: content that reads as an instruction rather than as data. The
+instructor writes the *call*; she does not control the whole *string*,
+and those are different things.
+
+Mitigations, none expensive: delimit it in the prompt and label it as
+test output, keep the rubric authoritative over anything it says, cap the
+length per row and per target, and do not let it take over the role of
+the guidance. The length cap is also a cost control, since this text is
+billed as input tokens on every provider call for that target.
+
+---
+
+## Why AI generation fails
+
+Worth writing down because it determines the retry policy (OQ-5) and
+because it bears on the choice of grading mode.
+
+**Transient, worth a retry:**
+
+1. **Rate limiting.** Every submission for an assignment uses one
+   instructor API key, and students submit in the last hour before the
+   deadline. A burst of concurrent containers against a single key makes
+   429 the expected case, not an edge case.
+2. **Provider 5xx.**
+3. **Quota or billing exhausted** mid-term.
+
+**Not worth retrying:**
+
+4. **Context overflow** on an enormous submission.
+5. **Model refuses**, or returns output the parser cannot read.
+6. **Autograder timeout** kills the container, in which case nothing runs
+   and AD-5's early write is what survives.
+
+Two consequences. **Classify before retrying**: a deterministic failure
+returns the same result every attempt, so it should not consume
+`attempt_count`. And **failures 1 and 6 are correlated with the
+deadline**, so the failure rate is not uniform — it spikes exactly when
+the most students are affected. That is the strongest argument for
+preferring `NIGHTLY` in a large course, and an argument for serialising
+rather than fanning out the provider calls.
 
 ---
 
 ## Open questions
 
-Each is out of scope or unspecified in the SRS. Fine for a requirements
-document, not survivable for four people implementing in parallel.
-
 | ID | Question | Blocks | Owner |
 | --- | --- | --- | --- |
-| OQ-15 | Does the nightly trigger consider IMMEDIATE assignments, so a failed immediate grading self-heals? | C's trigger query, B's endpoint | C |
-| ~~OQ-11~~ | ~~Where LLM keys live~~ | **DECIDED** (AD-5): the autograder container holds the instructor's own LLM API key. No DB credential ever. | -- |
-| ~~OQ-12~~ | ~~Typo'd target identifiers~~ | **DECIDED**: the API rejects unregistered names and the library raises, failing the test run | -- |
-| ~~OQ-13~~ | ~~Who invokes the AI phase~~ | **DECIDED**: the instructor's `run_autograder` invokes it as a command after her suite exits | -- |
-| ~~OQ-14~~ | ~~Registered target with no outcome~~ | **DECIDED**: an error. The AI phase exits non-zero and the autograder run fails | -- |
+| OQ-16 | Test outcomes are unstored. Does the dashboard need them (FR-8/9/10), or is feedback-only enough? | B's dashboard, possibly one table | Instructor + B |
 | OQ-1 | What exactly is a "deduction" (FR-10)? | B's dashboard query | Instructor |
 | OQ-2 | How is confidence defined and computed (FR-28)? | A's engine, B's UI | A |
-| OQ-3 | Can the instructor edit feedback before release? Now mode-dependent. | state machine, B's dashboard | Instructor |
-| OQ-4 | Are all submission attempts graded, or only the latest? | cost, C's task creation | Instructor + A |
-| OQ-5 | Retry policy: attempt cap, and the transient/deterministic split (taxonomy now in AD-6) | A and C will otherwise write two | D |
-| OQ-6 | Exact Gradescope autograder JSON schema | C's packager, D's tests | C |
-| OQ-7 | Gradescope authentication, and where that credential lives | C's trigger job | C |
+| OQ-4 | Are all submission attempts graded, or only the latest? | cost | Instructor |
+| OQ-5 | Retry policy: attempt cap and the transient/deterministic split | A and C will otherwise write two | D |
+| OQ-6 | Exact Gradescope `results.json` schema | C's packager, D's tests | C |
+| OQ-7 | Gradescope authentication for the trigger, and where that credential lives | C's trigger | C |
 | OQ-8 | Web framework, database, cloud host | B cannot start | B |
 | OQ-9 | Instructor authentication and authorization | B's backend | B |
-| OQ-10 | Student code retention, privacy, FERPA | deployment | Instructor |
+| OQ-10 | Student data retention and FERPA posture | deployment | Instructor |
+| ~~OQ-17~~ | ~~Linking results.json entries to grading targets~~ | **DISSOLVED**: prompts do not use test outcomes, so there is nothing to link | -- |
 
-### Two that deserve a flag
+Resolved: OQ-3 (no post-hoc feedback requests), OQ-11 (AD-4),
+OQ-12 (AD-3), OQ-13 (AD-2), OQ-14 and OQ-15 (dissolved by AD-7 and AD-8).
 
-**OQ-9.** The SRS specifies no instructor authentication at all. Fine
-for a prototype on synthetic data.
+### OQ-16: the dashboard gap
 
-**OQ-10.** In immediate mode, student source code is sent to a
-third-party LLM within seconds of submission. Retention, access and
-consent all need answers before this touches a live section. Pitt has
-people whose job this is.
+Outcomes now live only in `results.json`. Gradescope shows them to the
+student and the AI phase parses them for prompts, but nothing persists
+them.
+
+FR-8, FR-9 and FR-10 want a dashboard showing how students are doing and
+filtering to submissions with deductions. Unstored outcomes mean that
+dashboard can show AI feedback and suggested scores but not raw
+functional pass/fail, and "has a deduction" can only be derived from AI
+scores.
+
+**(a) Accept it.** The dashboard's job is feedback quality (FR-11), and
+Gradescope already shows the instructor her own test results.
+
+**(b) Have the AI phase POST the outcomes it parsed**, stored alongside
+the feedback as context. Costs one table and one request, and keeps the
+dashboard self-contained without reintroducing Phase 1 database writes.
+
+Needs deciding before Student B builds the dashboard, since it determines
+whether there is a table to query.
+
+### OQ-9 and OQ-10 deserve a flag
+
+The SRS specifies no instructor authentication at all, which is fine for
+a prototype on synthetic data. And in `IMMEDIATE` mode student code
+reaches a third-party LLM within seconds of submission — it is no longer
+retained by us (AD-6), but it does leave the institution. Retention,
+access and consent need answers before a live section. Pitt has people
+whose job this is.
 
 ---
 
 ## Changes to make in the SRS
 
-Student D should revise section 3.4, which predates AD-1 and describes
-a workflow that pulls submissions out of Gradescope and tests them
-elsewhere. Specifically:
+Student D should revise section 3.4, which predates these decisions:
 
 - FR-31 ("retrieve new submissions through the GradeScope integration")
-  no longer applies. Nothing pulls submissions; the autograder script
-  already has the student's files.
+  no longer applies. Nothing pulls submissions; the autograder already
+  has the student's files.
 - FR-34 to FR-36 collapse. There is no separate step that fetches
   feedback and routes it back, because the run that generates feedback
-  writes it.
-- Add requirements for the mode selection itself, the per-target marks,
-  and the skip-if-complete rule, which are currently undocumented and
-  are load-bearing.
+  splices it into `results.json`.
+- Add requirements for `grading_mode`, for `ai_needed` defaulting on with
+  a suite-driven opt-out, and for the token guard. All three are
+  load-bearing and currently undocumented.
+- Remove any requirement implying functional outcomes are stored.
 
 ---
 
-## Corrections to earlier revisions of these diagrams
+## Naming
 
-Recorded because the reasoning appears in git history and would
+`submission_target` is the join row between a submission and a
+registered grading target: one per `(submission_id,
+grading_target_id)` pair, carrying `ai_needed` and `completed_at`. Child
+tables (`test_context`, `feedback`, `feedback_comparison`) hang off it,
+because everything they record is per-pair rather than per-submission or
+per-target.
+
+It was called `grading_task` for several revisions, from back when this
+was a job queue with `PENDING`, `IN_PROGRESS`, atomic claiming and
+competing workers. All of that was deleted, and the name outlived it. A
+"task" implies a queue and a worker that no longer exist;
+`submission_target` says what the row actually is.
+
+State is derived rather than stored. `completed_at`, `last_error` and
+`attempt_count` already determine whether a row is waiting, done or
+failed, so an `ai_status` enum could only agree with them or contradict
+them. The derived states are drawn in
+`06-submission-target-state.puml`.
+
+---
+
+## Corrections to earlier revisions
+
+Recorded because the reasoning is in these files' git history and would
 otherwise mislead.
 
-**Rerun is per submission.** An earlier revision assumed Gradescope's
-"Rerun Autograder" was a bulk action over the whole assignment, and
-built a load-bearing skip branch around the idea that every nightly
-trigger re-executed every submission ever made. That was wrong. The
-button is per submission, the nightly trigger iterates only submissions
-with pending work, and there is no quadratic cost problem. The guard
-described above is still wanted, but as protection against incidental
-reruns rather than against the trigger job itself.
+**Rerun is per submission.** An early revision assumed "Rerun Autograder"
+was a bulk action over a whole assignment and built a load-bearing skip
+branch around the idea that every nightly trigger re-executed every
+submission ever made. It is per submission; there is no quadratic cost
+problem.
 
-**There was never a separate delivery step.** An earlier revision had
-the nightly job generate feedback on our infrastructure and then push it
-back through a second pass. AD-1 replaced that: the AI component runs in
-the container, and the run that generates feedback writes it.
+**There was never a separate delivery step.** An early revision had the
+nightly job generate feedback on our infrastructure and push it back in a
+second pass. The AI phase runs in the container, and the run that
+generates feedback writes it.
 
-**The task lifecycle was over-engineered.** An earlier revision modelled
-`grading_task` as a job queue with `PENDING`, `IN_PROGRESS`, `COMPLETE`,
-`FAILED` and `ABANDONED`, plus an atomic claim step to guard against
+**The task lifecycle was over-engineered.** An early revision modelled
+`submission_target` as a job queue with an atomic claim step, to guard against
 concurrent workers. There are no concurrent workers: rerun is per
-submission, so one container works on a submission at a time. The claim
-step and `IN_PROGRESS` are gone. Retry now falls out of the design, in
-that a failed task simply stays `NEEDED` and the next trigger picks it
-up.
+submission, so one container works on a submission at a time.
 
-**There is no post-hoc feedback request.** An earlier revision allowed
-the instructor to request AI grading on an already-graded submission,
-which required clearing `ai_graded_submitted_at` in the same
-transaction. That path does not exist. Instructor control is exercised
-at marking time, through `feedback_mode` and their own autograder
-logic.
+**Grading mode was briefly per target**, which allowed mixed submissions
+and created a real problem: the first `results.json` carried feedback for
+some targets and silence for others, which a student reads as "those were
+fine". The complication was an artifact of the misplacement.
 
-### AD-5. The autograder container holds the LLM API key
+**The policy enum was removed entirely.** See AD-7. The lesson is that a
+configuration surface for something the instructor already expresses in
+code is duplication, not flexibility.
 
-**Status: DECIDED** by the instructor.
-
-The AI phase calls the LLM providers directly from inside the platform's
-autograder container, using the instructor's own API key. Our service
-never proxies an LLM call and never sees a provider key.
-
-The asymmetry is deliberate and worth stating in one place:
-
-| Credential | Where it lives |
-| --- | --- |
-| LLM provider API key | The autograder container's environment. The instructor's own key. |
-| Database credential | Only on our cloud host. Never in the container. |
-| Per-assignment service token | The container, scoped to one assignment's rows. |
-
-**Why this is the right default for an OER.** Each adopting institution
-uses its own key and pays its own LLM bill directly to the provider.
-Nobody has to run a metered service, meter per-course usage, or handle
-another institution's billing. The alternative, proxying LLM calls
-through our service, would have made us the billing intermediary for
-every adopter, which is a far larger operational commitment than a
-grading tool should carry.
-
-`llm_provider_config` in the database therefore says *what* to call,
-which providers and models and which is primary. The container supplies
-the credential.
-
-**What this costs, to write into the instructor guide rather than the
-code.** The key is visible to anyone with access to the assignment's
-autograder configuration, which in practice includes TAs. Rotation means
-touching every assignment that carries it. And how the key reaches the
-container depends on what secret facility the platform offers; if the
-only route available is the uploaded autograder zip, say so plainly,
-because a key in a zip is a key in every backup of that zip. Confirm
-what Gradescope actually provides here before writing that section.
-
-### AD-6. results.json is written twice, tests first
-
-The AI phase writes a tests-only `results.json` **before** grading
-starts, then overwrites it with the full version after. Last write wins.
-
-The reason: if the container is killed mid-grading, the original ordering
-left the student with a bare autograder error and no test results at
-all, even though the tests had succeeded and were already recorded in the
-database. There is no reason to lose passing test results to an LLM
-failure. Costs one extra file write.
-
-### Why an IMMEDIATE grading fails, and whether retrying helps
-
-Worth writing down because it determines the retry policy (OQ-5) and
-because it is a stronger argument about `IMMEDIATE` than latency alone.
-
-**Transient, worth retrying overnight:**
-
-1. **Rate limiting.** Every submission for an assignment uses one
-   instructor API key, and students submit in the last hour before the
-   deadline. A burst of concurrent containers against a single key makes
-   429 the expected case, not an edge case.
-2. **Autograder timeout kills the container mid-grading.** LLM latency
-   sits inside the platform's fixed timeout, and rate limiting makes
-   latency worse, during the same spike.
-3. **Provider 5xx.**
-4. **Quota or billing exhausted** mid-term.
-
-**Deterministic, where retrying only burns tokens:**
-
-5. **Context overflow.** A student submits an enormous file and the
-   prompt exceeds the model's limit.
-6. **Model refuses, or returns output the parser cannot read.**
-
-Two consequences.
-
-**Classify before retrying.** A deterministic failure returns the same
-result every attempt, so three nights of retries spend three times the
-tokens to reach the same `GAVE_UP`. Route those there on the first
-attempt. Only transient failures should consume `attempt_count`.
-
-**Failures 1 and 2 are correlated with the deadline.** The failure rate
-under `IMMEDIATE` is not uniform; it spikes exactly when the most
-students are affected. That is a sharper argument against `IMMEDIATE`
-for large courses than the latency point on its own, and it is why OQ-15
-matters: without overnight retry, a deadline-hour 429 means that student
-never gets feedback.
-
-### AD-3. Target identifiers are a checked contract
-
-Target identifiers cross a process boundary as bare strings: typed once
-into the web app, again into the instructor's test suite, with no
-compiler between them. Both directions of mismatch are now errors rather
-than silent skips.
-
-1. `POST /outcomes` rejects an unregistered target with a 4xx naming it
-   and listing the registered ones. The reporting library raises rather
-   than swallowing it, so her test run fails loudly on the first call.
-2. The AI phase treats a registered target that received **no** outcome
-   as an error. It exits non-zero and the autograder run fails. This
-   catches the opposite mistake, renamed in the web app but still the old
-   name in the suite.
-3. Recommended, not yet decided: the web app offers a copy-paste block of
-   the exact identifiers for an assignment, so the second typing is a
-   paste.
-
-One consequence to handle in the message text, not the schema: on
-Gradescope this error is visible to the student and blocks their score.
-That is the right trade for a misconfigured assignment, but the
-diagnostic must say plainly that the assignment is misconfigured and the
-student need do nothing.
-
-### AD-4. Grading mode is per assignment; feedback mode is per target
-
-Two settings, easily confused, answering different questions.
-
-| Setting | Level | Values | Question |
-| --- | --- | --- | --- |
-| `grading_mode` | assignment | `IMMEDIATE`, `NIGHTLY` | **When** does AI grading happen? |
-| `feedback_mode` | grading target | `NEVER`, `ALWAYS`, `AUTOGRADER` | **Whether** does this target get feedback? |
-
-Because grading mode is per assignment, a submission is wholly immediate
-or wholly nightly. There is no mixing, and therefore no submission that
-receives partial feedback in one write and the rest in another.
-
-How many times `results.json` gets written follows from the grading mode
-alone:
-
-| `grading_mode` | Writes |
-| --- | --- |
-| `IMMEDIATE` | Once, during the submission run. The guard is set; the submission never enters the nightly queue. |
-| `NIGHTLY` | Twice: test results on the submission run, feedback on the rerun. |
-
-In `NIGHTLY` mode the first write carries no AI feedback at all, which
-reads correctly to a student as "not graded yet". A one-line marker per
-pending task saying feedback arrives by the next morning is a courtesy
-worth adding, but nothing depends on it.
-
-For the instructor guide: `IMMEDIATE` puts LLM latency inside the
-platform's autograder timeout, and submissions spike before a deadline.
-Large courses should prefer `NIGHTLY`, and `IMMEDIATE` assignments are
-worth capping to a single provider, using multi-provider comparison only
-at night.
-
-### AD-6. results.json is written twice, tests first
-
-The AI phase writes a tests-only `results.json` **before** grading
-starts, then overwrites it with the full version after. Last write wins.
-
-The reason: if the container is killed mid-grading, the original ordering
-left the student with a bare autograder error and no test results at
-all, even though the tests had succeeded and were already recorded in the
-database. There is no reason to lose passing test results to an LLM
-failure. Costs one extra file write.
-
-### Why an IMMEDIATE grading fails, and whether retrying helps
-
-Worth writing down because it determines the retry policy (OQ-5) and
-because it is a stronger argument about `IMMEDIATE` than latency alone.
-
-**Transient, worth retrying overnight:**
-
-1. **Rate limiting.** Every submission for an assignment uses one
-   instructor API key, and students submit in the last hour before the
-   deadline. A burst of concurrent containers against a single key makes
-   429 the expected case, not an edge case.
-2. **Autograder timeout kills the container mid-grading.** LLM latency
-   sits inside the platform's fixed timeout, and rate limiting makes
-   latency worse, during the same spike.
-3. **Provider 5xx.**
-4. **Quota or billing exhausted** mid-term.
-
-**Deterministic, where retrying only burns tokens:**
-
-5. **Context overflow.** A student submits an enormous file and the
-   prompt exceeds the model's limit.
-6. **Model refuses, or returns output the parser cannot read.**
-
-Two consequences.
-
-**Classify before retrying.** A deterministic failure returns the same
-result every attempt, so three nights of retries spend three times the
-tokens to reach the same `GAVE_UP`. Route those there on the first
-attempt. Only transient failures should consume `attempt_count`.
-
-**Failures 1 and 2 are correlated with the deadline.** The failure rate
-under `IMMEDIATE` is not uniform; it spikes exactly when the most
-students are affected. That is a sharper argument against `IMMEDIATE`
-for large courses than the latency point on its own, and it is why OQ-15
-matters: without overnight retry, a deadline-hour 429 means that student
-never gets feedback.
-
-### AD-3. Target identifiers are a checked contract
-
-Target identifiers cross a process boundary as bare strings: typed once
-into the web app, again into the instructor's test suite, with no
-compiler between them. Both directions of mismatch are now errors rather
-than silent skips.
-
-1. `POST /outcomes` rejects an unregistered target with a 4xx naming it
-   and listing the registered ones. The reporting library raises rather
-   than swallowing it, so her test run fails loudly on the first call.
-2. The AI phase treats a registered target that received **no** outcome
-   as an error. It exits non-zero and the autograder run fails. This
-   catches the opposite mistake, renamed in the web app but still the old
-   name in the suite.
-3. Recommended, not yet decided: the web app offers a copy-paste block of
-   the exact identifiers for an assignment, so the second typing is a
-   paste.
-
-One consequence to handle in the message text, not the schema: on
-Gradescope this error is visible to the student and blocks their score.
-That is the right trade for a misconfigured assignment, but the
-diagnostic must say plainly that the assignment is misconfigured and the
-student need do nothing.
-
-### AD-4. Feedback mode is per target, not per assignment
-
-`grading_target.feedback_mode` is `IMMEDIATE` or `NIGHTLY`. There is no
-mode column on `assignment`; the web app can offer "apply to all
-targets" as a convenience, which needs UI but no schema.
-
-A single submission can therefore mix the two. How many times
-`results.json` is written depends on whether **any** target is
-`NIGHTLY`, not on whether the submission is mixed:
-
-| Targets | `results.json` writes |
-| --- | --- |
-| All `IMMEDIATE` | Once, on the submission run. Guard is set; never enters the nightly queue. |
-| Any `NIGHTLY` | Twice: once on the submission run, once on the rerun. |
-
-This needs no extra machinery, which is the nice part. After the
-immediate pass the `NIGHTLY` tasks are still `NEEDED`, so
-`ai_graded_submitted_at` stays NULL and tonight's trigger picks the
-submission up on its own. On the rerun, the `IMMEDIATE` tasks are
-already `DONE` and get skipped, so a mixed submission never pays twice.
-
-For the instructor guide: `IMMEDIATE` puts LLM latency inside the
-platform's autograder timeout, and submissions spike before a deadline.
-Large courses should prefer `NIGHTLY`. An `IMMEDIATE` assignment whose
-grading fails is picked up by the nightly trigger and retried, subject to
-OQ-15.
-
-**AD-2 superseded an earlier revision of these diagrams.** They showed
-our entrypoint fetching the target list and invoking a test runner per
-target, with an `ITestRunner` interface and an `IMarkingHook` for
-instructor logic. Control runs the other way: her suite calls us, and
-the marking logic is ordinary code in that suite rather than a hook we
-invoke.
-
-### OQ-15: failed IMMEDIATE grading
-
-If an `IMMEDIATE` submission's AI grading fails, its task stays `NEEDED`
-and `ai_graded_submitted_at` is never set. What happens next depends on
-one line of the trigger's query.
-
-If the trigger filters on `grading_mode = NIGHTLY`, that task is stuck
-forever: nothing retries it, and the submission stays permanently
-half-graded with no feedback and no error the student can see.
-
-If the trigger ignores `grading_mode` and selects any submission with a
-task still `NEEDED`, the failure self-heals overnight. The student gets
-the feedback the next morning instead of at once, which is a mild
-degradation and much better than never.
-
-**Recommend the latter**, which is what the query in
-`04-sequence-nightly.puml` shows. It costs nothing and it is the
-difference between a transient LLM error being invisible and being
-permanent.
-
-The failure taxonomy above makes this concrete rather than theoretical.
-The most likely `IMMEDIATE` failure is rate limiting during the
-deadline-hour submission spike, which is both transient and
-simultaneous across many students. Without overnight retry, a single
-burst of 429s silently denies feedback to everyone who submitted in that
-window, and nothing in the system would say so.
-
-**AD-4 was corrected.** An earlier revision put `IMMEDIATE`/`NIGHTLY` on
-the grading target rather than the assignment, which allowed mixed-mode
-submissions and created a real problem: the first `results.json` carried
-feedback for some targets and silence for others, which a student reads
-as "those were fine". That whole complication was an artifact of the
-misplacement and is gone.
+**Phase 1 database writes were removed.** See AD-6. Since outcomes must
+reach `results.json` regardless, a database copy was a second source of
+truth for the same facts.

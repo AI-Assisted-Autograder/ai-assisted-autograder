@@ -30,41 +30,43 @@ participant "Web API" as api #DCEFD9
 database "Grading DB" as db #DCEFD9
 participant "LLM\nProviders" as llm #E8E8E8
 
-== Phase 1: on submission -- mark the work, grade nothing ==
+== Phase 1: functional testing, no grading ==
 
 stud -> gs : submit code
 gs -> script : run_autograder
 script -> ti : run the test suite
+ti -> wrap : first call initialises the run
+wrap -> api : POST /submissions
+api -> db : upsert submission,\ninsert submission_target per registered target\nwith ai_needed = TRUE
+api --> wrap : 200 {submission_id}
 
 loop for each test
-  ti -> wrap : record_outcome(target, ...)
-  wrap -> api : POST /outcomes
-  api -> db : upsert submission,\ninsert test_outcome
-end
-
-opt her marking logic requests feedback
-  ti -> wrap : request_ai_feedback(target)
-  wrap -> api : POST /ai-requests
-  api -> db : record the request
+  opt this target needs no AI commentary
+    ti -> wrap : ai_not_needed(target)
+    wrap -> api : POST .../ai-not-needed
+    api -> db : UPDATE submission_target\nSET ai_needed = FALSE
+  end
+  opt the test found something worth telling the model
+    ti -> wrap : add_test_context(target, note)
+    wrap -> api : POST .../test-context
+    api -> db : INSERT test_context
+  end
 end
 
 ti --> script : suite exits
-script -> aip : invoke AI phase
-aip -> api : POST /submissions/{id}/resolve-marks
-api -> db : resolve ai_needed per target,\ninsert grading_task rows
-api --> aip : 200 {grading_mode: NIGHTLY,\ntasks needing AI,\nai_graded_submitted_at}
+script -> gs : write results.json\n(functional test results)
 
-note over aip #FFF8DC
-  grading_mode is NIGHTLY, so the AI phase
-  grades nothing and spends no tokens here.
-  Tasks marked ai_needed stay NEEDED, so
-  ai_graded_submitted_at stays NULL, which is
-  what puts this submission in tonight's queue.
-  No extra bookkeeping.
+note over script #FFF8DC
+  grading_mode is NIGHTLY, so the AI phase is not
+  invoked now. The submission_target rows still
+  rows marked ai_needed with completed_at still
+  NULL are what tonight's trigger looks for.
+
+  Unlike IMMEDIATE, this results.json is not
+  overwritten in this run. The rerun produces a
+  fresh one.
 end note
 
-aip -> aip : package results.json\n(test results only)
-aip -> gs : write results.json
 gs --> stud : test results now,\nfeedback tomorrow
 
 == Phase 2: nightly -- trigger a rerun per submission ==
@@ -72,7 +74,7 @@ gs --> stud : test results now,\nfeedback tomorrow
 cron -> trig : invoke
 trig -> api : POST /trigger-runs (start)
 trig -> api : GET /submissions/pending-ai
-api -> db : SELECT submission JOIN grading_task\nWHERE ai_needed AND ai_status = 'PENDING'\nAND ai_graded_submitted_at IS NULL
+api -> db : SELECT submission JOIN submission_target\nWHERE ai_needed AND completed_at IS NULL\nAND attempt_count < 3\nAND ai_graded_submitted_at IS NULL
 db --> api : submission list
 api --> trig : 200 {submissions[] with platform ids}
 
@@ -117,50 +119,47 @@ end note
 trig -> api : POST /trigger-runs/{id}/finish
 api -> db : update trigger_run
 
-== Phase 3: the rerun -- grade the NIGHTLY tasks ==
+== Phase 3: the rerun -- generate and splice the feedback ==
 
 gs -> script : run_autograder again
 script -> ti : the test suite runs again
-loop for each test
-  ti -> wrap : record_outcome(target, ...)
-  wrap -> api : POST /outcomes
-  api -> db : upsert, refresh test_outcome
-end
 ti --> script : suite exits
+script -> gs : write results.json\n(functional test results)
+
+note over script #FFF8DC
+  The container was destroyed after Phase 1, so
+  the tests must run again to produce
+  results.json. This is also the defensive write
+  for this run.
+end note
 
 script -> aip : invoke AI phase
-aip -> api : POST /submissions/{id}/resolve-marks
-api --> aip : 200 {grading_mode: NIGHTLY,\ntasks needing AI,\nai_graded_submitted_at}
+aip -> api : GET /submissions/{id}/ai-needed
+api -> db : SELECT submission_target\nWHERE ai_needed AND completed_at IS NULL,\njoin rubric WHERE is_current,\njoin test_context
+api --> aip : 200 {targets[], rubric,\nfeedback_guidance, test_context[],\nai_graded_submitted_at}
 
-alt already fully graded (ai_graded_submitted_at = submitted_at)
-  note right of aip #FFF8DC
+alt already graded on an earlier night
+  note over aip #FFF8DC
     **The token guard.** Reruns happen for
-    reasons other than our nightly job: an
-    instructor debugging the autograder, a TA
-    re-running a flaky test. None should re-bill
-    the LLM.
+    reasons other than our trigger: an instructor
+    debugging the autograder, a TA re-running a
+    flaky test. None should re-bill the LLM.
   end note
   aip -> api : GET /submissions/{id}/feedback
   api --> aip : 200 {stored feedback}
-  aip -> aip : package results.json\n(tests + stored feedback)
-  aip -> gs : write results.json
+  aip -> aip : parse results.json and splice\nthe stored feedback in
 
 else work remains
-  aip -> aip : package results.json\n(test results only)
-  aip -> gs : write results.json
+  loop for each target with ai_needed
+    aip -> aip : build prompt from the rubric,\nthe feedback guidance, the student's\ncode on disk, and any test_context
 
-  note right of aip #FFF8DC
-    Same defensive write as in 03. Written before
-    grading, overwritten after. A container killed
-    mid-grading leaves the student with their test
-    results rather than a bare autograder error.
-  end note
-
-  loop for each task with ai_needed and ai_status = PENDING
-    aip -> api : GET /tasks/{id}/request
-    api -> db : SELECT rubric, guidance,\ntest_outcome, submission_file
-    api --> aip : 200 {FeedbackRequest}
-    aip -> aip : build prompt
+    note right of aip #FFF8DC
+      test_context survives the container being
+      destroyed, because it is in the database.
+      That is what makes it usable in NIGHTLY
+      mode, where the rerun happens hours later
+      in a fresh container.
+    end note
 
     group Multi-provider fan-out [FR-23, FR-27]
       par
@@ -173,44 +172,44 @@ else work remains
       aip -> aip : compare, estimate confidence
     end
 
-    aip -> api : POST /tasks/{id}/feedback
-    api -> db : insert feedback rows,\ninsert feedback_comparison,\nUPDATE ai_status = DONE
+    aip -> api : POST /feedback
+    api -> db : insert feedback rows,\ninsert feedback_comparison,\nSET completed_at = now
     api --> aip : 201
   end
 
-  note right of aip #FFF8DC
-    ai_status stops a partially graded submission
-    paying twice: tasks already DONE on a previous
-    night are skipped, and only the ones still
-    NEEDED are graded.
-  end note
-
   aip -> api : POST /submissions/{id}/ai-complete
-  api -> db : UPDATE submission\nSET ai_graded_submitted_at = submitted_at\nWHERE NO task is still NEEDED\n(GAVE_UP counts as settled)
+  api -> db : UPDATE submission\nSET ai_graded_submitted_at = submitted_at\nWHERE every ai_needed row is done\nor out of attempts
   api --> aip : 200 {guard_set}
-  aip -> aip : package results.json\n(tests + all feedback)
-  aip -> gs : OVERWRITE results.json
+  aip -> aip : parse results.json and splice\nthe feedback onto the end
 end
 
+aip -> gs : write the new results.json
 gs --> stud : feedback now visible
 
 note over trig, db #FFF8DC
-  **OQ-5, still open: failure policy.**
-  1. Classify the failure. Transient ones (429,
-     5xx, timeout, container killed) leave the
-     task NEEDED and increment attempt_count;
-     the next night retries while
-     attempt_count < 3, then GAVE_UP.
-  2. Deterministic ones (context overflow, model
-     refusal, unparseable output) go STRAIGHT to
-     GAVE_UP. Retrying them for three nights
-     burns tokens to reach the same answer.
-     See the taxonomy in 03.
-  3. If the trigger cannot find or click a
+  **OQ-5, retry policy in NIGHTLY mode.**
+  Unlike IMMEDIATE, a failure here can wait for
+  tomorrow, so retrying across nights is worth
+  having:
+  1. A transient failure (429, 5xx, timeout)
+     leaves completed_at NULL, records
+     last_error and increments attempt_count.
+     The next night retries while
+     attempt_count < 3.
+  2. A deterministic failure (context overflow,
+     refusal, unparseable output) should set
+     attempt_count straight to the cap, since
+     retrying reaches the same answer at three
+     times the cost.
+  3. A row out of attempts counts as settled for
+     the guard, so one broken target cannot hold
+     a submission in the queue forever. Surface
+     it on the dashboard.
+  4. If the trigger cannot find or click a
      submission's rerun button, record it on
      trigger_run and surface it. A silent trigger
      failure looks identical to "no feedback
-     needed."
+     needed".
 end note
 
 @enduml

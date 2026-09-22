@@ -4,14 +4,19 @@
 ' Traces to: FR-6, FR-12..FR-18, FR-25, FR-26, FR-28, FR-30, NFR-6
 '
 ' Changes in this revision:
-'   grading_target.feedback_mode -- the instructor's per-target choice
-'     of WHETHER a target gets AI feedback, set in the web app.
 '   assignment.grading_mode -- IMMEDIATE or NIGHTLY, per assignment.
-'   grading_target.feedback_mode -- NEVER, ALWAYS or AUTOGRADER, per
-'     target. Governs WHETHER a target gets feedback, not when.
-'   grading_task.ai_needed + ai_needed_reason -- the per-submission
-'     marker, resolved by the AI phase after the instructor's suite
-'     has exited.
+'   submission_target.ai_needed -- defaults TRUE for every registered target
+'     on submission. The instructor's test suite opts targets out during
+'     functional testing. There is no resolution step.
+'
+' NOT stored here: functional test outcomes and student source files.
+' Those live in results.json and on the container filesystem.
+'
+' Nor are raw outcomes used to build prompts. ai_needed already says the
+' target wants feedback. What the prompt CAN carry is test_context: any
+' diagnostic the instructor's suite chooses to pass us during testing.
+' The AI phase reads results.json only to splice feedback into it.
+' See the dashboard note at the bottom.
 ' =====================================================================
 
 title Logical Data Model
@@ -65,38 +70,18 @@ entity "grading_target" as target #DCEFD9 {
   * assignment_id : uuid <<FK>>
   * identifier : text
   * kind : text <<METHOD|CLASS|FILE>>
-  * feedback_mode : text <<NEVER|ALWAYS|AUTOGRADER>>
   max_score : numeric
   display_order : integer
   --
   FR-2, FR-3.
-  feedback_mode decides WHETHER this
-  target gets AI feedback, and is set
-  per target in the web app:
-    AUTOGRADER -- the instructor's test
-      suite decides, per submission, by
-      calling request_ai_feedback.
-      The default and the usual case.
-    ALWAYS -- mark every submission
-      regardless of outcome, for style
-      or design feedback that no test
-      can detect.
-    NEVER -- never mark. For targets
-      graded purely by tests.
   --
-  There is no ON_FAILURE value. Marking
-  on failures is one line in the
-  instructor's suite, and any other
-  rule such as a subset of failures, a
-  superset, or a partial-credit
-  threshold is equally expressible
-  there. A value
-  here could only duplicate what the
-  code already says.
-  --
-  Note the division of labour:
-  feedback_mode says WHETHER,
-  assignment.grading_mode says WHEN.
+  No feedback_mode column. A target the
+  instructor never wants AI feedback on
+  simply is not registered, so a NEVER
+  value would have nothing to describe.
+  Whether a given SUBMISSION gets
+  feedback on this target is
+  submission_target.ai_needed.
 }
 
 entity "target_file_pattern" as tfile #DCEFD9 {
@@ -134,7 +119,7 @@ entity "llm_provider_config" as pcfg #DCEFD9 {
   FR-23, NFR-11.
   Which providers and models to use,
   and which is primary. Never a key:
-  per AD-5 the instructor's LLM API
+  per AD-4 the instructor's LLM API
   key lives in the autograder
   container's environment, so this
   table says WHAT to call and the
@@ -163,69 +148,86 @@ entity "submission" as sub #FBE6D4 {
   See the guard note below.
 }
 
-entity "submission_file" as subfile #FBE6D4 {
-  * id : uuid <<PK>>
-  --
-  * submission_id : uuid <<FK>>
-  * path : text
-  content : text
-  sha256 : char_64
-  byte_size : integer
-}
 
-entity "test_outcome" as outcome #FBE6D4 {
+
+entity "submission_target" as subtgt #FBE6D4 {
   * id : uuid <<PK>>
   --
   * submission_id : uuid <<FK>>
   * grading_target_id : uuid <<FK>>
-  test_name : text
-  * status : text <<PASS|FAIL|ERROR|SKIP>>
-  earned_score : numeric
-  raw_output : text
-  recorded_at : timestamptz
-  --
-  FR-14, FR-33
-}
-
-entity "grading_task" as task #FBE6D4 {
-  * id : uuid <<PK>>
-  --
-  * submission_id : uuid <<FK>>
-  * grading_target_id : uuid <<FK>>
-  * ai_needed : boolean
-  * ai_status : text <<see 06>>
-  ai_needed_reason : text
-  attempt_count : integer
+  * ai_needed : boolean <<default TRUE>>
   completed_at : timestamptz
+  attempt_count : integer
   last_error : text
   --
   unique: submission_id,
           grading_target_id
   --
-  **ai_needed is the marker.** Resolved
-  by the AI phase once the
-  instructor's suite has exited. See
-  the note below for who decides.
+  Created with ai_needed = TRUE for
+  every registered target when the
+  submission first reports in. The
+  instructor's suite calls
+  ai_not_needed on a target to switch
+  it off, typically because its
+  test passed and there is nothing left
+  to explain.
   --
-  ai_needed_reason records WHICH rule
-  decided:
-    AUTOGRADER_REQUEST
-    POLICY_ALWAYS
-    POLICY_NEVER
-    NOT_REQUESTED
-  Worth storing. Without it nobody can
-  explain why a passing target got
-  feedback, or audit the marking rules
-  against real submissions.
+  No ai_needed_reason column. With one
+  mechanism and a default of TRUE,
+  "false" can only mean the suite opted
+  out, so a reason would carry no
+  information.
+  --
+  No ai_status enum either. The state
+  is already implied by three columns
+  that have to exist anyway:
+    completed_at set
+      -> feedback exists
+    completed_at NULL, last_error NULL
+      -> not attempted yet
+    completed_at NULL, last_error set
+      -> the attempt failed
+  An enum alongside these could only
+  agree with them or contradict them.
 }
 
 ' ---------------------------------------------------------------------
 ' Generated feedback
 ' ---------------------------------------------------------------------
+entity "test_context" as tctx #FBE6D4 {
+  * id : uuid <<PK>>
+  --
+  * submission_target_id : uuid <<FK>>
+  * note : text
+  recorded_at : timestamptz
+  --
+  OPTIONAL. Written during functional
+  testing when the instructor's suite
+  calls add_test_context on a target.
+  --
+  A child table rather than a column
+  because a target usually has several
+  tests, and more than one may have
+  something worth saying. Rows are
+  rendered into the prompt in
+  recorded_at order.
+  --
+  No test_name column. Nothing would
+  join on it or validate it, and the
+  instructor can name the test inside
+  the note if it helps the model.
+  --
+  Read by the AI phase and rendered into
+  the prompt. Cap the length per row and
+  per target: this text is billed as
+  input tokens on every provider call
+  for that target.
+}
+
 entity "feedback" as fb #D6E4F0 {
   * id : uuid <<PK>>
   --
-  * grading_task_id : uuid <<FK>>
+  * submission_target_id : uuid <<FK>>
   * rubric_id : uuid <<FK>>
   * provider : text
   * model_name : text
@@ -248,7 +250,7 @@ entity "feedback" as fb #D6E4F0 {
 entity "feedback_comparison" as cmp #D6E4F0 {
   * id : uuid <<PK>>
   --
-  * grading_task_id : uuid <<FK>>
+  * submission_target_id : uuid <<FK>>
   agreement_score : numeric
   score_spread : numeric
   selection_reason : text
@@ -286,7 +288,7 @@ entity "trigger_run" as run #EDE0F0 {
   CI-3. Records which submissions the
   job clicked rerun on, not what was
   graded. Grading is logged per
-  grading_task.
+  submission_target.
 }
 
 ' ---------------------------------------------------------------------
@@ -297,13 +299,11 @@ assignment ||--o{ target
 assignment ||--o{ sub
 target ||--o{ tfile
 target ||--o{ rubric
-target ||--o{ outcome
-target ||--o{ task
-sub ||--o{ subfile
-sub ||--o{ outcome
-sub ||--o{ task
-task ||--o{ fb
-task ||--o| cmp
+target ||--o{ subtgt
+sub ||--o{ subtgt
+subtgt ||--o{ tctx
+subtgt ||--o{ fb
+subtgt ||--o| cmp
 rubric ||--o{ fb
 fb ||--o{ review
 
@@ -321,8 +321,9 @@ note as N1 #FFF8DC
        AND ai_graded_submitted_at = submitted_at:
        skip AI grading, re-emit stored feedback
 
-  Set it only once every PENDING task for the
-  submission reaches COMPLETE. Setting it on
+  Set it only once every ai_needed row for the
+  submission either has completed_at set or has
+  run out of attempts. Setting it on
   partial success would strand the failed
   targets permanently ungraded.
 
@@ -339,34 +340,46 @@ note as N1 #FFF8DC
 end note
 
 note as N1b #FFF8DC
-  **Who sets grading_task.ai_needed**
-  The AI phase resolves it after the test suite
-  exits, applying the target's feedback_mode:
+  **How ai_needed gets its value**
+  1. The submission first reports in. One
+     submission_target row per registered target,
+     ai_needed = TRUE.
+  2. During functional testing the instructor's
+     suite calls ai_not_needed(target) for the
+     targets that need no commentary, usually the
+     ones whose tests passed.
+  3. The AI phase grades whatever is still TRUE.
 
-  ALWAYS      -> true, reason POLICY_ALWAYS
-  NEVER       -> false, reason POLICY_NEVER
-  AUTOGRADER  did the instructor's suite call
-              request_ai_feedback for this
-              target during this run?
-              yes -> true, AUTOGRADER_REQUEST
-              no  -> false, NOT_REQUESTED
+  Any rule the instructor wants is expressible in
+  step 2, because it is her own code: failures
+  only, a subset, a partial-credit threshold, a
+  cross-target condition. That is why there is no
+  policy enum anywhere in this schema.
 
-  Resolved by the AI phase, after the
-  instructor's suite has exited, because only
-  then is the full set of requests known.
+  The AI phase must also upsert these rows, for
+  the case where the suite opts nothing out and
+  therefore never calls us at all.
+end note
 
-  All of this happens during the submission
-  autograder run. There is no later "grade it
-  after all" path.
+note as N_CTX #FFF8DC
+  **test_context is untrusted input to a prompt.**
+  Assertion messages routinely embed the
+  student's own output, and sometimes their
+  source. A student can therefore influence what
+  lands in this column, which makes it a prompt
+  injection surface: text that reads as an
+  instruction rather than as data.
 
-  Why a stored column rather than a query over
-  test_outcome: the rule is not always
-  "any test failed". It may be a partial-credit
-  threshold, a target-specific condition in the
-  instructor's autograder, or a manual decision.
-  Storing the decision and its reason makes the
-  marking auditable, which matters because every
-  true costs tokens.
+  Mitigations, none of them expensive:
+  delimit it clearly in the prompt and label it
+  as test output, keep the rubric authoritative
+  over anything it says, cap its length, and do
+  not let it carry the role of the guidance.
+
+  The instructor writes the CALL, but she does
+  not control the whole STRING. Those are
+  different things and the design should assume
+  the weaker one.
 end note
 
 note as N2 #FFF8DC
@@ -388,57 +401,36 @@ note as N2 #FFF8DC
   depends on it.
 end note
 
-note as N2a #FFF8DC
-  **OQ-15: does the nightly trigger consider
-  IMMEDIATE assignments?**
-  If an IMMEDIATE submission's grading fails,
-  its task stays NEEDED and
-  ai_graded_submitted_at is never set.
-
-  If the trigger filters on grading_mode =
-  NIGHTLY, that task is stuck forever and the
-  submission is permanently half-graded. If the
-  trigger ignores grading_mode and selects any
-  submission with pending work, the failure
-  self-heals overnight and the student gets the
-  feedback the next morning instead of at once.
-
-  Recommend the latter, which is what the query
-  in 04 shows. It costs nothing and it is the
-  difference between a transient LLM error being
-  invisible and being permanent. Ratify it.
-end note
-
 note as N2b #FFF8DC
-  **A registered target with no outcome is an
-  error.** If the instructor's suite never calls
-  record_outcome for a target registered on this
-  assignment, the AI phase fails the autograder
-  run with a diagnostic naming the missing
-  targets.
+  **An unregistered target name is an error.**
+  If the instructor's suite calls ai_not_needed
+  with a name not registered on this assignment,
+  the API rejects it with a 4xx naming it and
+  listing the registered ones, and the library
+  raises so her test run fails.
 
-  Rationale: the alternative is a silent skip,
-  and a silently skipped target produces no
-  feedback with no explanation, which is the
-  failure mode hardest to debug from the
-  outside.
+  This is now the only identifier check that can
+  exist. Since ai_needed defaults to TRUE,
+  there is no longer a "registered but never
+  reported" case to detect: a target the suite
+  never mentions simply keeps its default and
+  gets graded.
 
-  One thing to weigh: on Gradescope this error
-  is visible to the student, not just the
-  instructor, and it blocks their score. That is
-  the correct trade for a misconfigured
-  assignment that needs fixing immediately, but
-  the message should say plainly that the
-  assignment is misconfigured and the student
-  need do nothing.
+  A narrower case survives: a target she renamed
+  in the web app but never opts out will not
+  trigger this check at all, since no call
+  mentions it. The consequence is mild, though:
+  it simply gets graded, and prompts do not
+  depend on matching anything in results.json.
 end note
 
 note as N2c #FFF8DC
   **Open decisions still outstanding**
   OQ-1  "deduction" (FR-10) undefined. Derive as
         a view, not a column:
-        EXISTS failing test_outcome
-        OR feedback.suggested_score < max_score
+        feedback.suggested_score < max_score,
+        since test outcomes are no longer in
+        the database. See the dashboard note.
   OQ-2  confidence (FR-28) has a column but no
         agreed semantics.
   OQ-4  resubmissions. As drawn every attempt is
@@ -448,13 +440,42 @@ end note
 
 note as N3 #FFF8DC
   **Student code and FERPA**
-  submission_file holds student source code and
-  identifiers, and in immediate mode that code
-  is sent to a third-party LLM within seconds of
-  submission. Privacy, retention and consent are
-  out of scope in the SRS, which is fine for a
-  design doc and not for a live course. Raise
-  with Pitt before real submissions land here.
+  Student source code is no longer stored here:
+  it stays on the autograder container and is
+  read from disk when building a prompt. What
+  this schema does hold is student identifiers
+  and the AI feedback written about their work.
+
+  In IMMEDIATE mode their code still reaches a
+  third-party LLM within seconds of submission,
+  it just is not retained by us. Privacy,
+  retention and consent remain out of scope in
+  the SRS, which is fine for a design document
+  and not for a live course.
+end note
+
+note as N4 #FFF8DC
+  **OQ-16: the dashboard gap.**
+  Functional test outcomes are no longer stored.
+  results.json carries them to the student, and
+  the AI phase parses them to build prompts, but
+  nothing persists them.
+
+  That leaves FR-8, FR-9 and FR-10 partly
+  unserved: the instructor dashboard can show AI
+  feedback and suggested scores, but not raw
+  functional pass/fail, and "submissions with
+  deductions" can only be derived from AI scores.
+
+  Two ways out, and it needs deciding before
+  Student B builds the dashboard:
+  (a) Accept it. The dashboard is about feedback
+      quality, and Gradescope already shows the
+      instructor test results.
+  (b) Have the AI phase POST the outcomes it
+      parsed, as context alongside the feedback.
+      Costs one table and one request, and makes
+      the dashboard self-contained.
 end note
 
 @enduml
