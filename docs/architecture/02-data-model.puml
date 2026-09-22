@@ -161,12 +161,16 @@ entity "submission" as sub #FBE6D4 {
   FR-18, FR-29, FR-30, NFR-6.
   See the guard note below.
   --
-  is_active_attempt is UNUSED as drawn.
-  It exists only in case OQ-4 is settled
-  as "grade the latest attempt only".
-  If OQ-4 lands the other way, delete
-  it rather than leaving a column
-  nothing reads.
+  is_active_attempt marks the one
+  attempt per student that gets graded
+  in NIGHTLY mode, and the only one the
+  dashboard shows. See AD-14.
+  --
+  It tracks whatever the PLATFORM
+  treats as active, not simply the most
+  recent: the instructor may have
+  configured Gradescope to grade the
+  highest-scoring attempt.
 }
 
 
@@ -524,9 +528,6 @@ note as N2c #FFF8DC
         target's max_score.
   OQ-2  confidence has a column but no agreed
         semantics.
-  OQ-4  resubmissions. As drawn every attempt is
-        graded, and is_active_attempt is the
-        column a latest-only policy would use.
 end note
 
 note as N3 #FFF8DC

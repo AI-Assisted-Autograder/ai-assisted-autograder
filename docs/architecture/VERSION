@@ -1,4 +1,4 @@
-uml-docs 20260922-1125Z
+uml-docs 20260922-1135Z
 
 Decisions (see DECISIONS.md, which has a table of contents):
   AD-1   Grading mode is per assignment
@@ -14,6 +14,7 @@ Decisions (see DECISIONS.md, which has a table of contents):
   AD-11  The container asks the service what to do
   AD-12  Source files are derived from the identifier, not configured
   AD-13  Platform: FastAPI, PostgreSQL, Oracle Cloud
+  AD-14  Only the active attempt is graded or shown
 
 Reporting library, both calls optional:
   ai_not_needed(target)
@@ -22,9 +23,8 @@ Reporting library, both calls optional:
 Open questions, ordered by what they block (IDs are stable, so
 they are not sequential):
   OQ-6   Exact Gradescope `results.json` schema
-  OQ-7   Gradescope authentication for the trigger, and where that ...
+  OQ-7   Gradescope automation: authentication, where that credenti...
   OQ-3   Can the instructor edit or approve generated feedback befo...
-  OQ-4   Are all submission attempts graded, or only the latest?
   OQ-1   What exactly is a "deduction" (FR-10)?
   OQ-2   How is confidence defined and computed (FR-28)?
   OQ-5   In-run retry count and backoff schedule

@@ -137,6 +137,11 @@ package "AI Phase entrypoint (Student C)" #FBE6D4 {
     +parse(path) : PlatformResults
     +splice(results, feedback) : dict
     +append_deferred(results) : dict
+    --
+    append_deferred's wording must
+    reference the ACTIVE submission at
+    the next run, not this submission.
+    See AD-11.
     +append_error(results, message) : dict
     --
     The only code that knows the

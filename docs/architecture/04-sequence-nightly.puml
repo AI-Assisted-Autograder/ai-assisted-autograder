@@ -80,7 +80,27 @@ end note
 
 aip -> aip : parse results.json and splice\na "feedback deferred" section
 aip -> gs : write the new results.json
-gs --> stud : test results now, and a note\nthat feedback arrives by\ntomorrow morning
+gs --> stud : test results now, and a note\nthat feedback goes to whichever\nsubmission is active at the\nnext nightly run
+
+note over aip #FFF8DC
+  **The deferred wording is load-bearing.** It
+  promises feedback on the submission that is
+  ACTIVE when the next run happens, not on this
+  one.
+
+  That matters because of AD-14. A student who
+  resubmits before tonight's run supersedes this
+  attempt, and only the active one gets graded,
+  so this results.json is never rewritten. Worded
+  as "feedback arrives by tomorrow morning" it
+  would be a promise the system silently
+  abandons. Worded as above it stays true: this
+  attempt was not the active one.
+
+  It also stays true if the trigger never runs.
+  The row is still pending, so "the next run"
+  has not happened yet.
+end note
 
 == Phase 2: nightly -- trigger a rerun per submission ==
 

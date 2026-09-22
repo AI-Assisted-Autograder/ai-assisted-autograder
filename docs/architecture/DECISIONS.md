@@ -22,6 +22,7 @@ contributor needs when the constraint stops making obvious sense.
   - [AD-11. The container asks the service what to do](#ad-11-the-container-asks-the-service-what-to-do)
   - [AD-12. Source files are derived from the identifier, not configured](#ad-12-source-files-are-derived-from-the-identifier-not-configured)
   - [AD-13. Platform: FastAPI, PostgreSQL, Oracle Cloud](#ad-13-platform-fastapi-postgresql-oracle-cloud)
+  - [AD-14. Only the active attempt is graded or shown](#ad-14-only-the-active-attempt-is-graded-or-shown)
 - [Why AI generation fails](#why-ai-generation-fails)
 - [Open questions](#open-questions)
   - [OQ-9 and OQ-10 deserve a flag](#oq-9-and-oq-10-deserve-a-flag)
@@ -332,8 +333,16 @@ GET /submissions/{platform_submission_id}/action
 | `NIGHTLY`, `ai_authorized_at` set | `GRADE` |
 | Already graded (AD-9 guard) | `REEMIT` |
 
-`DEFER` splices a section into `results.json` saying feedback will
-arrive by the next morning, and spends nothing.
+`DEFER` splices a section into `results.json` and spends nothing. The
+wording matters: it promises feedback on whichever submission is **active
+at the next nightly run**, not on this one.
+
+That phrasing is what keeps it honest under AD-14. A student who resubmits
+before the run supersedes this attempt, only the active attempt gets
+graded, and this file is never rewritten. "Feedback arrives by tomorrow
+morning" would be a promise the system quietly abandons; the wording
+above stays true whatever happens, including when the trigger itself
+fails to run.
 
 **Why the container cannot work this out itself.** In `NIGHTLY` mode the
 same script runs twice and the database looks identical both times: rows
@@ -471,6 +480,42 @@ some popular regions.
 requires student data to stay in a particular jurisdiction, that decides
 the region before performance does.
 
+### AD-14. Only the active attempt is graded or shown
+
+Settled for `NIGHTLY` mode; `IMMEDIATE` grades each attempt as it
+arrives, before a later one exists, so it never faces the choice.
+
+A student who resubmits before the nightly trigger runs supersedes the
+earlier attempt. Grading it would spend tokens on feedback nobody reads,
+so the trigger grades one attempt per student and
+`submission.is_active_attempt` marks which.
+
+**Active means whatever the platform says it means.** Gradescope lets the
+instructor choose which submission counts: most recent, highest score, or
+one the student activates. Grading the most recent while the platform
+grades the highest-scoring would give the student feedback on a
+submission that is not the one being graded. So the trigger reads the
+platform's notion of active rather than inferring it from timestamps.
+
+*Unverified*: that Gradescope's UI exposes which submission is active in
+a form the trigger can read. Folded into OQ-7, since it is the same
+scraping problem.
+
+**The dashboard shows active attempts only.** Its job is which students
+need attention, and a superseded attempt is a student who has already
+moved on. Filtering it out means `is_active_attempt` also answers the
+question of how to distinguish a superseded attempt from one still
+waiting for tonight's run, because neither appears.
+
+If per-student history turns out to be wanted, for instance to see
+whether feedback changed behaviour, that belongs in a drill-down rather
+than the default view.
+
+**Superseded attempts need no cleanup.** Their `results.json` carries the
+`DEFER` wording from AD-11, which promises feedback on the submission
+active at the next run. That was never this attempt, so nothing is left
+dangling.
+
 ---
 
 ## Why AI generation fails
@@ -517,9 +562,8 @@ Ordered by what they block. IDs are stable, so they are not sequential.
 | ID | Question | Blocks | Owner |
 | --- | --- | --- | --- |
 | OQ-6 | Exact Gradescope `results.json` schema | C's packager, D's tests | C |
-| OQ-7 | Gradescope authentication for the trigger, and where that credential lives | C's trigger | C |
+| OQ-7 | Gradescope automation: authentication, where that credential lives, and whether the UI exposes which submission is active (AD-14) | C's trigger | C |
 | OQ-3 | Can the instructor edit or approve generated feedback before the student sees it? | state machine, B's dashboard, whether IMMEDIATE is offered at all | Instructor |
-| OQ-4 | Are all submission attempts graded, or only the latest? | cost | Instructor |
 | OQ-1 | What exactly is a "deduction" (FR-10)? | B's dashboard query | Instructor |
 | OQ-2 | How is confidence defined and computed (FR-28)? | A's engine, B's UI | A |
 | OQ-5 | In-run retry count and backoff schedule | A's provider adapters | A |
@@ -551,6 +595,10 @@ Student D should revise section 3.4, which predates these decisions:
   a suite-driven opt-out, and for the token guard. All three are
   load-bearing and currently undocumented.
 - Remove any requirement implying functional outcomes are stored.
+- Specify the student-facing deferred wording. It has to reference the
+  submission active at the next run rather than a time of day, for the
+  reason in AD-11, and it is the one string in the system every student
+  in a NIGHTLY course will read.
 
 ---
 
