@@ -43,8 +43,28 @@ if [[ ! -f "${JAR}" ]]; then
     -o "${JAR}"
 fi
 
+# Sequence diagrams cannot use a floating "note as X". Notes there must
+# be attached: note over / note left of / note right of. PlantUML
+# reports this only as the generic "contains errors", so catch it here
+# where the message can say what is actually wrong.
+check_sequence_notes() {
+  local bad=0 f
+  for f in "${SRC_DIR}"/*.puml; do
+    grep -q '^participant ' "${f}" || continue
+    if grep -n '^[[:space:]]*note as ' "${f}" >/dev/null; then
+      echo "error: $(basename "${f}") is a sequence diagram and uses a" >&2
+      echo "       floating 'note as'. Attach it: note over <participant>" >&2
+      grep -n '^[[:space:]]*note as ' "${f}" | sed 's/^/         /' >&2
+      bad=1
+    fi
+  done
+  return "${bad}"
+}
+
 echo 'Checking @startuml names match filenames...'
 check_names
+echo 'Checking sequence-diagram note syntax...'
+check_sequence_notes
 # One file at a time. Across a glob, PlantUML reports only "Some
 # diagram description contains errors" and exits 200 without naming the
 # file, which makes a syntax error tedious to locate.

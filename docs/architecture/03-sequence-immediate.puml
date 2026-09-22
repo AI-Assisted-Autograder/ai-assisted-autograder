@@ -150,7 +150,7 @@ note right of aip #FFF8DC
   deferred to a rerun and the guard is set below.
 end note
 
-note as N_FAIL #FFF8DC
+note over aip #FFF8DC
   **Why an IMMEDIATE grading fails, and whether
   retrying helps.**
 

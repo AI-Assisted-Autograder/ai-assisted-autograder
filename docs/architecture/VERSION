@@ -1,0 +1,12 @@
+uml-docs 20260922-0026Z
+
+Reflects these decisions (see DECISIONS.md):
+  AD-1  grading mode per assignment, feedback mode per target
+  AD-2  the instructor's test suite is the autograder; we ship a library
+  AD-3  target identifiers are a checked contract
+  AD-4  assignment.grading_mode = IMMEDIATE|NIGHTLY
+        grading_target.feedback_mode = NEVER|ALWAYS|AUTOGRADER
+  AD-5  the autograder container holds the LLM API key
+  AD-6  results.json written twice, test results first
+
+If a rendered diagram disagrees with this file, the rendering is stale.

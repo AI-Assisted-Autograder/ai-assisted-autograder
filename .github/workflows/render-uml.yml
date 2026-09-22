@@ -73,6 +73,23 @@ jobs:
       # "Some diagram description contains errors" and exits 200 without
       # naming the file, which is useless in CI. Per-file, the output is
       # attributable and lands as a GitHub annotation on the right file.
+      # Sequence diagrams cannot use a floating "note as X". Notes there
+      # must be attached: note over / note left of / note right of.
+      # PlantUML reports this only as the generic "contains errors", so
+      # catch it here where the message can say what is wrong.
+      - name: Check sequence-diagram note syntax
+        run: |
+          bad=0
+          for f in docs/architecture/*.puml; do
+            grep -q '^participant ' "$f" || continue
+            if grep -qn '^[[:space:]]*note as ' "$f"; then
+              line=$(grep -n '^[[:space:]]*note as ' "$f" | head -1 | cut -d: -f1)
+              echo "::error file=$f,line=$line::sequence diagram uses a floating 'note as'; attach it with 'note over <participant>'"
+              bad=1
+            fi
+          done
+          exit "$bad"
+
       - name: Verify diagram syntax
         run: |
           status=0
