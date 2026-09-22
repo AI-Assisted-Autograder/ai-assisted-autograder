@@ -13,6 +13,8 @@
 '   submission_target            completed_at and last_error carry the
 '                                state; there is no status enum
 '
+' Types are PostgreSQL, which is the chosen database (AD-13).
+'
 ' Student source files are NOT stored. They stay on the container
 ' filesystem and are read from disk when building a prompt.
 '

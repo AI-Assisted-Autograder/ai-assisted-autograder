@@ -401,6 +401,49 @@ counts as a candidate, for instance excluding test roots or directories
 the assignment does not expect, rather than to start guessing between
 candidates.
 
+### AD-13. Platform: FastAPI, PostgreSQL, Oracle Cloud
+
+| Choice | Notes |
+| --- | --- |
+| Web framework | FastAPI |
+| Database | PostgreSQL, which ratifies the ERD's `timestamptz`, `uuid` and `numeric` types |
+| Cloud host | Oracle Cloud Infrastructure |
+
+The host carries only the web app and the database. The AI phase runs in
+Gradescope's container and the nightly trigger runs in GitHub Actions, so
+nothing here is on the critical path for local development.
+
+**FastAPI implications.** It brings no ORM, admin, auth or templating, so
+the instructor dashboard is hand-built and Student B needs SQLAlchemy
+plus Alembic for migrations, and an auth library for OQ-9. That is a real
+cost compared with a batteries-included framework, and it buys a good fit
+for the larger consumer: the autograder container talks JSON, and the
+Pydantic models map directly onto the DTOs in `07-interfaces.puml`.
+
+**OCI implications, all verifiable before anyone commits time.**
+
+*PostgreSQL is self-managed.* OCI's always-free database offering is
+Autonomous Database, which is Oracle's own engine, not Postgres. Postgres
+means running it on the compute instance. Student D inherits backups,
+upgrades and process supervision, and OQ-10 inherits the question of
+where student-data backups live.
+
+*The instances are ARM.* Ampere A1 is aarch64, and GitHub's default
+runners are x86. Container images built in CI will not run on the host
+unless they are arm64 or multi-arch. Worth settling in the first week,
+because the failure looks like an unrelated deployment problem.
+
+*The free allowance shrank.* Oracle reduced Always Free Ampere A1 from
+4 OCPU / 24 GB to 2 OCPU / 12 GB during 2026, and instances above the new
+limit were subject to termination. Still ample for a web app and a small
+Postgres, but re-check the current terms rather than trusting a guide
+written earlier, and note that A1 capacity is genuinely hard to obtain in
+some popular regions.
+
+*Region choice is constrained by OQ-10*, not by preference. If Pitt
+requires student data to stay in a particular jurisdiction, that decides
+the region before performance does.
+
 ---
 
 ## Why AI generation fails
@@ -446,7 +489,6 @@ Ordered by what they block. IDs are stable, so they are not sequential.
 
 | ID | Question | Blocks | Owner |
 | --- | --- | --- | --- |
-| OQ-8 | Web framework, database, cloud host | B cannot start without these | B |
 | OQ-6 | Exact Gradescope `results.json` schema | C's packager, D's tests | C |
 | OQ-7 | Gradescope authentication for the trigger, and where that credential lives | C's trigger | C |
 | OQ-3 | Can the instructor edit or approve generated feedback before the student sees it? | state machine, B's dashboard, whether IMMEDIATE is offered at all | Instructor |
