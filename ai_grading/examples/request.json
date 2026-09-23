@@ -1,0 +1,29 @@
+{
+  "target": {
+    "identifier": "report.py:average",
+    "kind": "METHOD",
+    "max_score": 10.0,
+    "id": null
+  },
+  "rubric": {
+    "criteria_text": "Compute the arithmetic mean of comma-separated integers. Ignore empty fields and return 0.0 when there are no numbers.",
+    "feedback_guidance": "For each issue, cite the relevant file and test; offer hints, not replacement code.",
+    "version": 1,
+    "id": null,
+    "grading_target_id": null
+  },
+  "resolved": {
+    "source_file": {
+      "path": "report.py",
+      "content": "from parsing import parse_numbers\n\ndef average(text):\n    values = parse_numbers(text)\n    if not values:\n        return 0.0\n    return sum(values)\n"
+    },
+    "other_file_paths": [
+      "parsing.py"
+    ]
+  },
+  "functional_test_feedback": [
+    "test_average failed: average('2,4') returned 6; expected 3.0.",
+    "test_empty_field failed: average('2,,4') raised ValueError in parsing.py; expected 3.0.",
+    "test_empty_input passed: average('') returned 0.0."
+  ]
+}
