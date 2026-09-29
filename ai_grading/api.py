@@ -29,11 +29,6 @@ class ErrorResponse(BaseModel):
 
 def engine_from_env() -> AIGradingComponent:
     """Local configuration only; production credentials stay in the LMS container."""
-    builder = PromptBuilder(
-        max_context_chars=int(os.getenv("LLM_MAX_CONTEXT_CHARS", "120000")),
-        max_feedback_chars=int(os.getenv("LLM_MAX_FEEDBACK_CHARS", "4000")),
-        max_target_feedback_chars=int(os.getenv("LLM_MAX_TARGET_FEEDBACK_CHARS", "16000")),
-    )
     retry_policy = RetryPolicy(
         max_attempts=int(os.getenv("LLM_MAX_ATTEMPTS", "3")),
         initial_delay=float(os.getenv("LLM_RETRY_INITIAL_DELAY", "0.5")),
@@ -42,18 +37,25 @@ def engine_from_env() -> AIGradingComponent:
     )
     provider_name = os.getenv("LLM_PROVIDER", "fake").lower()
     if provider_name == "fake":
-        provider = FakeProvider(builder=builder)
-    elif provider_name == "gemini":
-        from .ILLMProvider.GeminiProvider import GeminiProvider
-
-        provider = GeminiProvider(
-            model=os.getenv("GEMINI_MODEL"), api_key=os.getenv("GEMINI_API_KEY"),
+        provider = FakeProvider()
+    else:
+        if provider_name == "gemini":
+            from .ILLMProvider.GeminiProvider import GeminiProvider as provider_class
+        elif provider_name == "openai":
+            from .ILLMProvider.OpenAIProvider import OpenAIProvider as provider_class
+        elif provider_name == "claude":
+            from .ILLMProvider.ClaudeProvider import ClaudeProvider as provider_class
+        else:
+            raise ValueError("LLM_PROVIDER must be fake, gemini, openai or claude")
+        provider = provider_class(
             timeout_seconds=float(os.getenv("LLM_TIMEOUT_SECONDS", "60")),
             max_output_tokens=int(os.getenv("LLM_MAX_OUTPUT_TOKENS", "4096")),
-            builder=builder,
+            builder=PromptBuilder(
+                max_context_chars=int(os.getenv("LLM_MAX_CONTEXT_CHARS", "120000")),
+                max_feedback_chars=int(os.getenv("LLM_MAX_FEEDBACK_CHARS", "4000")),
+                max_target_feedback_chars=int(os.getenv("LLM_MAX_TARGET_FEEDBACK_CHARS", "16000")),
+            ),
         )
-    else:
-        raise ValueError("LLM_PROVIDER must be fake or gemini")
     return AIGradingComponent([provider], retry_policy=retry_policy)
 
 

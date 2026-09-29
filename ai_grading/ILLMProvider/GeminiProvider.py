@@ -4,7 +4,6 @@ import json
 from math import isfinite
 import os
 from pathlib import Path
-import re
 
 import httpx
 from google import genai
@@ -12,6 +11,7 @@ from google.genai import errors, types
 
 from ..models import FeedbackRequest, FeedbackResponse
 from ..PromptBuilder import PromptBuilder
+from .FeedbackParser import parse_feedback
 from .ILLMProvider import ProviderError
 
 
@@ -41,15 +41,13 @@ class GeminiProvider:
                 model = config.get("model")
             if api_key is None:
                 api_key = config.get("api_key")
-        if not isinstance(model, str) or not model.strip():
+        if not model or not model.strip():
             raise ValueError("model must be configured explicitly")
-        if (isinstance(timeout_seconds, bool)
-                or not isinstance(timeout_seconds, (int, float))
-                or not isfinite(timeout_seconds) or timeout_seconds <= 0):
+        if not isfinite(timeout_seconds) or timeout_seconds <= 0:
             raise ValueError("timeout_seconds must be a positive finite number")
-        if type(max_output_tokens) is not int or max_output_tokens <= 0:
+        if max_output_tokens <= 0:
             raise ValueError("max_output_tokens must be a positive integer")
-        if client is None and (not isinstance(api_key, str) or not api_key.strip()):
+        if client is None and (not api_key or not api_key.strip()):
             raise ValueError("Gemini API key must be configured")
         self.model = model.strip()
         self._builder = builder if builder is not None else PromptBuilder()
@@ -96,7 +94,7 @@ class GeminiProvider:
                 "provider_error", f"Gemini rejected the request (HTTP {exc.code}).",
                 retryable=retryable,
             ) from None
-        except (ValueError, TypeError):
+        except ValueError:
             raise ProviderError(
                 "invalid_provider_response", "Gemini returned an invalid response.",
             ) from None
@@ -124,38 +122,21 @@ class GeminiProvider:
         # Exclude thinking parts; neither tool calls nor thoughts are feedback.
         parts = candidate.content.parts if candidate.content else []
         output = "".join(part.text or "" for part in parts or [] if not part.thought)
-        try:
-            # AD-6: the model supplies text and a score; code owns serialization.
-            score_line, separator, feedback_text = output.partition("\n")
-            score_match = re.fullmatch(r"SCORE: (NONE|[0-9]+(?:\.[0-9]+)?)\r?", score_line)
-            if not separator or score_match is None:
-                raise ValueError("missing or invalid score line")
-            value = score_match.group(1)
-            suggested_score = None if value == "NONE" else float(value)
-            if (suggested_score is not None
-                    and req.target.max_score is not None
-                    and suggested_score > req.target.max_score):
-                raise ValueError("score exceeds maximum")
-            usage = response.usage_metadata
-            generated_counts = (
-                [usage.candidates_token_count, usage.thoughts_token_count]
-                if usage else []
-            )
-            known_counts = [count for count in generated_counts if count is not None]
-            return FeedbackResponse(
-                rubric_id=req.rubric.id,
-                provider=self.name,
-                model_name=response.model_version or self.model,
-                prompt_version=prompt.version,
-                feedback_text=feedback_text,
-                suggested_score=suggested_score,
-                input_tokens=usage.prompt_token_count if usage else None,
-                output_tokens=sum(known_counts) if known_counts else None,
-            )
-        except ValueError:
-            raise ProviderError(
-                "invalid_provider_response", "Gemini returned invalid grading feedback.",
-            ) from None
+        usage = response.usage_metadata
+        generated_counts = (
+            [usage.candidates_token_count, usage.thoughts_token_count]
+            if usage else []
+        )
+        known_counts = [count for count in generated_counts if count is not None]
+        return parse_feedback(
+            output,
+            request=req,
+            provider=self.name,
+            model_name=response.model_version or self.model,
+            prompt_version=prompt.version,
+            input_tokens=usage.prompt_token_count if usage else None,
+            output_tokens=sum(known_counts) if known_counts else None,
+        )
 
     def estimated_cost(self, req: FeedbackRequest) -> float | None:
         """Unknown until the caller supplies a pricing policy."""

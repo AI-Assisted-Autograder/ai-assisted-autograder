@@ -1,0 +1,23 @@
+{
+  "target": {
+    "identifier": "solution.py:sum_values",
+    "kind": "METHOD",
+    "max_score": 5.0
+  },
+  "rubric": {
+    "criteria_text": "Return the sum of integers, including 0 for an empty list.",
+    "feedback_guidance": "Explain the issue and give a hint, without a complete solution.",
+    "version": 1
+  },
+  "resolved": {
+    "source_file": {
+      "path": "solution.py",
+      "content": "def sum_values(values):\n    if values:\n        return sum(values)\n"
+    },
+    "other_file_paths": []
+  },
+  "functional_test_feedback": [
+    "Preset sample diagnostic: test_nonempty passed; sum_values([1, 2]) returned 3.",
+    "Preset sample diagnostic: test_empty failed; expected 0, got None."
+  ]
+}

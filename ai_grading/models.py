@@ -8,13 +8,13 @@ from pydantic import Field
 from pydantic.dataclasses import dataclass
 
 
-Score = Annotated[float, Field(strict=True, allow_inf_nan=False)]
-Identifier = Annotated[str, Field(min_length=1)]
+Score = Annotated[float, Field(strict=True, ge=0, allow_inf_nan=False)]
+Identifier = Annotated[str, Field(pattern=r"\S")]
 Version = Annotated[int, Field(strict=True, ge=1)]
 Count = Annotated[int, Field(strict=True, ge=0)]
 CONTRACT_CONFIG = {"extra": "forbid", "allow_inf_nan": False}
 MAX_FEEDBACK_CHARS = 16_000
-FeedbackText = Annotated[str, Field(min_length=1, max_length=MAX_FEEDBACK_CHARS)]
+FeedbackText = Annotated[str, Field(pattern=r"\S", max_length=MAX_FEEDBACK_CHARS)]
 
 
 class GradingInputError(ValueError):
@@ -34,12 +34,6 @@ class GradingTarget:
     max_score: Score | None = None
     id: Identifier | None = field(default=None, kw_only=True)
 
-    def __post_init__(self) -> None:
-        if not self.identifier.strip():
-            raise ValueError("target identifier must not be blank")
-        if self.max_score is not None and self.max_score < 0:
-            raise ValueError("max_score must be nonnegative")
-
 
 @dataclass(frozen=True, config=CONTRACT_CONFIG)
 class Rubric:
@@ -49,19 +43,11 @@ class Rubric:
     id: Identifier | None = field(default=None, kw_only=True)
     grading_target_id: Identifier | None = field(default=None, kw_only=True)
 
-    def __post_init__(self) -> None:
-        if not self.criteria_text.strip():
-            raise ValueError("rubric criteria_text must not be blank")
-
 
 @dataclass(frozen=True, config=CONTRACT_CONFIG)
 class CodeFile:
     path: Identifier
     content: str
-
-    def __post_init__(self) -> None:
-        if not self.path.strip():
-            raise ValueError("file path must not be blank")
 
 
 @dataclass(frozen=True, config=CONTRACT_CONFIG)
@@ -73,8 +59,6 @@ class ResolvedSource:
 
     def __post_init__(self) -> None:
         paths = self.other_file_paths
-        if any(not path.strip() for path in paths):
-            raise ValueError("other file paths must not be blank")
         if len(paths) != len(set(paths)):
             raise ValueError("other file paths must be distinct")
         if self.source_file.path in paths:
@@ -112,12 +96,6 @@ class FeedbackResponse:
     input_tokens: Count | None = None
     output_tokens: Count | None = None
     rubric_id: Identifier | None = field(default=None, kw_only=True)
-
-    def __post_init__(self) -> None:
-        if not self.feedback_text.strip():
-            raise ValueError("feedback_text must not be blank")
-        if self.suggested_score is not None and self.suggested_score < 0:
-            raise ValueError("suggested_score must be nonnegative")
 
 
 @dataclass(frozen=True, config=CONTRACT_CONFIG)

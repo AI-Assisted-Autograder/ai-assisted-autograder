@@ -1,84 +1,102 @@
 # AI grading
 
-No DB access or `results.json` writes now 
+The module is delivered as a Python library. The Gradescope container entrypoint
+calls `AIGradingComponent.grade(request)` directly.
 
-## Module layout
+`api.py` and `/test/grade` are local testing tools, outside the production delivery
+scope. The container does not need to start uvicorn to use this module.
 
-Component and interface modules use the names in
-`docs/architecture/07-interfaces.puml`:
+## Structure
 
 ```text
 ai_grading/
-  AIGradingComponent.py
-  FileResolver.py
+  AIGradingComponent.py   # Grading, retries and result selection
+  FileResolver.py         # Read the target source from a submission directory
+  models.py               # FeedbackRequest and GradingResult
   PromptBuilder.py
-  ILLMProvider/
-    ILLMProvider.py
-    GeminiProvider.py
-    FakeProvider.py
-  models.py
-  api.py
+  ILLMProvider/           # Interface, three real adapters and FakeProvider
+  api.py                  # Local HTTP testing only
+  demo.py
+  tests/
+  requirements.txt
 ```
 
-`ILLMProvider/` groups the provider interface and its implementations.
-`models.py` contains the shared request and response types; `api.py` exposes
-the local HTTP test endpoint.
+## Setup
 
-## Install dependencies
-
-From the repository root, install the AI grading dependencies with the same
-Python you will use to run the commands below:
+Run from the repository root:
 
 ```bash
-python -m pip install fastapi uvicorn httpx google-genai
+source .venv/bin/activate
+python -m pip install -r ai_grading/requirements.txt
 ```
 
-The repository does not currently have a dependency manifest for `ai_grading`.
-`python -m pip` installs into the Python selected by `python`.
+## Fake entrypoint
 
-## Integration
-
-- Input: `FeedbackRequest` (`models.py`) with target, rubric, resolved source,
-  and ordered test feedback. Use `FileResolver`; see `examples/request.json`.
-- Output: `GradingResult.selected` has feedback and an optional score;
-  `responses` contains all provider results.
-- Errors: invalid input raises validation errors or `GradingInputError`;
-  model failures raise `ProviderError`.
+Pass a prepared `FeedbackRequest` as `request`. Fake returns fixed feedback
+without API keys or charges:
 
 ```python
 from ai_grading.AIGradingComponent import AIGradingComponent
-from ai_grading.ILLMProvider.GeminiProvider import GeminiProvider
+from ai_grading.ILLMProvider import FakeProvider
 
-result = AIGradingComponent([GeminiProvider()]).grade(request)
+result = AIGradingComponent([FakeProvider()]).grade(request)
 ```
 
-`POST /test/grade` is a local HTTP test endpoint; the Web app is not connected.
+For an offline example with supplied inputs, run `python -m ai_grading.demo`.
 
-## Offline testing
+## Real entrypoint
 
-From the repository root:
+Set the selected provider's model and key:
+
+| Provider class | Model | API key |
+| --- | --- | --- |
+| `GeminiProvider` | `GEMINI_MODEL` | `GEMINI_API_KEY` or `GOOGLE_API_KEY` |
+| `OpenAIProvider` | `OPENAI_MODEL` | `OPENAI_API_KEY` |
+| `ClaudeProvider` | `ANTHROPIC_MODEL` | `ANTHROPIC_API_KEY` |
+
+For example, after setting the OpenAI variables:
+
+```python
+from ai_grading.AIGradingComponent import AIGradingComponent
+from ai_grading.ILLMProvider.OpenAIProvider import OpenAIProvider
+
+provider = OpenAIProvider()
+try:
+    result = AIGradingComponent([provider]).grade(request)
+finally:
+    provider.close()
+```
+
+Use the corresponding provider class for Gemini or Claude. Gemini also supports
+`ILLMProvider/.gemini.json`.
+
+## Optional local HTTP testing
+
+For local testing, start the harness and use `/docs` to send a `FeedbackRequest`:
 
 ```bash
-python -m ai_grading.demo --all
-python -m unittest discover -s ai_grading/tests -v
+LLM_PROVIDER=fake python -m uvicorn ai_grading.api:create_app --factory --port 8001
 ```
 
-The demo returns fixed `FakeProvider` feedback. Tests use fake providers
-or mock Gemini's HTTP response; neither calls Gemini's API.
+Schema: `http://127.0.0.1:8001/docs`. This harness is separate from the backend
+Web API accessed through `IGradingClient` in the production flow below.
 
-## Run with Gemini API
+## Future Gradescope integration
 
-Set `GEMINI_MODEL` and `GEMINI_API_KEY`, then start the local API:
+The module runs inside the Gradescope container. Assignment configuration,
+rubrics and test feedback come through B's `IGradingClient`; source files come
+from the container's submission directory. Only the backend accesses the DB.
 
-```bash
-LLM_PROVIDER=gemini python -m uvicorn ai_grading.api:create_app --factory --host 127.0.0.1 --port 8001
-```
+The container entrypoint will connect the flow:
 
-From another terminal in the repo root:
+1. Call `get_action()` and handle `GRADE`, `DEFER` or `REEMIT`.
+2. For `GRADE`, resolve the source with `FileResolver` and combine it with the
+   configuration to build `FeedbackRequest`, then call `AIGradingComponent.grade()`.
+3. Send results with `post_feedback()` or errors with `mark_ai_failed()`, and
+   call `mark_ai_complete()` when the targets are finished.
+4. Use `ResultsPackager` to splice feedback into the existing `results.json`.
 
-```bash
-curl -sS http://127.0.0.1:8001/test/grade -H 'Content-Type: application/json' \
-  --data-binary @ai_grading/examples/request.json
-```
-
-This calls Gemini; `selected.provider` should be `GOOGLE`. Config may also come from `ai_grading/ILLMProvider/.gemini.json`.
+The current Python grading entrypoint receives a complete
+`FeedbackRequest`. HTTP calls through `IGradingClient` are part of the production
+integration; they fetch and save backend data, not invoke the local `/test/grade` route.
+See [the interface diagram](../docs/architecture/07-interfaces.puml) for the contracts.
