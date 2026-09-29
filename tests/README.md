@@ -37,7 +37,7 @@ Install the required packages from `requirements.txt`:
 pip install -r requirements.txt
 ```
 
-### 4. Running All Web Tests
+### 4. Running All Web/AI Grading Tests
 
 cd into the directory that contains the kind of tests you would like to run. For example:
 ```bash
