@@ -25,7 +25,7 @@ On Windows:
 
 ### 3. Install the Test Requirements
 
-Go to the web test directory:
+Go to the test directory:
 
 ```bash
 cd tests
