@@ -7,10 +7,10 @@ import unittest
 from dataclasses import asdict
 from pathlib import Path
 
-from ai_grading.engine import GradingEngine
+from ai_grading.AIGradingComponent import AIGradingComponent
 from ai_grading.examples import SCENARIOS
-from ai_grading.prompt_builder import PromptBuilder
-from ai_grading.providers import FakeProvider
+from ai_grading.PromptBuilder import PromptBuilder
+from ai_grading.ILLMProvider import FakeProvider
 
 
 class ScenarioTests(unittest.TestCase):
@@ -19,7 +19,7 @@ class ScenarioTests(unittest.TestCase):
             with self.subTest(scenario=name):
                 request = request_factory()
                 provider = FakeProvider()
-                result = GradingEngine([provider]).grade(request)
+                result = AIGradingComponent([provider]).grade(request)
                 response = result.selected
                 context = json.loads(provider.prompts[0].split(
                     "\nGRADING_CONTEXT_JSON:\n", 1
@@ -35,7 +35,7 @@ class ScenarioTests(unittest.TestCase):
                 self.assertEqual(response.rubric_id, request.rubric.id)
                 self.assertIsNone(response.suggested_score)
                 self.assertEqual(result.responses, (response,))
-                self.assertEqual(result, GradingEngine([provider]).grade(request))
+                self.assertEqual(result, AIGradingComponent([provider]).grade(request))
 
     def test_cross_file_fixture_exposes_one_body_and_names_the_unseen_helper(self):
         request = SCENARIOS["multi-file"]()
@@ -44,7 +44,7 @@ class ScenarioTests(unittest.TestCase):
         self.assertIn("test_average failed", request.functional_test_feedback[0])
         self.assertIn("test_empty_field failed", request.functional_test_feedback[1])
         fake = FakeProvider()
-        GradingEngine([fake]).grade(request)
+        AIGradingComponent([fake]).grade(request)
         self.assertNotIn("def parse_numbers", fake.prompts[0])
         self.assertIn("their contents were not supplied", fake.prompts[0])
 
@@ -53,7 +53,7 @@ class ScenarioTests(unittest.TestCase):
         self.assertTrue(request.functional_test_feedback)
         self.assertTrue(all("passed:" in note for note in request.functional_test_feedback))
         provider = FakeProvider()
-        response = GradingEngine([provider]).grade(request).selected
+        response = AIGradingComponent([provider]).grade(request).selected
         self.assertEqual(len(provider.requests), 1)
         self.assertIn("no code evaluation", response.feedback_text)
 
@@ -61,7 +61,7 @@ class ScenarioTests(unittest.TestCase):
         request = SCENARIOS["error-skip"]()
         self.assertIn("ERROR", request.functional_test_feedback[0])
         self.assertIn("SKIP", request.functional_test_feedback[1])
-        response = GradingEngine([FakeProvider()]).grade(request).selected
+        response = AIGradingComponent([FakeProvider()]).grade(request).selected
         self.assertIsNone(response.suggested_score)
 
 

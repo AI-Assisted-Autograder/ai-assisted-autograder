@@ -1,7 +1,7 @@
 """Deterministic canned feedback, without network calls or model keys."""
 
 from ..models import FeedbackRequest, FeedbackResponse
-from ..prompt_builder import PromptBuilder
+from ..PromptBuilder import PromptBuilder
 
 
 class FakeProvider:

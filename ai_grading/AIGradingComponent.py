@@ -6,7 +6,7 @@ import time
 from typing import Callable, Sequence
 
 from .models import Comparison, FeedbackRequest, FeedbackResponse, GradingResult
-from .providers.base import ILLMProvider, ProviderError
+from .ILLMProvider.ILLMProvider import ILLMProvider, ProviderError
 
 
 @dataclass(frozen=True)
@@ -42,7 +42,7 @@ class RetryExhaustedError(ProviderError):
         self.last_error_code = last_error.code
 
 
-class GradingEngine:
+class AIGradingComponent:
     def __init__(
         self,
         providers: Sequence[ILLMProvider],

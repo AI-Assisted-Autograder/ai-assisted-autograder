@@ -3,11 +3,11 @@
 import unittest
 from dataclasses import replace
 
-from ai_grading.engine import GradingEngine, RetryExhaustedError, RetryPolicy
+from ai_grading.AIGradingComponent import AIGradingComponent, RetryExhaustedError, RetryPolicy
 from ai_grading.examples import sample_request
 from ai_grading.models import GradingInputError
-from ai_grading.providers import FakeProvider
-from ai_grading.providers.base import ProviderError
+from ai_grading.ILLMProvider import FakeProvider
+from ai_grading.ILLMProvider.ILLMProvider import ProviderError
 
 
 class ScriptedProvider:
@@ -31,14 +31,14 @@ class ScriptedProvider:
         return None
 
 
-class EngineTests(unittest.TestCase):
+class AIGradingComponentTests(unittest.TestCase):
     def test_transient_failure_then_success_only_retries_failing_provider(self):
         req = sample_request()
         first = FakeProvider('First completed.', 1)
         response = FakeProvider('Second completed.', 2).generate_feedback(req)
         second = ScriptedProvider(ProviderError('rate_limit', 'Try again.', retryable=True), response)
         waits = []
-        result = GradingEngine([first, second], sleep=waits.append).grade(req)
+        result = AIGradingComponent([first, second], sleep=waits.append).grade(req)
         self.assertEqual(len(first.requests), 1)
         self.assertEqual(second.requests, [req, req])
         self.assertEqual(waits, [0.5])
@@ -52,7 +52,7 @@ class EngineTests(unittest.TestCase):
             for _ in range(4)
         ])
         waits = []
-        engine = GradingEngine([provider], sleep=waits.append, retry_policy=RetryPolicy(
+        engine = AIGradingComponent([provider], sleep=waits.append, retry_policy=RetryPolicy(
             max_attempts=4, initial_delay=1, multiplier=3, max_delay=2))
         with self.assertRaises(RetryExhaustedError) as caught:
             engine.grade(req)
@@ -69,7 +69,7 @@ class EngineTests(unittest.TestCase):
             provider = ScriptedProvider(error)
             waits = []
             with self.subTest(error=type(error)), self.assertRaises(type(error)):
-                GradingEngine([provider], sleep=waits.append).grade(sample_request())
+                AIGradingComponent([provider], sleep=waits.append).grade(sample_request())
             self.assertEqual(len(provider.requests), 1)
             self.assertEqual(waits, [])
 
@@ -80,7 +80,7 @@ class EngineTests(unittest.TestCase):
         )
         waits = []
         with self.assertRaises(ProviderError) as caught:
-            GradingEngine([provider], sleep=waits.append).grade(sample_request())
+            AIGradingComponent([provider], sleep=waits.append).grade(sample_request())
         self.assertEqual(caught.exception.code, 'provider_refusal')
         self.assertEqual(caught.exception.attempts, 2)
         self.assertEqual(waits, [0.5])
@@ -89,7 +89,7 @@ class EngineTests(unittest.TestCase):
         provider = ScriptedProvider(ProviderError('timeout', 'Timed out.', retryable=True))
         waits = []
         with self.assertRaises(RetryExhaustedError):
-            GradingEngine([provider], retry_policy=RetryPolicy(max_attempts=1),
+            AIGradingComponent([provider], retry_policy=RetryPolicy(max_attempts=1),
                           sleep=waits.append).grade(sample_request())
         self.assertEqual(waits, [])
 
@@ -100,7 +100,7 @@ class EngineTests(unittest.TestCase):
             provider = ScriptedProvider(replace(response, **changes))
             waits = []
             with self.subTest(changes=changes), self.assertRaises(ProviderError):
-                GradingEngine([provider], sleep=waits.append).grade(req)
+                AIGradingComponent([provider], sleep=waits.append).grade(req)
             self.assertEqual(len(provider.requests), 1)
             self.assertEqual(waits, [])
 
@@ -112,7 +112,7 @@ class EngineTests(unittest.TestCase):
         )
         waits = []
         with self.assertRaises(ProviderError) as caught:
-            GradingEngine([provider], sleep=waits.append).grade(req)
+            AIGradingComponent([provider], sleep=waits.append).grade(req)
         self.assertEqual(caught.exception.code, 'invalid_response')
         self.assertEqual(caught.exception.attempts, 2)
         self.assertEqual(len(provider.requests), 2)
@@ -127,7 +127,7 @@ class EngineTests(unittest.TestCase):
             with self.subTest(config=config), self.assertRaises(ValueError):
                 RetryPolicy(**config)
         with self.assertRaises(ValueError):
-            GradingEngine([])
+            AIGradingComponent([])
 
 
 if __name__ == '__main__':

@@ -4,15 +4,15 @@ import argparse
 import json
 from dataclasses import asdict
 
-from .engine import GradingEngine
+from .AIGradingComponent import AIGradingComponent
 from .examples import SCENARIOS
-from .providers import FakeProvider
+from .ILLMProvider import FakeProvider
 
 
 def run_scenario(name: str) -> None:
     request = SCENARIOS[name]()
     fake = FakeProvider()
-    result = GradingEngine([fake]).grade(request)
+    result = AIGradingComponent([fake]).grade(request)
     print(f"=== SCENARIO: {name} ===")
     print("=== LOCAL REQUEST ===")
     print(json.dumps(asdict(request), indent=2, ensure_ascii=False))

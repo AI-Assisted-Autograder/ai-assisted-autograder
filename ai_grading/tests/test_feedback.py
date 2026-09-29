@@ -6,8 +6,8 @@ from dataclasses import replace
 
 from ai_grading.examples import sample_request
 from ai_grading.models import CodeFile, GradingInputError, MAX_FEEDBACK_CHARS, ResolvedSource
-from ai_grading.prompt_builder import PromptBuilder
-from ai_grading.providers import FakeProvider
+from ai_grading.PromptBuilder import PromptBuilder
+from ai_grading.ILLMProvider import FakeProvider
 
 
 class PromptBuilderTests(unittest.TestCase):

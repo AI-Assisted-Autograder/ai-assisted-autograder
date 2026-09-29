@@ -8,11 +8,11 @@ from fastapi.exceptions import RequestValidationError
 from fastapi.responses import JSONResponse
 from pydantic import BaseModel, JsonValue
 
-from .engine import GradingEngine, RetryExhaustedError, RetryPolicy
+from .AIGradingComponent import AIGradingComponent, RetryExhaustedError, RetryPolicy
 from .models import FeedbackRequest, GradingInputError, GradingResult
-from .prompt_builder import PromptBuilder
-from .providers import FakeProvider
-from .providers.base import ProviderError
+from .PromptBuilder import PromptBuilder
+from .ILLMProvider import FakeProvider
+from .ILLMProvider.ILLMProvider import ProviderError
 
 
 class ErrorDetail(BaseModel):
@@ -27,7 +27,7 @@ class ErrorResponse(BaseModel):
     error: ErrorDetail
 
 
-def engine_from_env() -> GradingEngine:
+def engine_from_env() -> AIGradingComponent:
     """Local configuration only; production credentials stay in the LMS container."""
     builder = PromptBuilder(
         max_context_chars=int(os.getenv("LLM_MAX_CONTEXT_CHARS", "120000")),
@@ -44,7 +44,7 @@ def engine_from_env() -> GradingEngine:
     if provider_name == "fake":
         provider = FakeProvider(builder=builder)
     elif provider_name == "gemini":
-        from .providers.gemini import GeminiProvider
+        from .ILLMProvider.GeminiProvider import GeminiProvider
 
         provider = GeminiProvider(
             model=os.getenv("GEMINI_MODEL"), api_key=os.getenv("GEMINI_API_KEY"),
@@ -54,10 +54,10 @@ def engine_from_env() -> GradingEngine:
         )
     else:
         raise ValueError("LLM_PROVIDER must be fake or gemini")
-    return GradingEngine([provider], retry_policy=retry_policy)
+    return AIGradingComponent([provider], retry_policy=retry_policy)
 
 
-def create_app(engine: GradingEngine | None = None) -> FastAPI:
+def create_app(engine: AIGradingComponent | None = None) -> FastAPI:
     """Local harness for FeedbackRequest; B/C integration lives outside this app."""
     owns_engine = engine is None
     grader = engine if engine is not None else engine_from_env()

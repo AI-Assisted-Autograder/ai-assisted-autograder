@@ -3,7 +3,7 @@ import unittest
 from pathlib import Path
 from unittest.mock import patch
 
-from ai_grading.file_resolver import FileResolver
+from ai_grading.FileResolver import FileResolver
 from ai_grading.models import GradingInputError, TargetKind
 
 

@@ -14,9 +14,9 @@ from google.genai import types
 
 from ai_grading.examples import sample_request
 from ai_grading.models import MAX_FEEDBACK_CHARS, GradingInputError
-from ai_grading.prompt_builder import PromptBuilder
-from ai_grading.providers.base import ProviderError
-from ai_grading.providers.gemini import GeminiProvider
+from ai_grading.PromptBuilder import PromptBuilder
+from ai_grading.ILLMProvider.ILLMProvider import ProviderError
+from ai_grading.ILLMProvider.GeminiProvider import GeminiProvider
 
 
 def completed(output="SCORE: 3.5\nCheck the empty input case.", *, finish_reason="STOP"):
@@ -37,7 +37,7 @@ class GeminiProviderTests(unittest.TestCase):
         folder = TemporaryDirectory()
         self.addCleanup(folder.cleanup)
         self.config_path = Path(folder.name) / ".gemini.json"
-        config_patch = patch("ai_grading.providers.gemini.LOCAL_CONFIG_PATH", self.config_path)
+        config_patch = patch("ai_grading.ILLMProvider.GeminiProvider.LOCAL_CONFIG_PATH", self.config_path)
         config_patch.start()
         self.addCleanup(config_patch.stop)
         environment_patch = patch.dict(os.environ, {}, clear=True)
@@ -256,7 +256,7 @@ class GeminiProviderTests(unittest.TestCase):
             with self.subTest(kwargs=kwargs), self.assertRaises(ValueError):
                 GeminiProvider(**kwargs)
         owned_client = Mock()
-        with patch("ai_grading.providers.gemini.genai.Client", return_value=owned_client) as ctor:
+        with patch("ai_grading.ILLMProvider.GeminiProvider.genai.Client", return_value=owned_client) as ctor:
             provider = GeminiProvider("test", api_key="test-key", timeout_seconds=12.5)
             options = ctor.call_args.kwargs["http_options"]
             self.assertEqual(options.timeout, 12500)
@@ -269,7 +269,7 @@ class GeminiProviderTests(unittest.TestCase):
 
     def test_local_configuration_and_overrides(self):
         self.config_path.write_text(json.dumps({"model": "local-model", "api_key": "local-key"}))
-        with patch("ai_grading.providers.gemini.genai.Client") as ctor:
+        with patch("ai_grading.ILLMProvider.GeminiProvider.genai.Client") as ctor:
             provider = GeminiProvider()
             self.assertEqual(provider.model, "local-model")
             self.assertEqual(ctor.call_args.kwargs["api_key"], "local-key")
@@ -285,7 +285,7 @@ class GeminiProviderTests(unittest.TestCase):
                 provider.close()
 
     def test_missing_configuration_fails_before_client_creation(self):
-        with patch("ai_grading.providers.gemini.genai.Client") as ctor:
+        with patch("ai_grading.ILLMProvider.GeminiProvider.genai.Client") as ctor:
             with self.assertRaisesRegex(ValueError, "model must be configured"):
                 GeminiProvider()
             with self.assertRaisesRegex(ValueError, "API key must be configured"):

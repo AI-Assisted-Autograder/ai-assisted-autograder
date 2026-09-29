@@ -11,8 +11,8 @@ from google import genai
 from google.genai import errors, types
 
 from ..models import FeedbackRequest, FeedbackResponse
-from ..prompt_builder import PromptBuilder
-from .base import ProviderError
+from ..PromptBuilder import PromptBuilder
+from .ILLMProvider import ProviderError
 
 
 LOCAL_CONFIG_PATH = Path(__file__).with_name(".gemini.json")

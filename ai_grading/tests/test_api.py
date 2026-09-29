@@ -10,11 +10,11 @@ from unittest.mock import patch
 from fastapi.testclient import TestClient
 
 from ai_grading.api import create_app, engine_from_env
-from ai_grading.engine import GradingEngine
+from ai_grading.AIGradingComponent import AIGradingComponent
 from ai_grading.models import CodeFile, FeedbackRequest, TargetKind
-from ai_grading.prompt_builder import PromptBuilder
-from ai_grading.providers import FakeProvider
-from ai_grading.providers.base import ProviderError
+from ai_grading.PromptBuilder import PromptBuilder
+from ai_grading.ILLMProvider import FakeProvider
+from ai_grading.ILLMProvider.ILLMProvider import ProviderError
 
 
 def request_payload():
@@ -48,7 +48,7 @@ class FailingProvider:
 
 class ApiTests(unittest.TestCase):
     def client(self, *providers, **engine_options):
-        engine = GradingEngine(providers or [FakeProvider()], sleep=lambda _: None, **engine_options)
+        engine = AIGradingComponent(providers or [FakeProvider()], sleep=lambda _: None, **engine_options)
         return TestClient(create_app(engine), raise_server_exceptions=False)
 
     def test_resolved_source_without_database_ids_roundtrips_canonical_data(self):
@@ -240,7 +240,7 @@ class ConfigurationTests(unittest.TestCase):
         folder = TemporaryDirectory()
         self.addCleanup(folder.cleanup)
         self.config_path = Path(folder.name) / ".gemini.json"
-        config_patch = patch("ai_grading.providers.gemini.LOCAL_CONFIG_PATH", self.config_path)
+        config_patch = patch("ai_grading.ILLMProvider.GeminiProvider.LOCAL_CONFIG_PATH", self.config_path)
         config_patch.start()
         self.addCleanup(config_patch.stop)
 
@@ -261,7 +261,7 @@ class ConfigurationTests(unittest.TestCase):
     def test_gemini_mode_uses_local_configuration(self):
         self.config_path.write_text(json.dumps({"model": "local-model", "api_key": "local-key"}))
         with patch.dict(os.environ, {"LLM_PROVIDER": "gemini"}, clear=True), patch(
-            "ai_grading.providers.gemini.genai.Client",
+            "ai_grading.ILLMProvider.GeminiProvider.genai.Client",
         ) as ctor:
             engine = engine_from_env()
             self.assertEqual(engine.providers[0].model, "local-model")

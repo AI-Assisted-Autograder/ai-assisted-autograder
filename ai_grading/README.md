@@ -2,6 +2,28 @@
 
 No DB access or `results.json` writes now 
 
+## Module layout
+
+Component and interface modules use the names in
+`docs/architecture/07-interfaces.puml`:
+
+```text
+ai_grading/
+  AIGradingComponent.py
+  FileResolver.py
+  PromptBuilder.py
+  ILLMProvider/
+    ILLMProvider.py
+    GeminiProvider.py
+    FakeProvider.py
+  models.py
+  api.py
+```
+
+`ILLMProvider/` groups the provider interface and its implementations.
+`models.py` contains the shared request and response types; `api.py` exposes
+the local HTTP test endpoint.
+
 ## Install dependencies
 
 From the repository root, install the AI grading dependencies with the same
@@ -24,10 +46,10 @@ The repository does not currently have a dependency manifest for `ai_grading`.
   model failures raise `ProviderError`.
 
 ```python
-from ai_grading.engine import GradingEngine
-from ai_grading.providers.gemini import GeminiProvider
+from ai_grading.AIGradingComponent import AIGradingComponent
+from ai_grading.ILLMProvider.GeminiProvider import GeminiProvider
 
-result = GradingEngine([GeminiProvider()]).grade(request)
+result = AIGradingComponent([GeminiProvider()]).grade(request)
 ```
 
 `POST /test/grade` is a local HTTP test endpoint; the Web app is not connected.
@@ -59,4 +81,4 @@ curl -sS http://127.0.0.1:8001/test/grade -H 'Content-Type: application/json' \
   --data-binary @ai_grading/examples/request.json
 ```
 
-This calls Gemini; `selected.provider` should be `GOOGLE`. Config may also come from `ai_grading/providers/.gemini.json`.
+This calls Gemini; `selected.provider` should be `GOOGLE`. Config may also come from `ai_grading/ILLMProvider/.gemini.json`.
