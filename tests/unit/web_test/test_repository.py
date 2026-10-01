@@ -19,7 +19,17 @@ from sqlalchemy import create_engine, select, text, update
 from sqlalchemy.exc import OperationalError
 from sqlalchemy.orm import sessionmaker
 
-from app.models import AiFeedback, Assignment, Base, Course, GradingTarget, Rubric, Submission, SubmissionTarget
+from app.models import (
+    AiFeedback,
+    Assignment,
+    Base,
+    Course,
+    GradingTarget,
+    LlmProviderConfig,
+    Rubric,
+    Submission,
+    SubmissionTarget,
+)
 from app.repository import (
     Action,
     ConflictError,
@@ -50,8 +60,8 @@ class TargetState(NamedTuple):
 
 
 # ---------------------------------------------------------------------
-# Backends. Each seeds instructor config and pokes the columns that the
-# not-yet-written methods (authorize_for_grading, mark_ai_complete...) set.
+# Backends. Each seeds instructor config, which no repository method
+# writes, and reads rows back so tests can check what was stored.
 # ---------------------------------------------------------------------
 class MemoryBackend:
     def __init__(self):
@@ -87,12 +97,25 @@ class MemoryBackend:
             and self.repo.grading_targets[st.grading_target_id].identifier == identifier
         )
 
-    def add_rubric(self, assignment_id, identifier):
-        gt = next(
+    def _grading_target(self, assignment_id, identifier):
+        return next(
             gt for gt in self.repo.grading_targets.values()
             if gt.assignment_id == assignment_id and gt.identifier == identifier
         )
-        return self.repo.add_rubric(gt.id)
+
+    def add_rubric(self, assignment_id, identifier, **fields):
+        return self.repo.add_rubric(self._grading_target(assignment_id, identifier).id, **fields)
+
+    def configure_target(self, assignment_id, identifier, kind, max_score):
+        gt = self._grading_target(assignment_id, identifier)
+        gt.kind, gt.max_score = kind, max_score
+
+    def add_provider(self, provider, model_name, is_enabled=True, is_primary=False):
+        self.repo.add_provider(provider, model_name, is_enabled=is_enabled, is_primary=is_primary)
+
+    def set_assignment(self, assignment_id, **fields):
+        for name, value in fields.items():
+            setattr(self.repo.assignments[assignment_id], name, value)
 
     def target_state(self, submission_id, identifier):
         st = self._submission_target(submission_id, identifier)
@@ -174,17 +197,42 @@ class SqlBackend:
             .where(SubmissionTarget.submission_id == submission_id, GradingTarget.identifier == identifier)
         )
 
-    def add_rubric(self, assignment_id, identifier):
-        with self.sessions.begin() as s:
-            gt = s.scalar(
-                select(GradingTarget).where(
-                    GradingTarget.assignment_id == assignment_id, GradingTarget.identifier == identifier
-                )
+    @staticmethod
+    def _grading_target(s, assignment_id, identifier):
+        return s.scalar(
+            select(GradingTarget).where(
+                GradingTarget.assignment_id == assignment_id, GradingTarget.identifier == identifier
             )
-            rubric = Rubric(grading_target_id=gt.id, version=1, criteria_text="Correct and readable.", is_current=True)
+        )
+
+    def add_rubric(
+        self, assignment_id, identifier, version=1, criteria_text="Correct and readable.",
+        feedback_guidance=None, is_current=True,
+    ):
+        with self.sessions.begin() as s:
+            gt = self._grading_target(s, assignment_id, identifier)
+            if is_current:
+                s.execute(update(Rubric).where(Rubric.grading_target_id == gt.id).values(is_current=False))
+            rubric = Rubric(
+                grading_target_id=gt.id, version=version, criteria_text=criteria_text,
+                feedback_guidance=feedback_guidance, is_current=is_current,
+            )
             s.add(rubric)
             s.flush()
             return rubric.id
+
+    def configure_target(self, assignment_id, identifier, kind, max_score):
+        with self.sessions.begin() as s:
+            gt = self._grading_target(s, assignment_id, identifier)
+            gt.kind, gt.max_score = kind, max_score
+
+    def add_provider(self, provider, model_name, is_enabled=True, is_primary=False):
+        with self.sessions.begin() as s:
+            s.add(LlmProviderConfig(provider=provider, model_name=model_name, is_enabled=is_enabled, is_primary=is_primary))
+
+    def set_assignment(self, assignment_id, **fields):
+        with self.sessions.begin() as s:
+            s.execute(update(Assignment).where(Assignment.id == assignment_id).values(**fields))
 
     def target_state(self, submission_id, identifier):
         with self.sessions.begin() as s:
@@ -224,7 +272,13 @@ def sql_sessions():
 def backend(request):
     if request.param == "memory":
         return MemoryBackend()
-    return SqlBackend(request.getfixturevalue("sql_sessions"))
+    sessions = request.getfixturevalue("sql_sessions")
+    # Provider config and the pending-AI query are global, so every test
+    # starts from empty tables.
+    with sessions.begin() as s:
+        tables = ", ".join(t.name for t in Base.metadata.sorted_tables)
+        s.execute(text(f"TRUNCATE {tables} CASCADE"))
+    return SqlBackend(sessions)
 
 
 def start(backend, mode="IMMEDIATE", targets=(("add", 1), ("sub", 2)), platform_id="sub-1"):
@@ -563,3 +617,110 @@ def test_nightly_lifecycle_end_to_end(backend):
 
     # A later rerun, e.g. an instructor debugging, spends nothing.
     assert backend.repo.decide_action(sid).action is Action.REEMIT
+
+
+# ---------------------------------------------------------------------
+# Group 3: the read side
+# ---------------------------------------------------------------------
+def test_assignment_config_targets_rubrics_and_providers(backend):
+    aid = backend.add_assignment("NIGHTLY", (("sub", 2), ("add", 1), ("Calc", None)))
+    backend.configure_target(aid, "Calc", "CLASS", Decimal("10"))
+    backend.add_rubric(aid, "add", version=1, criteria_text="old")
+    current = backend.add_rubric(aid, "add", version=2, criteria_text="Handles overflow.", feedback_guidance="Be brief.")
+    backend.add_provider("OPENAI", "gpt-6")
+    backend.add_provider("GOOGLE", "gemini-3", is_enabled=False)
+    backend.add_provider("ANTHROPIC", "claude-opus-5-5", is_primary=True)
+
+    config = backend.repo.get_assignment_config(aid)
+
+    assert (config.id, config.grading_mode, config.language, config.is_active) == (aid, "NIGHTLY", "PYTHON", True)
+    assert [t.identifier for t in config.targets] == ["add", "sub", "Calc"]
+    add, sub, calc = config.targets
+    assert add.rubric.id == current
+    assert (add.rubric.version, add.rubric.criteria_text, add.rubric.feedback_guidance) == (2, "Handles overflow.", "Be brief.")
+    assert sub.rubric is None
+    assert (calc.kind, calc.max_score) == ("CLASS", Decimal("10"))
+    assert [(p.provider, p.is_primary) for p in config.providers] == [("ANTHROPIC", True), ("OPENAI", False)]
+
+
+def test_assignment_config_unknown(backend):
+    with pytest.raises(NotFoundError):
+        backend.repo.get_assignment_config(uuid.uuid4())
+
+
+def test_selected_feedback_for_reemit(backend):
+    aid, sid = started(backend, targets=(("add", 1), ("sub", 2), ("mul", 3), ("div", 4)))
+    backend.configure_target(aid, "add", "METHOD", Decimal("5"))
+    backend.repo.save_feedback(sid, "add", result_for(backend.add_rubric(aid, "add"), selected=0))
+    backend.repo.mark_target_failed(sid, "sub", "no single source file")
+    backend.repo.set_ai_not_needed(sid, "mul")
+
+    package = backend.repo.get_selected_feedback(sid)
+
+    assert package.submission_id == sid
+    # mul was opted out, so it is not in the package at all.
+    assert [t.identifier for t in package.targets] == ["add", "sub", "div"]
+    add, sub, div = package.targets
+    assert add.max_score == Decimal("5")
+    assert (add.feedback.provider, add.feedback.body, add.feedback.suggested_score) == (
+        "ANTHROPIC", "Handle the empty list.", Decimal("0.1"),
+    )
+    assert add.error is None
+    assert (sub.feedback, sub.error) == (None, "no single source file")
+    # Not attempted yet: neither set.
+    assert (div.feedback, div.error) == (None, None)
+
+
+def test_selected_feedback_unknown_submission(backend):
+    with pytest.raises(NotFoundError):
+        backend.repo.get_selected_feedback(uuid.uuid4())
+
+
+def test_pending_ai_lists_only_what_the_trigger_should_rerun(backend):
+    def nightly(platform_id, minutes):
+        aid = backend.add_assignment("NIGHTLY", (("add", 1),))
+        sid = backend.repo.upsert_submission(
+            SubmissionRef(aid, platform_id, SUBMITTED + timedelta(minutes=minutes), "s@example.edu")
+        )
+        backend.repo.create_targets_default_needed(sid)
+        return aid, sid
+
+    # Wanted, and listed oldest first.
+    _, later = nightly("later", 30)
+    _, earlier = nightly("earlier", 10)
+    # Never wanted: opted out.
+    _, opted = nightly("opted-out", 0)
+    backend.repo.set_ai_not_needed(opted, "add")
+    # Attempted and failed: terminal, not retried (AD-8).
+    _, failed = nightly("failed", 0)
+    backend.repo.mark_target_failed(failed, "add", "invalid_response")
+    # Superseded attempt (AD-14).
+    _, superseded = nightly("superseded", 0)
+    backend.set_submission(superseded, is_active_attempt=False)
+    # Assignment switched off.
+    inactive_aid, _ = nightly("inactive", 0)
+    backend.set_assignment(inactive_aid, is_active=False)
+    # IMMEDIATE is never swept up by the nightly run.
+    start(backend, mode="IMMEDIATE", platform_id="immediate")
+
+    found = backend.repo.list_submissions_pending_ai("NIGHTLY")
+
+    assert [s.platform_submission_id for s in found] == ["earlier", "later"]
+    assert found[0].submission_id == earlier
+    assert found[0].platform == "GRADESCOPE"
+    assert found[0].student_identifier == "s@example.edu"
+
+
+def test_pending_ai_skips_graded_submissions(backend):
+    aid, sid = started(backend, mode="NIGHTLY")
+    assert [s.submission_id for s in backend.repo.list_submissions_pending_ai("NIGHTLY")] == [sid]
+    backend.repo.authorize_for_grading(sid)
+    backend.repo.mark_target_failed(sid, "add", "boom")
+    backend.repo.mark_target_failed(sid, "sub", "boom")
+    backend.repo.mark_ai_complete_if_all_done(sid)
+    assert backend.repo.list_submissions_pending_ai("NIGHTLY") == []
+
+
+def test_pending_ai_rejects_unknown_mode(backend):
+    with pytest.raises(ValueError):
+        backend.repo.list_submissions_pending_ai("WEEKLY")

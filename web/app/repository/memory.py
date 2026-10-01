@@ -8,15 +8,23 @@ from dataclasses import dataclass
 from datetime import datetime, timezone
 from decimal import Decimal
 
-from app.models import TEST_STATUSES
+from app.models import GRADING_MODES, TEST_STATUSES
 from app.repository.base import (
     Action,
     ActionResult,
+    AssignmentConfig,
+    FeedbackPackage,
     FeedbackResult,
     IGradingRepository,
     NotFoundError,
+    ProviderConfig,
+    RubricConfig,
+    SelectedFeedback,
+    SubmissionLocator,
     SubmissionRef,
     SubmissionTargetRef,
+    TargetConfig,
+    TargetFeedback,
     TestResultRecord,
     UnknownTargetError,
     check_gradable,
@@ -30,6 +38,11 @@ from app.repository.base import (
 class _Assignment:
     id: uuid.UUID
     grading_mode: str
+    platform: str
+    platform_assignment_id: str
+    language: str
+    name: str | None
+    is_active: bool = True
 
 
 @dataclass
@@ -38,12 +51,26 @@ class _GradingTarget:
     assignment_id: uuid.UUID
     identifier: str
     display_order: int | None
+    kind: str
+    max_score: Decimal | None
 
 
 @dataclass
 class _Rubric:
     id: uuid.UUID
     grading_target_id: uuid.UUID
+    version: int
+    criteria_text: str | None
+    feedback_guidance: str | None
+    is_current: bool
+
+
+@dataclass
+class _LlmProviderConfig:
+    provider: str
+    model_name: str
+    is_enabled: bool
+    is_primary: bool
 
 
 @dataclass
@@ -55,6 +82,7 @@ class _Submission:
     student_identifier: str | None
     ai_authorized_at: datetime | None = None
     ai_graded_submitted_at: datetime | None = None
+    is_active_attempt: bool = True
 
 
 @dataclass
@@ -106,24 +134,65 @@ class InMemoryRepository(IGradingRepository):
         self.submission_targets: dict[uuid.UUID, _SubmissionTarget] = {}
         self.test_results: list[_TestResult] = []
         self.ai_feedback: list[_AiFeedback] = []
+        self.providers: list[_LlmProviderConfig] = []
 
     # Seeding, standing in for the instructor's web UI.
-    def add_assignment(self, grading_mode: str) -> uuid.UUID:
-        a = _Assignment(uuid.uuid4(), grading_mode)
+    def add_assignment(
+        self,
+        grading_mode: str,
+        *,
+        platform_assignment_id: str | None = None,
+        language: str = "PYTHON",
+        name: str | None = None,
+        is_active: bool = True,
+    ) -> uuid.UUID:
+        a = _Assignment(
+            uuid.uuid4(),
+            grading_mode,
+            "GRADESCOPE",
+            platform_assignment_id or str(uuid.uuid4()),
+            language,
+            name,
+            is_active,
+        )
         self.assignments[a.id] = a
         return a.id
 
     def add_grading_target(
-        self, assignment_id: uuid.UUID, identifier: str, display_order: int | None = None
+        self,
+        assignment_id: uuid.UUID,
+        identifier: str,
+        display_order: int | None = None,
+        *,
+        kind: str = "METHOD",
+        max_score: Decimal | None = None,
     ) -> uuid.UUID:
-        gt = _GradingTarget(uuid.uuid4(), assignment_id, identifier, display_order)
+        gt = _GradingTarget(uuid.uuid4(), assignment_id, identifier, display_order, kind, max_score)
         self.grading_targets[gt.id] = gt
         return gt.id
 
-    def add_rubric(self, grading_target_id: uuid.UUID) -> uuid.UUID:
-        r = _Rubric(uuid.uuid4(), grading_target_id)
+    def add_rubric(
+        self,
+        grading_target_id: uuid.UUID,
+        *,
+        version: int = 1,
+        criteria_text: str | None = "Correct and readable.",
+        feedback_guidance: str | None = None,
+        is_current: bool = True,
+    ) -> uuid.UUID:
+        # At most one current rubric per target, as the SQL partial index enforces.
+        if is_current:
+            for r in self.rubrics.values():
+                if r.grading_target_id == grading_target_id:
+                    r.is_current = False
+        r = _Rubric(uuid.uuid4(), grading_target_id, version, criteria_text, feedback_guidance, is_current)
         self.rubrics[r.id] = r
         return r.id
+
+    def add_provider(
+        self, provider: str, model_name: str, *, is_enabled: bool = True, is_primary: bool = False
+    ) -> None:
+        self.providers.append(_LlmProviderConfig(provider, model_name, is_enabled, is_primary))
 
     def upsert_submission(self, ref: SubmissionRef) -> uuid.UUID:
         if ref.assignment_id not in self.assignments:
@@ -236,6 +305,72 @@ class InMemoryRepository(IGradingRepository):
         if not pending:
             sub.ai_graded_submitted_at = sub.submitted_at
         return sub.ai_graded_submitted_at is not None and sub.ai_graded_submitted_at == sub.submitted_at
+
+    def get_assignment_config(self, assignment_id: uuid.UUID) -> AssignmentConfig:
+        a = self.assignments.get(assignment_id)
+        if a is None:
+            raise NotFoundError(f"Assignment {assignment_id} not found")
+        targets = sorted(self._registered(assignment_id), key=lambda gt: sort_key(gt.display_order, gt.identifier))
+        providers = sorted(
+            (p for p in self.providers if p.is_enabled),
+            key=lambda p: (not p.is_primary, p.provider, p.model_name),
+        )
+        return AssignmentConfig(
+            a.id,
+            a.platform,
+            a.platform_assignment_id,
+            a.name,
+            a.grading_mode,
+            a.language,
+            a.is_active,
+            tuple(
+                TargetConfig(gt.id, gt.identifier, gt.kind, gt.max_score, self._current_rubric(gt.id))
+                for gt in targets
+            ),
+            tuple(ProviderConfig(p.provider, p.model_name, p.is_primary) for p in providers),
+        )
+
+    def get_selected_feedback(self, submission_id: uuid.UUID) -> FeedbackPackage:
+        self._submission(submission_id)
+        pairs = [
+            (st, self.grading_targets[st.grading_target_id])
+            for st in self.submission_targets.values()
+            if st.submission_id == submission_id and st.ai_needed
+        ]
+        pairs.sort(key=lambda p: sort_key(p[1].display_order, p[1].identifier))
+        targets = []
+        for st, gt in pairs:
+            f = next((f for f in self.ai_feedback if f.submission_target_id == st.id and f.is_selected), None)
+            selected = None if f is None else SelectedFeedback(f.provider, f.model_name, f.body, f.suggested_score)
+            targets.append(TargetFeedback(gt.identifier, gt.max_score, selected, st.last_error))
+        return FeedbackPackage(submission_id, tuple(targets))
+
+    def list_submissions_pending_ai(self, mode: str) -> list[SubmissionLocator]:
+        if mode not in GRADING_MODES:
+            raise ValueError(f"mode must be one of {', '.join(GRADING_MODES)}, not {mode!r}")
+        found = []
+        for sub in self.submissions.values():
+            a = self.assignments[sub.assignment_id]
+            pending = any(
+                st.submission_id == sub.id and st.ai_needed and st.completed_at is None
+                for st in self.submission_targets.values()
+            )
+            if (a.grading_mode == mode and a.is_active and sub.is_active_attempt
+                    and sub.ai_graded_submitted_at is None and pending):
+                found.append((sub, a))
+        found.sort(key=lambda p: (p[0].submitted_at, p[0].id))
+        return [
+            SubmissionLocator(
+                sub.id, a.platform, a.platform_assignment_id, sub.platform_submission_id, sub.student_identifier
+            )
+            for sub, a in found
+        ]
+
+    def _current_rubric(self, grading_target_id: uuid.UUID) -> RubricConfig | None:
+        for r in self.rubrics.values():
+            if r.grading_target_id == grading_target_id and r.is_current:
+                return RubricConfig(r.id, r.version, r.criteria_text, r.feedback_guidance)
+        return None
 
     def _submission(self, submission_id: uuid.UUID) -> _Submission:
         sub = self.submissions.get(submission_id)

@@ -1,14 +1,16 @@
 import uuid
 
-from sqlalchemy import Uuid, exists, func, literal, select, update
+from sqlalchemy import Uuid, and_, exists, func, literal, select, update
 from sqlalchemy.dialects.postgresql import insert
 from sqlalchemy.orm import Session, sessionmaker
 
 from app.models import (
+    GRADING_MODES,
     TEST_STATUSES,
     AiFeedback,
     Assignment,
     GradingTarget,
+    LlmProviderConfig,
     Rubric,
     Submission,
     SubmissionTarget,
@@ -17,11 +19,19 @@ from app.models import (
 from app.repository.base import (
     Action,
     ActionResult,
+    AssignmentConfig,
+    FeedbackPackage,
     FeedbackResult,
     IGradingRepository,
     NotFoundError,
+    ProviderConfig,
+    RubricConfig,
+    SelectedFeedback,
+    SubmissionLocator,
     SubmissionRef,
     SubmissionTargetRef,
+    TargetConfig,
+    TargetFeedback,
     TestResultRecord,
     UnknownTargetError,
     check_gradable,
@@ -203,6 +213,98 @@ class SqlGradingRepository(IGradingRepository):
                 )
             ).one()
             return guard is not None and guard == submitted
+
+    def get_assignment_config(self, assignment_id: uuid.UUID) -> AssignmentConfig:
+        with self._sessions.begin() as s:
+            a = s.get(Assignment, assignment_id)
+            if a is None:
+                raise NotFoundError(f"Assignment {assignment_id} not found")
+            rows = s.execute(
+                select(GradingTarget, Rubric)
+                .outerjoin(Rubric, and_(Rubric.grading_target_id == GradingTarget.id, Rubric.is_current))
+                .where(GradingTarget.assignment_id == assignment_id)
+            ).all()
+            rows.sort(key=lambda r: sort_key(r[0].display_order, r[0].identifier))
+            targets = tuple(
+                TargetConfig(
+                    gt.id,
+                    gt.identifier,
+                    gt.kind,
+                    gt.max_score,
+                    None if r is None else RubricConfig(r.id, r.version, r.criteria_text, r.feedback_guidance),
+                )
+                for gt, r in rows
+            )
+            providers = s.scalars(
+                select(LlmProviderConfig)
+                .where(LlmProviderConfig.is_enabled)
+                .order_by(LlmProviderConfig.is_primary.desc(), LlmProviderConfig.provider, LlmProviderConfig.model_name)
+            ).all()
+            return AssignmentConfig(
+                a.id,
+                a.platform,
+                a.platform_assignment_id,
+                a.name,
+                a.grading_mode,
+                a.language,
+                a.is_active,
+                targets,
+                tuple(ProviderConfig(p.provider, p.model_name, p.is_primary) for p in providers),
+            )
+
+    def get_selected_feedback(self, submission_id: uuid.UUID) -> FeedbackPackage:
+        with self._sessions.begin() as s:
+            self._submission(s, submission_id)
+            rows = s.execute(
+                select(SubmissionTarget, GradingTarget, AiFeedback)
+                .join(GradingTarget, SubmissionTarget.grading_target_id == GradingTarget.id)
+                .outerjoin(
+                    AiFeedback,
+                    and_(AiFeedback.submission_target_id == SubmissionTarget.id, AiFeedback.is_selected),
+                )
+                .where(SubmissionTarget.submission_id == submission_id, SubmissionTarget.ai_needed)
+            ).all()
+            rows.sort(key=lambda r: sort_key(r[1].display_order, r[1].identifier))
+            return FeedbackPackage(
+                submission_id,
+                tuple(
+                    TargetFeedback(
+                        gt.identifier,
+                        gt.max_score,
+                        None if f is None else SelectedFeedback(f.provider, f.model_name, f.body, f.suggested_score),
+                        st.last_error,
+                    )
+                    for st, gt, f in rows
+                ),
+            )
+
+    def list_submissions_pending_ai(self, mode: str) -> list[SubmissionLocator]:
+        if mode not in GRADING_MODES:
+            raise ValueError(f"mode must be one of {', '.join(GRADING_MODES)}, not {mode!r}")
+        with self._sessions.begin() as s:
+            pending = exists().where(
+                SubmissionTarget.submission_id == Submission.id,
+                SubmissionTarget.ai_needed,
+                SubmissionTarget.completed_at.is_(None),
+            )
+            rows = s.execute(
+                select(Submission, Assignment)
+                .join(Assignment, Submission.assignment_id == Assignment.id)
+                .where(
+                    Assignment.grading_mode == mode,
+                    Assignment.is_active,
+                    Submission.is_active_attempt,
+                    Submission.ai_graded_submitted_at.is_(None),
+                    pending,
+                )
+                .order_by(Submission.submitted_at, Submission.id)
+            ).all()
+            return [
+                SubmissionLocator(
+                    sub.id, a.platform, a.platform_assignment_id, sub.platform_submission_id, sub.student_identifier
+                )
+                for sub, a in rows
+            ]
 
     @staticmethod
     def _submission(s: Session, submission_id: uuid.UUID) -> Submission:

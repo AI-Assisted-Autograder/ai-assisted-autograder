@@ -1,9 +1,8 @@
 """The repository interface and the types that cross it.
 
-See IGradingRepository in docs/architecture/07-interfaces.puml. The
-read-side methods (get_assignment_config, get_selected_feedback,
-list_submissions_pending_ai) are not written yet; they are added with
-their InMemoryRepository counterparts, as note N4 requires.
+See IGradingRepository in docs/architecture/07-interfaces.puml. Adding an
+abstract method means adding it to InMemoryRepository in the same commit
+(note N4).
 
 Methods that act on one target take the submission id and the target's
 identifier, rather than a submission_target id as the diagram has it, so
@@ -96,6 +95,86 @@ class FeedbackResult:
             raise ValueError("a feedback result needs at least one response")
         if not 0 <= self.selected_index < len(self.responses):
             raise ValueError("selected_index must point at one of the responses")
+
+
+@dataclass(frozen=True)
+class RubricConfig:
+    id: uuid.UUID
+    version: int
+    criteria_text: str | None
+    feedback_guidance: str | None
+
+
+@dataclass(frozen=True)
+class TargetConfig:
+    id: uuid.UUID
+    identifier: str
+    kind: str
+    max_score: Decimal | None
+    # The current rubric, or None if the instructor has not written one.
+    rubric: RubricConfig | None
+
+
+@dataclass(frozen=True)
+class ProviderConfig:
+    provider: str
+    model_name: str
+    is_primary: bool
+
+
+@dataclass(frozen=True)
+class AssignmentConfig:
+    """What the AI phase needs to grade any submission of an assignment."""
+
+    id: uuid.UUID
+    platform: str
+    platform_assignment_id: str
+    name: str | None
+    grading_mode: str
+    language: str
+    is_active: bool
+    targets: tuple[TargetConfig, ...]
+    # Enabled providers, the primary first. llm_provider_config is global
+    # for now, as drawn, so this is the same for every assignment.
+    providers: tuple[ProviderConfig, ...]
+
+
+@dataclass(frozen=True)
+class SelectedFeedback:
+    provider: str
+    model_name: str
+    body: str | None
+    suggested_score: Decimal | None
+
+
+@dataclass(frozen=True)
+class TargetFeedback:
+    """One ai_needed target's outcome. At most one of feedback and error is set;
+    neither means the target has not been attempted yet."""
+
+    identifier: str
+    max_score: Decimal | None
+    feedback: SelectedFeedback | None
+    error: str | None
+
+
+@dataclass(frozen=True)
+class FeedbackPackage:
+    """What REEMIT splices back into results.json."""
+
+    submission_id: uuid.UUID
+    targets: tuple[TargetFeedback, ...]
+
+
+@dataclass(frozen=True)
+class SubmissionLocator:
+    """Enough for the nightly trigger to find the submission on the platform."""
+
+    submission_id: uuid.UUID
+    platform: str
+    platform_assignment_id: str
+    platform_submission_id: str
+    student_identifier: str | None
 
 
 class RepositoryError(Exception):
@@ -236,4 +315,25 @@ class IGradingRepository(ABC):
         Returns whether the guard is set after the call, so a repeat call
         on a finished submission returns True. A submission whose targets
         were all opted out is done.
+        """
+
+    @abstractmethod
+    def get_assignment_config(self, assignment_id: uuid.UUID) -> AssignmentConfig:
+        """Targets in display order with their current rubric, and providers."""
+
+    @abstractmethod
+    def get_selected_feedback(self, submission_id: uuid.UUID) -> FeedbackPackage:
+        """Stored outcome of every ai_needed target, for REEMIT.
+
+        Opted-out targets are left out: nothing was promised for them.
+        """
+
+    @abstractmethod
+    def list_submissions_pending_ai(self, mode: str) -> list[SubmissionLocator]:
+        """Submissions the nightly trigger should authorize and rerun.
+
+        The 04-sequence-nightly query: the assignment is in this mode, a
+        target is still ai_needed with completed_at NULL, and the guard is
+        unset. Also restricted to active attempts (AD-14) on active
+        assignments. Oldest submission first.
         """
