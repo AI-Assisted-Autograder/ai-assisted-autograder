@@ -6,18 +6,23 @@ Not thread-safe, and holds only the columns the implemented methods use.
 import uuid
 from dataclasses import dataclass
 from datetime import datetime, timezone
+from decimal import Decimal
 
 from app.models import TEST_STATUSES
 from app.repository.base import (
     Action,
     ActionResult,
+    FeedbackResult,
     IGradingRepository,
     NotFoundError,
     SubmissionRef,
     SubmissionTargetRef,
+    TestResultRecord,
     UnknownTargetError,
+    check_gradable,
     derive_action,
     sort_key,
+    to_decimal,
 )
 
 
@@ -33,6 +38,12 @@ class _GradingTarget:
     assignment_id: uuid.UUID
     identifier: str
     display_order: int | None
+
+
+@dataclass
+class _Rubric:
+    id: uuid.UUID
+    grading_target_id: uuid.UUID
 
 
 @dataclass
@@ -53,6 +64,10 @@ class _SubmissionTarget:
     grading_target_id: uuid.UUID
     ai_needed: bool = True
     completed_at: datetime | None = None
+    last_error: str | None = None
+    agreement_score: Decimal | None = None
+    score_spread: Decimal | None = None
+    selection_reason: str | None = None
 
 
 @dataclass
@@ -63,13 +78,34 @@ class _TestResult:
     recorded_at: datetime
 
 
+@dataclass
+class _AiFeedback:
+    submission_target_id: uuid.UUID
+    rubric_id: uuid.UUID
+    provider: str
+    model_name: str
+    prompt_version: str | None
+    body: str
+    suggested_score: Decimal | None
+    confidence: Decimal | None
+    is_selected: bool
+    input_tokens: int | None
+    output_tokens: int | None
+
+
+def _now() -> datetime:
+    return datetime.now(timezone.utc)
+
+
 class InMemoryRepository(IGradingRepository):
     def __init__(self):
         self.assignments: dict[uuid.UUID, _Assignment] = {}
         self.grading_targets: dict[uuid.UUID, _GradingTarget] = {}
+        self.rubrics: dict[uuid.UUID, _Rubric] = {}
         self.submissions: dict[uuid.UUID, _Submission] = {}
         self.submission_targets: dict[uuid.UUID, _SubmissionTarget] = {}
         self.test_results: list[_TestResult] = []
+        self.ai_feedback: list[_AiFeedback] = []
 
     # Seeding, standing in for the instructor's web UI.
     def add_assignment(self, grading_mode: str) -> uuid.UUID:
@@ -83,6 +119,11 @@ class InMemoryRepository(IGradingRepository):
         gt = _GradingTarget(uuid.uuid4(), assignment_id, identifier, display_order)
         self.grading_targets[gt.id] = gt
         return gt.id
+
+    def add_rubric(self, grading_target_id: uuid.UUID) -> uuid.UUID:
+        r = _Rubric(uuid.uuid4(), grading_target_id)
+        self.rubrics[r.id] = r
+        return r.id
 
     def upsert_submission(self, ref: SubmissionRef) -> uuid.UUID:
         if ref.assignment_id not in self.assignments:
@@ -126,7 +167,7 @@ class InMemoryRepository(IGradingRepository):
             raise ValueError(f"status must be one of {', '.join(TEST_STATUSES)}, not {status!r}")
         st = self._target(submission_id, target)
         self.test_results.append(
-            _TestResult(st.id, status, functional_test_feedback, datetime.now(timezone.utc))
+            _TestResult(st.id, status, functional_test_feedback, _now())
         )
 
     def decide_action(self, submission_id: uuid.UUID) -> ActionResult:
@@ -137,6 +178,64 @@ class InMemoryRepository(IGradingRepository):
             return ActionResult(action)
         pending = self._refs(submission_id, lambda st: st.ai_needed and st.completed_at is None)
         return ActionResult(action, tuple(pending))
+
+    def authorize_for_grading(self, submission_id: uuid.UUID) -> None:
+        self._submission(submission_id).ai_authorized_at = _now()
+
+    def get_test_results(self, submission_id: uuid.UUID, target: str) -> list[TestResultRecord]:
+        st = self._target(submission_id, target)
+        # Appended in recorded order already; sorted is stable on ties.
+        rows = sorted(
+            (r for r in self.test_results if r.submission_target_id == st.id),
+            key=lambda r: r.recorded_at,
+        )
+        return [TestResultRecord(r.status, r.functional_test_feedback, r.recorded_at) for r in rows]
+
+    def save_feedback(self, submission_id: uuid.UUID, target: str, result: FeedbackResult) -> None:
+        st = self._target(submission_id, target)
+        check_gradable(target, st.ai_needed, st.completed_at)
+        rubric = self.rubrics.get(result.rubric_id)
+        if rubric is None or rubric.grading_target_id != st.grading_target_id:
+            raise ValueError(f"Rubric {result.rubric_id} is not a rubric for target {target!r}")
+        for i, r in enumerate(result.responses):
+            self.ai_feedback.append(
+                _AiFeedback(
+                    st.id,
+                    result.rubric_id,
+                    r.provider,
+                    r.model_name,
+                    r.prompt_version,
+                    r.body,
+                    to_decimal(r.suggested_score),
+                    to_decimal(r.confidence),
+                    i == result.selected_index,
+                    r.input_tokens,
+                    r.output_tokens,
+                )
+            )
+        st.completed_at = _now()
+        st.last_error = None
+        st.selection_reason = result.selection_reason
+        st.score_spread = to_decimal(result.score_spread)
+        st.agreement_score = to_decimal(result.agreement_score)
+
+    def mark_target_failed(self, submission_id: uuid.UUID, target: str, error: str) -> None:
+        if not error or not error.strip():
+            raise ValueError("error must be a non-empty message")
+        st = self._target(submission_id, target)
+        check_gradable(target, st.ai_needed, st.completed_at)
+        st.completed_at = _now()
+        st.last_error = error
+
+    def mark_ai_complete_if_all_done(self, submission_id: uuid.UUID) -> bool:
+        sub = self._submission(submission_id)
+        pending = any(
+            st.submission_id == submission_id and st.ai_needed and st.completed_at is None
+            for st in self.submission_targets.values()
+        )
+        if not pending:
+            sub.ai_graded_submitted_at = sub.submitted_at
+        return sub.ai_graded_submitted_at is not None and sub.ai_graded_submitted_at == sub.submitted_at
 
     def _submission(self, submission_id: uuid.UUID) -> _Submission:
         sub = self.submissions.get(submission_id)
