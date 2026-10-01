@@ -13,7 +13,7 @@ templates = Jinja2Templates(directory="app/templates")
 
 @app.get("/")
 def index(request: Request):
-    return templates.TemplateResponse("index.html", {"request": request})
+    return templates.TemplateResponse(request, "index.html")
 
 
 @app.get("/health")
