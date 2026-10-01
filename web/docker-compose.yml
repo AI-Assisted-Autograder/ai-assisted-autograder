@@ -5,12 +5,13 @@ services:
       - "8000:8000"
     volumes:
       - ./app:/app/app
+      - ./migrations:/app/migrations
     environment:
       DATABASE_URL: postgresql+psycopg://autograder:autograder@db:5432/autograder
     depends_on:
       db:
         condition: service_healthy
-    command: uvicorn app.main:app --host 0.0.0.0 --port 8000 --reload
+    command: sh -c "alembic upgrade head && uvicorn app.main:app --host 0.0.0.0 --port 8000 --reload"
 
   db:
     image: postgres:16
