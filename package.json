@@ -1,0 +1,32 @@
+{
+  "name": "ai-assisted-autograder",
+  "version": "1.0.0",
+  "description": "",
+  "main": "index.js",
+  "directories": {
+    "doc": "docs",
+    "test": "tests"
+  },
+  "scripts": {
+    "test": "playwright test",
+    "typecheck": "tsc --noEmit",
+    "test:gradescope-login": "playwright test tests/e2e/gradescope-login.spec.ts",
+    "test:gradescope-rerun": "playwright test tests/e2e/gradescope-rerun.spec.ts"
+  },
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/AI-Assisted-Autograder/ai-assisted-autograder.git"
+  },
+  "keywords": [],
+  "author": "",
+  "license": "ISC",
+  "bugs": {
+    "url": "https://github.com/AI-Assisted-Autograder/ai-assisted-autograder/issues"
+  },
+  "homepage": "https://github.com/AI-Assisted-Autograder/ai-assisted-autograder#readme",
+  "devDependencies": {
+    "@playwright/test": "^1.63.0",
+    "@types/node": "^26.6.4",
+    "typescript": "^7.0.2"
+  }
+}
