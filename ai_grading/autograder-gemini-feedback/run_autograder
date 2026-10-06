@@ -1,0 +1,32 @@
+#!/usr/bin/env bash
+
+BASE_DIR=/autograder/source/github
+
+# Update autograder files
+cd $BASE_DIR
+git pull origin master
+
+mkdir -p src
+java_files=$(find /autograder/submission -name "SortedCollection.java" | sed -e 's/ /\\ /g' | tr '\n' ' ')
+eval cp $java_files ./src/
+
+# Remove package
+sed -i 's/^package.*//g' src/SortedCollection.java
+sed -i 's/edu.pitt.cs.//g' src/SortedCollection.java
+
+# Compile the student's code with autograder code
+bash ./compile.sh > /autograder/compile.out 2> /autograder/compile.err
+if [ $(grep "error:" /autograder/compile.err | wc -l) \> 0 ];
+then
+    cat /autograder/source/compile_error.prefix | tr -d '\n' | tr -d '\r' > /autograder/results/results.json
+    cat /autograder/compile.err | sed -E 's/\\/\\\\/g' | sed -E ':a;N;$!ba;s/\r{0,1}\n/\\n/g' | sed -E 's/"/\\"/g' | sed -E 's/\//\\\//g' | sed -E 's/\t/\\t/g' | tr -d '\n' >> /autograder/results/results.json
+    cat /autograder/source/compile_error.postfix | tr -d '\n' | tr -d '\r' >> /autograder/results/results.json
+    exit;
+fi;
+
+# Run the autograder code
+bash ./run.sh
+# BEGIN GEMINI FEEDBACK
+cd /autograder/source
+/autograder/ai-venv/bin/python -m ai_grading.gradescope
+# END GEMINI FEEDBACK
