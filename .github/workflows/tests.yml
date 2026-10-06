@@ -1,0 +1,39 @@
+name: Python Tests
+
+on:
+  push:
+  pull_request:
+
+jobs:
+  tests:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Create virtual environment
+        run: python -m venv .venv
+
+      - name: Install test dependencies
+        run: |
+          source .venv/bin/activate
+          python -m pip install --upgrade pip
+          python -m pip install -r tests/requirements.txt
+
+      - name: Run AI grading tests
+        run: |
+          source .venv/bin/activate
+          cd tests/unit/ai_grading_test
+          pytest -v
+
+      - name: Run web tests
+        run: |
+          source .venv/bin/activate
+          cd tests/unit/web_test
+          pytest -v
