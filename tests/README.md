@@ -1,104 +1,152 @@
-
 ## Running Tests
+
+The project's tests are located under `tests/unit/` and are organized by component:
+
+tests/ ├── requirements.txt └── unit/ ├── aigradingtest/ │ ├── conftest.py │ └── testAIGradingComponent.py └── webtest/ ├── conftest.py ├── pytest.ini ├── testmain.py └── testrepository.py
+
 
 ### 1. Create the Virtual Environment
 
 From the project root, create a virtual environment:
 
-```bash
 python3 -m venv .venv
-```
+
 
 ### 2. Activate the Virtual Environment
 
 On macOS/Linux:
 
-```bash
 source .venv/bin/activate
-```
+
 
 On Windows:
 
-```bash
 .venv\Scripts\activate
-```
+
 
 ### 3. Install the Test Requirements
 
-Go to the test directory:
+From the project root, install the dependencies listed in `tests/requirements.txt`:
 
-```bash
-cd tests
-```
+pip install -r tests/requirements.txt
 
-Install the required packages from `requirements.txt`:
 
-```bash
-pip install -r requirements.txt
-```
+### 4. Run the AI Grading Tests
 
-### 4. Running All Web/AI Grading Tests
+From the project root, navigate to the AI grading test directory:
 
-cd into the directory that contains the kind of tests you would like to run. For example:
-```bash
-cd unit/web_test
-```
-Then:
-```bash
+cd tests/unit/aigradingtest
+
+
+Run the tests:
+
 pytest
-```
 
-### 5. Running a Specific Test File
-
-cd into the directory that contains the test you would like to run. For example:
-```bash
-cd unit/web_test
-```
-Then run the file you would like: 
-
-```bash
-pytest test_main.py
-```
 
 For more detailed output:
 
-```bash
+pytest -v
+
+
+The AI grading tests use a `FakeProvider`, so they do not make calls to real LLM providers.
+
+### 5. Run the Web Tests
+
+From the project root, navigate to the web test directory:
+
+cd tests/unit/web_test
+
+
+Run the tests:
+
+pytest
+
+
+For more detailed output:
+
+pytest -v
+
+
+The web tests include tests for the application's home page, health endpoint, static files, and repository behavior.
+
+### 6. Run a Specific Test File
+
+From the appropriate test directory, specify the test file.
+
+For example, from `tests/unit/web_test`:
+
+pytest test_main.py
+
+
+For more detailed output:
+
 pytest test_main.py -v
-```
 
-### 6. Run a Single Test
 
-```bash
-pytest test_main.py::test_index -v
-```
+### 7. Run a Single Test
 
-For example, to run the health endpoint test:
+A single test can be run by specifying the test name.
 
-```bash
-pytest test_main.py::test_health -v
-```
+For example:
+
+pytest testmain.py::testindex -v
+
+
+To run the health endpoint test:
+
+pytest testmain.py::testhealth -v
+
 
 ### Expected Result
 
 A successful test run should look similar to:
 
-```text
-============================= test session starts =============================
-collected 3 items
+============================= test session starts ============================= collected 3 items
 
-test_main.py::test_index PASSED
-test_main.py::test_health PASSED
-test_main.py::test_static_css PASSED
+testmain.py::testindex PASSED testmain.py::testhealth PASSED testmain.py::teststatic_css PASSED
 
 ============================== 3 passed =======================================
-```
+
 
 ### Test Configuration
 
-Tests contain their own `pytest.ini` and `conftest.py` configuration. This allows the tests to be run directly from their specific directory without manually setting Python paths or changing into the `web` application directory.
+The test directories contain their own `pytest.ini` and `conftest.py` configuration where needed. Tests should be run from their respective test directories so that these configurations are loaded correctly.
 
-### Note
+The test configuration handles the Python paths required to import the project's `web` and `ai_grading` components.
 
-The virtual environment must be activated before running the tests.
+### Database Tests
 
-Docker/PostgreSQL is not required for the current unit tests because the database connection in the `/health` test is mocked.
+Most unit tests do not require a running PostgreSQL database.
+
+The `/health` test uses a mocked database connection, so it does not require PostgreSQL.
+
+The repository tests test both the in-memory and SQL repository implementations. When PostgreSQL is unavailable, the SQL tests are skipped automatically.
+
+The repository tests use the following default test database when PostgreSQL is available:
+
+postgresql+psycopg://autograder:autograder@localhost:5432/autograder_test
+
+
+A different database can be specified using the `TEST_DATABASE_URL` environment variable.
+
+### GitHub Actions CI
+
+The test suite is also automatically run by GitHub Actions.
+
+The workflow is located at:
+
+.github/workflows/tests.yml
+
+
+The CI pipeline:
+
+1. Checks out the repository.
+2. Sets up Python 3.12.
+3. Creates a virtual environment.
+4. Installs the dependencies from `tests/requirements.txt`.
+5. Runs the AI grading tests.
+6. Runs the web tests.
+
+The workflow runs automatically when code is pushed to the repository or when a pull request is opened or updated.
+
+A successful workflow indicates that the configured test suites passed in the GitHub Actions environment.
