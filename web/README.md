@@ -1,4 +1,4 @@
-# Web app (Student B)
+# Web app (Aiden)
 
 FastAPI backend + Jinja2/HTMX instructor UI, backed by PostgreSQL. See
 `docs/architecture/DECISIONS.md` (AD-13) for why this stack.
