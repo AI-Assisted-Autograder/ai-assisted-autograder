@@ -11,7 +11,8 @@
     "test": "playwright test",
     "typecheck": "tsc --noEmit",
     "test:gradescope-login": "playwright test tests/e2e/gradescope-login.spec.ts",
-    "test:gradescope-rerun": "playwright test tests/e2e/gradescope-rerun.spec.ts"
+    "test:gradescope-rerun": "playwright test tests/e2e/gradescope-rerun.spec.ts",
+    "nightly:trigger": "tsx integration/nightly-runner.ts"
   },
   "repository": {
     "type": "git",
@@ -27,6 +28,7 @@
   "devDependencies": {
     "@playwright/test": "^1.63.0",
     "@types/node": "^26.6.4",
+    "tsx": "^4.23.15",
     "typescript": "^7.0.2"
   }
 }

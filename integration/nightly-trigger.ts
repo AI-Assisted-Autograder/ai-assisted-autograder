@@ -1,10 +1,10 @@
-import { GradescopePlatform, RerunResult, SubmissionLocator } from './gradescope-platform';
+import { GradescopePlatform, SubmissionLocator } from './gradescope-platform';
 
 export interface PendingSubmissionRepository {
+  startRun(): Promise<void>;
   listSubmissionsPendingAi(mode: 'NIGHTLY'): Promise<SubmissionLocator[]>;
   authorizeForGrading(submissionId: string): Promise<void>;
-  recordRerun(submissionId: string, result: RerunResult): Promise<void>;
-  recordRerunFailure(submissionId: string, error: string): Promise<void>;
+  finishRun(summary: TriggerRunSummary): Promise<void>;
 }
 
 export type TriggerRunSummary = {
@@ -22,25 +22,27 @@ export class NightlyTrigger {
   ) {}
 
   public async run(): Promise<TriggerRunSummary> {
-    const pending = await this.repository.listSubmissionsPendingAi('NIGHTLY');
-    const summary: TriggerRunSummary = { found: pending.length, authorized: 0, rerun: 0, failed: 0 };
+    const summary: TriggerRunSummary = { found: 0, authorized: 0, rerun: 0, failed: 0 };
+    await this.repository.startRun();
 
-    for (const submission of pending) {
-      try {
-        // Authorization must happen before the browser click to avoid a DEFER race.
-        await this.repository.authorizeForGrading(submission.submissionId);
-        summary.authorized += 1;
+    try {
+      await this.platform.authenticate();
+      const pending = await this.repository.listSubmissionsPendingAi('NIGHTLY');
+      summary.found = pending.length;
 
-        const result = await this.platform.triggerRerun(submission);
-        await this.repository.recordRerun(submission.submissionId, result);
-        summary.rerun += 1;
-      } catch (error) {
-        summary.failed += 1;
-        await this.repository.recordRerunFailure(
-          submission.submissionId,
-          error instanceof Error ? error.message : String(error),
-        );
+      for (const submission of pending) {
+        try {
+          // Authorization must happen before the browser click to avoid a DEFER race.
+          await this.repository.authorizeForGrading(submission.submissionId);
+          summary.authorized += 1;
+          await this.platform.triggerRerun(submission);
+          summary.rerun += 1;
+        } catch {
+          summary.failed += 1;
+        }
       }
+    } finally {
+      await this.repository.finishRun(summary);
     }
 
     return summary;

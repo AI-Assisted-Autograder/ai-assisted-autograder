@@ -8,6 +8,7 @@ services:
       - ./migrations:/app/migrations
     environment:
       DATABASE_URL: postgresql+psycopg://autograder:autograder@db:5432/autograder
+      INTEGRATION_API_TOKEN: ${INTEGRATION_API_TOKEN:-}
     depends_on:
       db:
         condition: service_healthy
