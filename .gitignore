@@ -212,6 +212,11 @@ tempCodeRunnerFile.py
 # PyPI configuration file
 .pypirc
 
+# Playwright
+node_modules/
+playwright-report/
+test-results/
+
 # Marimo
 marimo/_static/
 marimo/_lsp/
