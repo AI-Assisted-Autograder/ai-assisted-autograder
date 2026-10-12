@@ -177,6 +177,100 @@ class SubmissionLocator:
     student_identifier: str | None
 
 
+class TargetStatus(str, Enum):
+    """Where one submission target stands (06-submission-target-state)."""
+
+    OPTED_OUT = "OPTED_OUT"
+    WAITING = "WAITING"
+    FAILED = "FAILED"
+    DONE = "DONE"
+
+
+@dataclass(frozen=True)
+class AssignmentSummary:
+    """One row of the instructor's assignment list."""
+
+    id: uuid.UUID
+    platform: str
+    platform_assignment_id: str
+    name: str | None
+    grading_mode: str
+    language: str
+    is_active: bool
+    target_count: int
+    submission_count: int
+
+
+@dataclass(frozen=True)
+class SubmissionSummary:
+    """One row of an assignment's submission list, with its targets counted by status."""
+
+    id: uuid.UUID
+    platform_submission_id: str
+    student_identifier: str | None
+    submitted_at: datetime
+    is_active_attempt: bool
+    action: Action
+    done: int
+    failed: int
+    waiting: int
+    opted_out: int
+
+
+@dataclass(frozen=True)
+class FeedbackDetail:
+    """One provider's response, as the instructor reviews it."""
+
+    id: uuid.UUID
+    provider: str
+    model_name: str
+    prompt_version: str | None
+    body: str | None
+    suggested_score: Decimal | None
+    confidence: Decimal | None
+    is_selected: bool
+    rubric_version: int
+    input_tokens: int | None
+    output_tokens: int | None
+    generated_at: datetime
+
+
+@dataclass(frozen=True)
+class TargetDetail:
+    identifier: str
+    kind: str
+    max_score: Decimal | None
+    status: TargetStatus
+    completed_at: datetime | None
+    last_error: str | None
+    selection_reason: str | None
+    score_spread: Decimal | None
+    agreement_score: Decimal | None
+    # Oldest first.
+    test_results: tuple[TestResultRecord, ...]
+    # The selected response first, then by provider.
+    feedback: tuple[FeedbackDetail, ...]
+
+
+@dataclass(frozen=True)
+class SubmissionDetail:
+    """Everything the instructor's submission page shows (05-sequence-instructor)."""
+
+    id: uuid.UUID
+    assignment_id: uuid.UUID
+    assignment_name: str | None
+    grading_mode: str
+    platform_submission_id: str
+    student_identifier: str | None
+    submitted_at: datetime
+    ai_authorized_at: datetime | None
+    ai_graded_submitted_at: datetime | None
+    is_active_attempt: bool
+    action: Action
+    # Display order.
+    targets: tuple[TargetDetail, ...]
+
+
 class RepositoryError(Exception):
     pass
 
@@ -235,6 +329,50 @@ def check_gradable(identifier: str, ai_needed: bool, completed_at: datetime | No
 def sort_key(display_order: int | None, identifier: str) -> tuple[bool, int, str]:
     """Targets in display order, unordered ones last, then by name."""
     return (display_order is None, display_order or 0, identifier)
+
+
+def target_status(ai_needed: bool, completed_at: datetime | None, last_error: str | None) -> TargetStatus:
+    if not ai_needed:
+        return TargetStatus.OPTED_OUT
+    if completed_at is None:
+        return TargetStatus.WAITING
+    return TargetStatus.FAILED if last_error is not None else TargetStatus.DONE
+
+
+def assignment_sort_key(a: AssignmentSummary) -> tuple:
+    """Active assignments first, then by name, unnamed ones last.
+
+    Sorted in Python by both repositories, so Postgres collation cannot
+    make them disagree.
+    """
+    return (not a.is_active, a.name is None, a.name or "", a.platform_assignment_id)
+
+
+def summarize(
+    sub_id: uuid.UUID,
+    platform_submission_id: str,
+    student_identifier: str | None,
+    submitted_at: datetime,
+    is_active_attempt: bool,
+    action: Action,
+    statuses: list[TargetStatus],
+) -> SubmissionSummary:
+    return SubmissionSummary(
+        sub_id,
+        platform_submission_id,
+        student_identifier,
+        submitted_at,
+        is_active_attempt,
+        action,
+        statuses.count(TargetStatus.DONE),
+        statuses.count(TargetStatus.FAILED),
+        statuses.count(TargetStatus.WAITING),
+        statuses.count(TargetStatus.OPTED_OUT),
+    )
+
+
+def feedback_sort_key(f: FeedbackDetail) -> tuple:
+    return (not f.is_selected, f.provider, f.model_name)
 
 
 class IGradingRepository(ABC):
@@ -337,3 +475,20 @@ class IGradingRepository(ABC):
         unset. Also restricted to active attempts (AD-14) on active
         assignments. Oldest submission first.
         """
+
+    # Instructor UI reads (05-sequence-instructor). Read-only.
+
+    @abstractmethod
+    def list_assignments(self) -> list[AssignmentSummary]:
+        """Every assignment with its target and submission counts.
+
+        Active first, then by name.
+        """
+
+    @abstractmethod
+    def list_submissions(self, assignment_id: uuid.UUID) -> list[SubmissionSummary]:
+        """An assignment's submissions, newest first, including inactive attempts."""
+
+    @abstractmethod
+    def get_submission_detail(self, submission_id: uuid.UUID) -> SubmissionDetail:
+        """A submission's targets with their test results and every provider's feedback."""

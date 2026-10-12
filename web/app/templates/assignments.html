@@ -1,0 +1,41 @@
+{% extends "base.html" %}
+
+{% block content %}
+<h1>Assignments</h1>
+
+{% if assignments %}
+<div class="table-wrap">
+<table>
+    <thead>
+        <tr>
+            <th>Assignment</th>
+            <th>Mode</th>
+            <th>Language</th>
+            <th class="num">Targets</th>
+            <th class="num">Submissions</th>
+        </tr>
+    </thead>
+    <tbody>
+        {% for a in assignments %}
+        <tr{% if not a.is_active %} class="inactive"{% endif %}>
+            <td>
+                <a href="/assignments/{{ a.id }}">{{ a.name or a.platform_assignment_id }}</a>
+                {% if not a.is_active %}<span class="badge muted">Inactive</span>{% endif %}
+                <div class="sub">{{ a.platform | title }} · {{ a.platform_assignment_id }}</div>
+            </td>
+            <td><span class="badge mode">{{ a.grading_mode | title }}</span></td>
+            <td>{{ a.language | title }}</td>
+            <td class="num">{{ a.target_count }}</td>
+            <td class="num">{{ a.submission_count }}</td>
+        </tr>
+        {% endfor %}
+    </tbody>
+</table>
+</div>
+{% else %}
+<p class="empty">
+    No assignments yet. To load sample data, run
+    <code>docker compose exec web python -m app.seed</code>.
+</p>
+{% endif %}
+{% endblock %}

@@ -39,6 +39,7 @@ from app.repository import (
     ProviderFeedback,
     SqlGradingRepository,
     SubmissionRef,
+    TargetStatus,
     UnknownTargetError,
     derive_action,
 )
@@ -724,3 +725,107 @@ def test_pending_ai_skips_graded_submissions(backend):
 def test_pending_ai_rejects_unknown_mode(backend):
     with pytest.raises(ValueError):
         backend.repo.list_submissions_pending_ai("WEEKLY")
+
+
+# ---------------------------------------------------------------------
+# Group 4: instructor UI reads
+# ---------------------------------------------------------------------
+def test_list_assignments_counts_and_order(backend):
+    zeta = backend.add_assignment("IMMEDIATE", (("add", 1), ("sub", 2)))
+    backend.set_assignment(zeta, name="Zeta")
+    alpha = backend.add_assignment("NIGHTLY", (("add", 1),))
+    backend.set_assignment(alpha, name="Alpha")
+    old = backend.add_assignment("IMMEDIATE", ())
+    backend.set_assignment(old, name="Aardvark", is_active=False)
+    unnamed = backend.add_assignment("IMMEDIATE", ())
+    for platform_id in ("s1", "s2"):
+        backend.repo.upsert_submission(SubmissionRef(zeta, platform_id, SUBMITTED))
+
+    found = backend.repo.list_assignments()
+
+    # Active first, then by name with unnamed last.
+    assert [a.id for a in found] == [alpha, zeta, unnamed, old]
+    by_id = {a.id: a for a in found}
+    assert (by_id[zeta].target_count, by_id[zeta].submission_count) == (2, 2)
+    assert (by_id[alpha].grading_mode, by_id[alpha].target_count, by_id[alpha].submission_count) == ("NIGHTLY", 1, 0)
+    assert by_id[old].is_active is False
+
+
+def test_list_assignments_empty(backend):
+    assert backend.repo.list_assignments() == []
+
+
+def test_list_submissions_newest_first_with_target_counts(backend):
+    aid = backend.add_assignment("NIGHTLY", (("add", 1), ("sub", 2), ("mul", 3)))
+
+    def submit(platform_id, hours):
+        sid = backend.repo.upsert_submission(SubmissionRef(aid, platform_id, SUBMITTED + timedelta(hours=hours)))
+        backend.repo.create_targets_default_needed(sid)
+        return sid
+
+    waiting = submit("waiting", 0)
+    mixed = submit("mixed", 2)
+    backend.repo.authorize_for_grading(mixed)
+    backend.repo.save_feedback(mixed, "add", result_for(backend.add_rubric(aid, "add")))
+    backend.repo.mark_target_failed(mixed, "sub", "boom")
+    backend.repo.set_ai_not_needed(mixed, "mul")
+    backend.repo.mark_ai_complete_if_all_done(mixed)
+    superseded = submit("superseded", 1)
+    backend.set_submission(superseded, is_active_attempt=False)
+
+    found = backend.repo.list_submissions(aid)
+
+    assert [s.id for s in found] == [mixed, superseded, waiting]
+    m, s, w = found
+    assert (m.action, m.done, m.failed, m.waiting, m.opted_out) == (Action.REEMIT, 1, 1, 0, 1)
+    assert (w.action, w.done, w.failed, w.waiting, w.opted_out) == (Action.DEFER, 0, 0, 3, 0)
+    assert s.is_active_attempt is False and w.is_active_attempt is True
+    assert w.platform_submission_id == "waiting"
+
+
+def test_list_submissions_unknown_assignment(backend):
+    with pytest.raises(NotFoundError):
+        backend.repo.list_submissions(uuid.uuid4())
+
+
+def test_submission_detail_shows_every_target_state(backend):
+    aid, sid = started(backend, targets=(("sub", 2), ("add", 1), ("mul", 3), ("div", 4)))
+    backend.set_assignment(aid, name="Calc")
+    backend.configure_target(aid, "add", "CLASS", Decimal("5"))
+    backend.add_rubric(aid, "add", version=1)
+    rubric = backend.add_rubric(aid, "add", version=2)
+    backend.repo.add_test_result(sid, "add", "FAIL", "first")
+    backend.repo.add_test_result(sid, "add", "PASS", "second")
+    backend.repo.save_feedback(sid, "add", result_for(rubric, selected=1))
+    backend.repo.mark_target_failed(sid, "sub", "no single source file")
+    backend.repo.set_ai_not_needed(sid, "mul")
+
+    detail = backend.repo.get_submission_detail(sid)
+
+    assert (detail.id, detail.assignment_id, detail.assignment_name) == (sid, aid, "Calc")
+    assert (detail.grading_mode, detail.platform_submission_id) == ("IMMEDIATE", "sub-1")
+    assert detail.student_identifier == "student@example.edu"
+    assert detail.action is Action.GRADE
+    assert [t.identifier for t in detail.targets] == ["add", "sub", "mul", "div"]
+    add, sub, mul, div = detail.targets
+    assert [t.status for t in detail.targets] == [
+        TargetStatus.DONE, TargetStatus.FAILED, TargetStatus.OPTED_OUT, TargetStatus.WAITING,
+    ]
+    assert (add.kind, add.max_score) == ("CLASS", Decimal("5"))
+    assert [(r.status, r.functional_test_feedback) for r in add.test_results] == [("FAIL", "first"), ("PASS", "second")]
+    # Every provider's response, the selected one first.
+    assert [(f.provider, f.is_selected) for f in add.feedback] == [("OPENAI", True), ("ANTHROPIC", False)]
+    selected = add.feedback[0]
+    assert (selected.body, selected.suggested_score, selected.rubric_version) == ("Check the empty case.", Decimal("0.3"), 2)
+    assert (selected.input_tokens, selected.output_tokens, selected.prompt_version) == (950, 140, "v1")
+    assert (add.selection_reason, add.score_spread) == ("Selected by the configured selector.", Decimal("0.2"))
+    assert add.completed_at is not None and add.last_error is None
+    assert (sub.last_error, sub.feedback) == ("no single source file", ())
+    assert sub.completed_at is not None
+    assert (mul.completed_at, mul.test_results, mul.feedback) == (None, (), ())
+    assert div.completed_at is None
+
+
+def test_submission_detail_unknown(backend):
+    with pytest.raises(NotFoundError):
+        backend.repo.get_submission_detail(uuid.uuid4())

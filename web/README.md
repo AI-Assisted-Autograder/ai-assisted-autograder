@@ -3,6 +3,26 @@
 FastAPI backend + Jinja2/HTMX instructor UI, backed by PostgreSQL. See
 `docs/architecture/DECISIONS.md` (AD-13) for why this stack.
 
+## Quick start: see the instructor UI
+
+Needs Docker Desktop installed and running. From the repository root:
+
+```bash
+cd web
+cp .env.example .env
+docker compose up --build -d
+docker compose exec web python -m app.seed
+```
+
+Then open http://localhost:8000. Click an assignment to see its
+submissions, targets and rubrics, then a submission to see its test
+results and each provider's feedback. `bob@example.edu` on Project 1 has
+a target in each state: feedback given, failed and opted out.
+
+If you already had the containers running, `git pull` is enough: the
+server reloads `app/` on change. Rerun `docker compose up --build -d`
+only if `requirements.txt` or the `Dockerfile` changed.
+
 ## Run with Docker (recommended)
 
 From the repository root:
@@ -13,8 +33,9 @@ cp .env.example .env
 docker compose up --build -d
 ```
 
-Then visit http://localhost:8000 and http://localhost:8000/health (the
-latter round-trips a query to Postgres to confirm the DB connection).
+Then visit http://localhost:8000 for the instructor UI and
+http://localhost:8000/health (which round-trips a query to Postgres to
+confirm the DB connection).
 The API docs are at http://localhost:8000/docs. `docker compose logs -f web`
 follows the server output, and `docker compose down` stops everything
 (the database volume is kept).
@@ -48,7 +69,8 @@ submissions, one in each state the pipeline produces:
 | `sample-list-sub-2` | Authorized by the nightly trigger | GRADE |
 | `sample-list-sub-3` | Graded by last night's run | REEMIT |
 
-The script prints the assignment ids. To browse the data:
+The script prints the assignment ids. The instructor UI at
+http://localhost:8000 shows all of it. To browse the tables directly:
 `docker compose exec db psql -U autograder`.
 
 `GET /internal/nightly/submissions` then returns `sample-list-sub-1` and
@@ -141,14 +163,32 @@ read the generated file before committing it.
 app/
   config.py      Settings read from .env (DATABASE_URL, INTEGRATION_API_TOKEN)
   db.py          SQLAlchemy engine and SessionLocal
-  main.py        FastAPI app: /, /health and the /internal/nightly endpoints
+  main.py        FastAPI app: /health and the /internal/nightly endpoints
   models.py      ORM tables (02-data-model.puml)
   repository/    Data access used by the grading pipeline (below)
   seed.py        Sample data (see "Sample data" above)
-  templates/     Jinja2 templates
+  ui.py          Instructor UI pages (below)
+  templates/     Jinja2 templates for the UI
   static/        CSS
 migrations/      Alembic migrations
 ```
+
+## Instructor UI
+
+Server-rendered pages: `app/ui.py` routes, Jinja2 templates, and HTMX
+available for partial updates. The pages call the repository directly
+rather than the JSON API, so each operation is written once. Read-only
+so far, with no login yet (OQ-9):
+
+| Page | Shows |
+| --- | --- |
+| `/` | Every assignment, with its mode, language and target and submission counts. |
+| `/assignments/{id}` | Its submissions (newest first, with each one's status and targets counted by state), its targets with their current rubric, and the providers. |
+| `/submissions/{id}` | Each target's test results, and every provider's feedback side by side with the one sent to the student marked. Opted-out, waiting and failed targets each say why there is no feedback. |
+
+The routes get the repository from `get_repository`, which the tests in
+`test_ui.py` override with an `InMemoryRepository`. LLM output is
+rendered with Jinja2's autoescaping, never as raw HTML.
 
 ## Repository layer
 
@@ -198,6 +238,19 @@ Reads:
 | `get_assignment_config(assignment_id)` | The assignment, its targets in display order with their current rubric, and the enabled providers (primary first). |
 | `get_selected_feedback(submission_id)` | For REEMIT: the selected feedback or error for each needed target. Opted-out targets are left out. |
 | `list_submissions_pending_ai(mode)` | For the nightly trigger: submissions in that grading mode that still have a needed, incomplete target and are not graded. Oldest first. |
+
+Instructor UI reads:
+
+| Method | What it does |
+| --- | --- |
+| `list_assignments()` | Every assignment with its target and submission counts. Active first, then by name. |
+| `list_submissions(assignment_id)` | The assignment's submissions, newest first, each with its action and its targets counted as done, failed, waiting or opted out. Includes superseded attempts. |
+| `get_submission_detail(submission_id)` | Every target with its status, test results and every provider's feedback (selected first, with the rubric version it was written against). |
+
+A target's status (`TargetStatus`) comes from `target_status`, shared by
+both implementations: opted out if `ai_needed` is false, otherwise
+waiting until `completed_at` is set, then failed or done depending on
+`last_error`.
 
 ### Choosing an action
 
@@ -256,11 +309,14 @@ different database.
 ## Status
 
 Done: the schema and migrations, the full repository (SQL and in
-memory) with tests, the sample data script, and the internal endpoints
-the nightly trigger calls (shared-token auth).
+memory) with tests, the sample data script, the internal endpoints the
+nightly trigger calls (shared-token auth), and the read-only instructor
+pages.
 
 Not done yet: the REST API the container calls, with per-assignment token
-auth (the schema has no token column yet), the instructor UI, and
+auth (the schema has no token column yet); in the instructor UI, the
+forms for assignments, targets and rubrics, feedback rating and the
+results dashboard (waiting on OQ-1); instructor login (OQ-9); and
 deployment.
 
 ## Known limitations

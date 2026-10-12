@@ -4,7 +4,7 @@ Not thread-safe, and holds only the columns the implemented methods use.
 """
 
 import uuid
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from decimal import Decimal
 
@@ -13,6 +13,8 @@ from app.repository.base import (
     Action,
     ActionResult,
     AssignmentConfig,
+    AssignmentSummary,
+    FeedbackDetail,
     FeedbackPackage,
     FeedbackResult,
     IGradingRepository,
@@ -20,16 +22,23 @@ from app.repository.base import (
     ProviderConfig,
     RubricConfig,
     SelectedFeedback,
+    SubmissionDetail,
     SubmissionLocator,
     SubmissionRef,
+    SubmissionSummary,
     SubmissionTargetRef,
     TargetConfig,
+    TargetDetail,
     TargetFeedback,
     TestResultRecord,
     UnknownTargetError,
+    assignment_sort_key,
     check_gradable,
     derive_action,
+    feedback_sort_key,
     sort_key,
+    summarize,
+    target_status,
     to_decimal,
 )
 
@@ -119,6 +128,8 @@ class _AiFeedback:
     is_selected: bool
     input_tokens: int | None
     output_tokens: int | None
+    id: uuid.UUID = field(default_factory=uuid.uuid4)
+    generated_at: datetime = field(default_factory=lambda: _now())
 
 
 def _now() -> datetime:
@@ -365,6 +376,115 @@ class InMemoryRepository(IGradingRepository):
             )
             for sub, a in found
         ]
+
+    def list_assignments(self) -> list[AssignmentSummary]:
+        found = [
+            AssignmentSummary(
+                a.id,
+                a.platform,
+                a.platform_assignment_id,
+                a.name,
+                a.grading_mode,
+                a.language,
+                a.is_active,
+                len(self._registered(a.id)),
+                sum(1 for sub in self.submissions.values() if sub.assignment_id == a.id),
+            )
+            for a in self.assignments.values()
+        ]
+        return sorted(found, key=assignment_sort_key)
+
+    def list_submissions(self, assignment_id: uuid.UUID) -> list[SubmissionSummary]:
+        a = self.assignments.get(assignment_id)
+        if a is None:
+            raise NotFoundError(f"Assignment {assignment_id} not found")
+        subs = sorted(
+            (sub for sub in self.submissions.values() if sub.assignment_id == assignment_id),
+            key=lambda sub: (sub.submitted_at, sub.platform_submission_id),
+            reverse=True,
+        )
+        return [
+            summarize(
+                sub.id,
+                sub.platform_submission_id,
+                sub.student_identifier,
+                sub.submitted_at,
+                sub.is_active_attempt,
+                derive_action(a.grading_mode, sub.submitted_at, sub.ai_authorized_at, sub.ai_graded_submitted_at),
+                [
+                    target_status(st.ai_needed, st.completed_at, st.last_error)
+                    for st in self.submission_targets.values()
+                    if st.submission_id == sub.id
+                ],
+            )
+            for sub in subs
+        ]
+
+    def get_submission_detail(self, submission_id: uuid.UUID) -> SubmissionDetail:
+        sub = self._submission(submission_id)
+        a = self.assignments[sub.assignment_id]
+        pairs = [
+            (st, self.grading_targets[st.grading_target_id])
+            for st in self.submission_targets.values()
+            if st.submission_id == submission_id
+        ]
+        pairs.sort(key=lambda p: sort_key(p[1].display_order, p[1].identifier))
+        targets = []
+        for st, gt in pairs:
+            tests = sorted(
+                (r for r in self.test_results if r.submission_target_id == st.id),
+                key=lambda r: r.recorded_at,
+            )
+            feedback = sorted(
+                (
+                    FeedbackDetail(
+                        f.id,
+                        f.provider,
+                        f.model_name,
+                        f.prompt_version,
+                        f.body,
+                        f.suggested_score,
+                        f.confidence,
+                        f.is_selected,
+                        self.rubrics[f.rubric_id].version,
+                        f.input_tokens,
+                        f.output_tokens,
+                        f.generated_at,
+                    )
+                    for f in self.ai_feedback
+                    if f.submission_target_id == st.id
+                ),
+                key=feedback_sort_key,
+            )
+            targets.append(
+                TargetDetail(
+                    gt.identifier,
+                    gt.kind,
+                    gt.max_score,
+                    target_status(st.ai_needed, st.completed_at, st.last_error),
+                    st.completed_at,
+                    st.last_error,
+                    st.selection_reason,
+                    st.score_spread,
+                    st.agreement_score,
+                    tuple(TestResultRecord(r.status, r.functional_test_feedback, r.recorded_at) for r in tests),
+                    tuple(feedback),
+                )
+            )
+        return SubmissionDetail(
+            sub.id,
+            a.id,
+            a.name,
+            a.grading_mode,
+            sub.platform_submission_id,
+            sub.student_identifier,
+            sub.submitted_at,
+            sub.ai_authorized_at,
+            sub.ai_graded_submitted_at,
+            sub.is_active_attempt,
+            derive_action(a.grading_mode, sub.submitted_at, sub.ai_authorized_at, sub.ai_graded_submitted_at),
+            tuple(targets),
+        )
 
     def _current_rubric(self, grading_target_id: uuid.UUID) -> RubricConfig | None:
         for r in self.rubrics.values():

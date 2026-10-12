@@ -379,6 +379,10 @@ package "Service Boundary (Student B)" #DCEFD9 {
     +mark_ai_complete_if_all_done(submission_id) : bool
     +get_selected_feedback(...) : FeedbackPackage
     +list_submissions_pending_ai(mode) : SubmissionLocator[]
+    .. instructor UI reads ..
+    +list_assignments() : AssignmentSummary[]
+    +list_submissions(assignment_id) : SubmissionSummary[]
+    +get_submission_detail(submission_id) : SubmissionDetail
   }
 
   class SqlGradingRepository

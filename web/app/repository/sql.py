@@ -20,6 +20,8 @@ from app.repository.base import (
     Action,
     ActionResult,
     AssignmentConfig,
+    AssignmentSummary,
+    FeedbackDetail,
     FeedbackPackage,
     FeedbackResult,
     IGradingRepository,
@@ -27,16 +29,23 @@ from app.repository.base import (
     ProviderConfig,
     RubricConfig,
     SelectedFeedback,
+    SubmissionDetail,
     SubmissionLocator,
     SubmissionRef,
+    SubmissionSummary,
     SubmissionTargetRef,
     TargetConfig,
+    TargetDetail,
     TargetFeedback,
     TestResultRecord,
     UnknownTargetError,
+    assignment_sort_key,
     check_gradable,
     derive_action,
+    feedback_sort_key,
     sort_key,
+    summarize,
+    target_status,
     to_decimal,
 )
 
@@ -305,6 +314,135 @@ class SqlGradingRepository(IGradingRepository):
                 )
                 for sub, a in rows
             ]
+
+    def list_assignments(self) -> list[AssignmentSummary]:
+        with self._sessions.begin() as s:
+            target_count = (
+                select(func.count())
+                .where(GradingTarget.assignment_id == Assignment.id)
+                .scalar_subquery()
+            )
+            submission_count = (
+                select(func.count())
+                .where(Submission.assignment_id == Assignment.id)
+                .scalar_subquery()
+            )
+            rows = s.execute(select(Assignment, target_count, submission_count)).all()
+            found = [
+                AssignmentSummary(
+                    a.id,
+                    a.platform,
+                    a.platform_assignment_id,
+                    a.name,
+                    a.grading_mode,
+                    a.language,
+                    a.is_active,
+                    targets,
+                    submissions,
+                )
+                for a, targets, submissions in rows
+            ]
+            return sorted(found, key=assignment_sort_key)
+
+    def list_submissions(self, assignment_id: uuid.UUID) -> list[SubmissionSummary]:
+        with self._sessions.begin() as s:
+            a = s.get(Assignment, assignment_id)
+            if a is None:
+                raise NotFoundError(f"Assignment {assignment_id} not found")
+            subs = sorted(
+                s.scalars(select(Submission).where(Submission.assignment_id == assignment_id)),
+                key=lambda sub: (sub.submitted_at, sub.platform_submission_id),
+                reverse=True,
+            )
+            statuses: dict[uuid.UUID, list] = {sub.id: [] for sub in subs}
+            for st in s.scalars(
+                select(SubmissionTarget).where(SubmissionTarget.submission_id.in_(statuses))
+            ):
+                statuses[st.submission_id].append(target_status(st.ai_needed, st.completed_at, st.last_error))
+            return [
+                summarize(
+                    sub.id,
+                    sub.platform_submission_id,
+                    sub.student_identifier,
+                    sub.submitted_at,
+                    sub.is_active_attempt,
+                    derive_action(a.grading_mode, sub.submitted_at, sub.ai_authorized_at, sub.ai_graded_submitted_at),
+                    statuses[sub.id],
+                )
+                for sub in subs
+            ]
+
+    def get_submission_detail(self, submission_id: uuid.UUID) -> SubmissionDetail:
+        with self._sessions.begin() as s:
+            sub = self._submission(s, submission_id)
+            a = s.get(Assignment, sub.assignment_id)
+            rows = s.execute(
+                select(SubmissionTarget, GradingTarget)
+                .join(GradingTarget, SubmissionTarget.grading_target_id == GradingTarget.id)
+                .where(SubmissionTarget.submission_id == submission_id)
+            ).all()
+            rows.sort(key=lambda r: sort_key(r[1].display_order, r[1].identifier))
+            st_ids = [st.id for st, _ in rows]
+            tests: dict[uuid.UUID, list[TestResultRecord]] = {i: [] for i in st_ids}
+            for r in s.scalars(
+                select(TestResult)
+                .where(TestResult.submission_target_id.in_(st_ids))
+                .order_by(TestResult.recorded_at)
+            ):
+                tests[r.submission_target_id].append(
+                    TestResultRecord(r.status, r.functional_test_feedback, r.recorded_at)
+                )
+            feedback: dict[uuid.UUID, list[FeedbackDetail]] = {i: [] for i in st_ids}
+            for f, version in s.execute(
+                select(AiFeedback, Rubric.version)
+                .join(Rubric, AiFeedback.rubric_id == Rubric.id)
+                .where(AiFeedback.submission_target_id.in_(st_ids))
+            ):
+                feedback[f.submission_target_id].append(
+                    FeedbackDetail(
+                        f.id,
+                        f.provider,
+                        f.model_name,
+                        f.prompt_version,
+                        f.body,
+                        f.suggested_score,
+                        f.confidence,
+                        f.is_selected,
+                        version,
+                        f.input_tokens,
+                        f.output_tokens,
+                        f.generated_at,
+                    )
+                )
+            return SubmissionDetail(
+                sub.id,
+                a.id,
+                a.name,
+                a.grading_mode,
+                sub.platform_submission_id,
+                sub.student_identifier,
+                sub.submitted_at,
+                sub.ai_authorized_at,
+                sub.ai_graded_submitted_at,
+                sub.is_active_attempt,
+                derive_action(a.grading_mode, sub.submitted_at, sub.ai_authorized_at, sub.ai_graded_submitted_at),
+                tuple(
+                    TargetDetail(
+                        gt.identifier,
+                        gt.kind,
+                        gt.max_score,
+                        target_status(st.ai_needed, st.completed_at, st.last_error),
+                        st.completed_at,
+                        st.last_error,
+                        st.selection_reason,
+                        st.score_spread,
+                        st.agreement_score,
+                        tuple(tests[st.id]),
+                        tuple(sorted(feedback[st.id], key=feedback_sort_key)),
+                    )
+                    for st, gt in rows
+                ),
+            )
 
     @staticmethod
     def _submission(s: Session, submission_id: uuid.UUID) -> Submission:

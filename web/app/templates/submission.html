@@ -1,0 +1,106 @@
+{% extends "base.html" %}
+
+{% set student = submission.student_identifier or "(unknown student)" %}
+{% block title %}{{ student }}{% endblock %}
+
+{% block content %}
+{% set label, style = submission_state(submission.action, submission.grading_mode) %}
+<p class="crumbs">
+    <a href="/">Assignments</a> /
+    <a href="/assignments/{{ submission.assignment_id }}">{{ submission.assignment_name or "Assignment" }}</a> /
+</p>
+<h1>
+    {{ student }}
+    <span class="badge {{ style }}">{{ label }}</span>
+    {% if not submission.is_active_attempt %}<span class="badge muted">Superseded</span>{% endif %}
+</h1>
+<dl class="meta">
+    <div><dt>Submission</dt><dd><code>{{ submission.platform_submission_id }}</code></dd></div>
+    <div><dt>Submitted</dt><dd>{{ submission.submitted_at | when }}</dd></div>
+    {% if submission.ai_authorized_at %}
+    <div><dt>Authorized</dt><dd>{{ submission.ai_authorized_at | when }}</dd></div>
+    {% endif %}
+    <div><dt>Mode</dt><dd><span class="badge mode">{{ submission.grading_mode | title }}</span></dd></div>
+</dl>
+
+{% for t in submission.targets %}
+{% set t_label, t_style = TARGET_STATES[t.status] %}
+<section class="card target-card">
+    <header>
+        <code class="target">{{ t.identifier }}</code>
+        <span class="badge muted">{{ t.kind | title }}</span>
+        <span class="badge {{ t_style }}">{{ t_label }}</span>
+        {% if t.max_score is not none %}<span class="score">{{ t.max_score | number }} {{ "pt" if t.max_score == 1 else "pts" }}</span>{% endif %}
+    </header>
+
+    <h3>Tests</h3>
+    {% if t.test_results %}
+    <ul class="tests">
+        {% for r in t.test_results %}
+        <li>
+            <span class="test {{ r.status | lower }}">{{ r.status }}</span>
+            {% if r.functional_test_feedback %}<code class="wrap">{{ r.functional_test_feedback }}</code>{% endif %}
+        </li>
+        {% endfor %}
+    </ul>
+    {% else %}
+    <p class="empty">No test results reported. The test suite only reports them if it calls <code>add_test_result</code>.</p>
+    {% endif %}
+
+    <h3>AI feedback</h3>
+    {% if t.status.value == "OPTED_OUT" %}
+    <p class="empty">The test suite opted this target out, so no feedback was requested.</p>
+    {% elif t.status.value == "WAITING" %}
+    <p class="empty">
+        {% if submission.grading_mode != "NIGHTLY" %}Not graded yet.
+        {% elif submission.ai_authorized_at %}Not graded yet. The nightly run has authorized it, so its rerun will grade it.
+        {% else %}Not graded yet. The next nightly run will grade it.{% endif %}
+    </p>
+    {% elif t.status.value == "FAILED" %}
+    <div class="failure">
+        <strong>Feedback generation failed</strong>
+        {% if t.completed_at %}<span class="sub">{{ t.completed_at | when }}</span>{% endif %}
+        <code class="wrap">{{ t.last_error }}</code>
+        <p class="sub">The student was told feedback was unavailable. Failed targets are not retried (AD-8).</p>
+    </div>
+    {% endif %}
+
+    {% if t.feedback %}
+    {% if t.selection_reason or t.score_spread is not none or t.agreement_score is not none %}
+    <p class="sub">
+        {% if t.selection_reason %}Selected: {{ t.selection_reason }}.{% endif %}
+        {% if t.score_spread is not none %}Score spread {{ t.score_spread | number }}.{% endif %}
+        {% if t.agreement_score is not none %}Agreement {{ t.agreement_score | number }}.{% endif %}
+    </p>
+    {% endif %}
+    <div class="responses">
+        {% for f in t.feedback %}
+        <article class="response{% if f.is_selected %} selected{% endif %}">
+            <header>
+                <strong>{{ f.provider | title }}</strong>
+                <code>{{ f.model_name }}</code>
+                {% if f.is_selected %}<span class="badge done">Sent to student</span>{% endif %}
+            </header>
+            <p class="prose">{{ f.body or "(empty response)" }}</p>
+            <dl class="facts">
+                {% if f.suggested_score is not none %}
+                <div><dt>Score</dt><dd>{{ f.suggested_score | number }}{% if t.max_score is not none %} / {{ t.max_score | number }}{% endif %}</dd></div>
+                {% endif %}
+                {% if f.confidence is not none %}
+                <div><dt>Confidence</dt><dd>{{ f.confidence | number }}</dd></div>
+                {% endif %}
+                <div><dt>Rubric</dt><dd>v{{ f.rubric_version }}</dd></div>
+                {% if f.prompt_version %}<div><dt>Prompt</dt><dd>{{ f.prompt_version }}</dd></div>{% endif %}
+                {% if f.input_tokens is not none or f.output_tokens is not none %}
+                <div><dt>Tokens</dt><dd>{{ f.input_tokens or 0 }} in / {{ f.output_tokens or 0 }} out</dd></div>
+                {% endif %}
+            </dl>
+        </article>
+        {% endfor %}
+    </div>
+    {% endif %}
+</section>
+{% else %}
+<p class="empty">This submission has no targets yet.</p>
+{% endfor %}
+{% endblock %}

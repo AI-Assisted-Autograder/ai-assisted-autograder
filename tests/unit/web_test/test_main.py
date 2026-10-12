@@ -1,12 +1,19 @@
 from unittest.mock import patch
 from fastapi.testclient import TestClient
 from web.app.main import app
+from app.repository import InMemoryRepository
+from app.ui import get_repository
 
 client = TestClient(app)
 
 # Test that the home page loads successfully and returns HTTP 200.
+# It lists assignments, so it reads from an in-memory repository, not the database.
 def test_index():
-    response = client.get("/")
+    app.dependency_overrides[get_repository] = InMemoryRepository
+    try:
+        response = client.get("/")
+    finally:
+        app.dependency_overrides.clear()
 
     assert response.status_code == 200
 

@@ -1,9 +1,8 @@
 from typing import Literal
 from uuid import UUID
 
-from fastapi import Depends, FastAPI, Header, HTTPException, Query, Request
+from fastapi import Depends, FastAPI, Header, HTTPException, Query
 from fastapi.staticfiles import StaticFiles
-from fastapi.templating import Jinja2Templates
 from pydantic import BaseModel
 from sqlalchemy import func, text
 
@@ -11,11 +10,12 @@ from app.config import settings
 from app.db import SessionLocal, engine
 from app.models import TriggerRun
 from app.repository import NotFoundError, SqlGradingRepository
+from app.ui import router as ui_router
 
 app = FastAPI(title="AI-Assisted Autograder")
 
 app.mount("/static", StaticFiles(directory="app/static"), name="static")
-templates = Jinja2Templates(directory="app/templates")
+app.include_router(ui_router)
 grading_repository = SqlGradingRepository(SessionLocal)
 
 
@@ -23,11 +23,6 @@ def require_integration_token(x_internal_token: str | None = Header(default=None
     """Protect integration endpoints with a shared secret."""
     if not settings.integration_api_token or x_internal_token != settings.integration_api_token:
         raise HTTPException(status_code=401, detail="valid X-Internal-Token required")
-
-
-@app.get("/")
-def index(request: Request):
-    return templates.TemplateResponse(request, "index.html")
 
 
 @app.get("/health")
