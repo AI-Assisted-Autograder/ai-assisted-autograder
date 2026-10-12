@@ -13,6 +13,32 @@ docker compose up --build
 Then visit http://localhost:8000 and http://localhost:8000/health (the
 latter round-trips a query to Postgres to confirm the DB connection).
 
+### Sample data
+
+The database starts empty. To load sample data, with the containers running:
+
+```bash
+docker compose exec web python -m app.seed          # load once; a rerun does nothing
+docker compose exec web python -m app.seed --reset  # wipe EVERY table, then reload
+```
+
+This adds one course with three assignments: an IMMEDIATE Python
+calculator, a NIGHTLY Java linked list and an inactive one. It also adds
+their targets and rubrics, three LLM providers (Gemini primary), and six
+submissions, one in each state the pipeline produces:
+
+| Submission | State | `decide_action` |
+| --- | --- | --- |
+| `sample-calc-sub-1` | Graded, feedback from two providers | REEMIT |
+| `sample-calc-sub-2` | Graded, with one target opted out and one failed | REEMIT |
+| `sample-calc-sub-3` | Tests recorded, not graded yet | GRADE |
+| `sample-list-sub-1` | Waiting for the nightly run | DEFER |
+| `sample-list-sub-2` | Authorized by the nightly trigger | GRADE |
+| `sample-list-sub-3` | Graded by last night's run | REEMIT |
+
+The script prints the assignment ids. To browse the data:
+`docker compose exec db psql -U autograder`.
+
 ## Run without Docker
 
 Requires a local PostgreSQL instance; point `DATABASE_URL` at it via `.env`.
