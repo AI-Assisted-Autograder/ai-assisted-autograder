@@ -97,6 +97,16 @@ database starts with the schema but no course, assignment, or submission
 records. Records must be imported or created before a nightly run can find
 work; starting Docker does not synchronize data from Gradescope.
 
+For local testing, load the sample data, which includes two submissions
+the nightly query returns (see "Sample data" in `web/README.md`):
+
+```powershell
+docker compose -f web\docker-compose.yml exec web python -m app.seed
+```
+
+`web/.env.example` sets the token to `local-development-token`, so the
+`$env:INTEGRATION_API_TOKEN` line above is only needed to override it.
+
 To stop the services:
 
 ```powershell
