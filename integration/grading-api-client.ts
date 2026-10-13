@@ -1,5 +1,4 @@
-import type { SubmissionLocator } from './gradescope-platform';
-import type { PendingSubmissionRepository, TriggerRunSummary } from './nightly-trigger';
+import type { IGradingClient, SubmissionLocator, TriggerRunSummary } from './interfaces';
 
 type PendingSubmissionDto = {
   submission_id: string;
@@ -10,7 +9,7 @@ type PendingSubmissionDto = {
 };
 
 /** HTTP bridge from the Playwright trigger to the existing SQL repository API. */
-export class GradingApiClient implements PendingSubmissionRepository {
+export class HttpGradingClient implements IGradingClient {
   private readonly baseUrl = (process.env.GRADING_API_URL ?? 'http://localhost:8000').replace(/\/$/, '');
   private readonly token = process.env.INTEGRATION_API_TOKEN;
   private runId: string | undefined;
@@ -70,6 +69,24 @@ export class GradingApiClient implements PendingSubmissionRepository {
     }
   }
 
+  public async recordSubmissionResult(
+    submissionId: string,
+    status: 'AUTHORIZED' | 'RERUN_SUCCEEDED' | 'RERUN_FAILED',
+    errorMessage?: string,
+  ): Promise<void> {
+    const response = await fetch(
+      `${this.baseUrl}/internal/nightly/runs/${this.runId}/submissions/${submissionId}`,
+      {
+        method: 'POST',
+        headers: { ...this.headers(), 'Content-Type': 'application/json' },
+        body: JSON.stringify({ status, error_message: errorMessage ?? null }),
+      },
+    );
+    if (!response.ok) {
+      throw new Error(`Database API returned ${response.status} while recording ${submissionId}.`);
+    }
+  }
+
   public async finishRun(summary: TriggerRunSummary): Promise<void> {
     if (!this.runId) {
       throw new Error('Cannot finish a nightly run that was not started.');
@@ -78,7 +95,7 @@ export class GradingApiClient implements PendingSubmissionRepository {
       method: 'POST',
       headers: { ...this.headers(), 'Content-Type': 'application/json' },
       body: JSON.stringify({
-        status: summary.failed === 0 ? 'SUCCEEDED' : 'FAILED',
+        status: summary.failed === 0 && !summary.fatalError ? 'SUCCEEDED' : 'FAILED',
         submissions_authorized: summary.authorized,
         submissions_rerun: summary.rerun,
         submissions_failed_to_trigger: summary.failed,
@@ -89,3 +106,6 @@ export class GradingApiClient implements PendingSubmissionRepository {
     }
   }
 }
+
+// Backwards-compatible name for callers from the first prototype.
+export { HttpGradingClient as GradingApiClient };
