@@ -2,9 +2,9 @@
 
 ## Overview
 
-This is a cloud-hosted system that uses large language models (LLMs) to generate targeted feedback on student programming assignments.
+This project builds a cloud-hosted, LLM-powered feedback system that provides students with automated, targeted commentary on their source code. 
 
-The system integrates with Gradescope to process submissions, run functional tests, and generate feedback based on instructor-defined rubrics, test results, and student code. Feedback is stored in PostgreSQL and delivered through Gradescope.
+Instructors use a web interface to configure grading targets, rubrics, and feedback guidance, which are stored in a backing database. The system periodically processes new Gradescope submissions, runs functional tests against instructor-defined targets, and uses the test results, grading criteria, and student code to generate personalized feedback through LLM APIs. The generated feedback is stored in the database and delivered to students through Gradescope's feedback system.
 
 ## Features
 
