@@ -47,6 +47,7 @@ class FeedbackInput(BaseModel):
     target_id: str = Field(min_length=1, max_length=128, pattern=r"^[A-Za-z0-9_.:-]+$")
     code: str = Field(min_length=1)
     guidance: str | None = ""
+    functional_test_feedback: list[str] = Field(default_factory=list)
 
 
 def error(code: str, status: int, request_id: str | None = None):
@@ -161,6 +162,7 @@ def create_feedback_router(state_path: str | Path, *, provider_factory=None) -> 
                           id=target.rubric.id, version=target.rubric.version,
                           grading_target_id=payload.target_id),
             resolved=ResolvedSource(source_file=CodeFile(path=target.source_path, content=payload.code)),
+            functional_test_feedback=tuple(payload.functional_test_feedback),
         )
         try:
             PromptBuilder().prepare(grading_request)
@@ -168,6 +170,8 @@ def create_feedback_router(state_path: str | Path, *, provider_factory=None) -> 
             return error("input_too_large", 413, rid)
         content = payload.model_dump(exclude={"request_id"})
         content["guidance"] = payload.guidance or ""
+        if not payload.functional_test_feedback:
+            content.pop("functional_test_feedback")
         canonical = json.dumps(content,
                                sort_keys=True, separators=(",", ":"), ensure_ascii=False)
         digest = hashlib.sha256(canonical.encode("utf-8")).hexdigest()

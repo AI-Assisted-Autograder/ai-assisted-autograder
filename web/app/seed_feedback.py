@@ -39,12 +39,13 @@ def initialize(
     from urllib.parse import urlsplit
 
     address = urlsplit(backend_url)
-    if (address.scheme != "http" or address.hostname not in ("127.0.0.1", "::1")
+    if (not address.hostname or not (address.scheme == "https" or (
+            address.scheme == "http" and address.hostname in ("127.0.0.1", "::1")))
             or address.username is not None or address.password is not None
             or address.path not in ("", "/") or address.query or address.fragment
             or any(character.isspace() for character in backend_url)
             or address.port is not None and not 1 <= address.port <= 65535):
-        raise ValueError("backend URL must be a local HTTP origin")
+        raise ValueError("backend URL must be an HTTPS or loopback HTTP origin")
     if not math.isfinite(expires_in_hours) or not 0 < expires_in_hours <= 24 * 365:
         raise ValueError("expiration must be between zero and one year")
     paths = tuple(Path(path).expanduser().absolute()

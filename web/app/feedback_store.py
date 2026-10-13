@@ -114,12 +114,6 @@ class JsonStore:
             self.close()
             raise StoreError("state_unavailable") from None
 
-    def __enter__(self) -> "JsonStore":
-        return self
-
-    def __exit__(self, *_: Any) -> None:
-        self.close()
-
     def close(self) -> None:
         with self._mutex:
             if self._lock_fd is not None:
@@ -136,11 +130,6 @@ class JsonStore:
         with self._mutex:
             self._ensure_open()
             return self._state.config.model_copy(deep=True)
-
-    def snapshot(self) -> State:
-        with self._mutex:
-            self._ensure_open()
-            return self._state.model_copy(deep=True)
 
     def authenticate(self, raw_token: str) -> str:
         with self._mutex:

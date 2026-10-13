@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Local HTTP feedback client. Requires only the Python standard library.
+"""HTTP feedback client. Requires only the Python standard library.
 
 The assignment token file is the client's only credential. This module never
 imports a Google SDK, discovers ADC, or falls back to a model endpoint.
@@ -38,12 +38,14 @@ class _NoRedirects(HTTPRedirectHandler):
 
 
 def validate_backend_url(value: str) -> str:
-    """Limit this prototype to a literal loopback HTTP origin."""
+    """Accept HTTPS origins, with plain HTTP allowed only on loopback."""
     try:
         parsed = urlsplit(value)
         valid = (
-            parsed.scheme == "http"
-            and parsed.hostname in {"127.0.0.1", "::1"}
+            bool(parsed.hostname)
+            and (parsed.scheme == "https" or (
+                parsed.scheme == "http" and parsed.hostname in {"127.0.0.1", "::1"}
+            ))
             and parsed.username is None
             and parsed.password is None
             and parsed.path in {"", "/"}
@@ -55,7 +57,7 @@ def validate_backend_url(value: str) -> str:
     except (TypeError, ValueError):
         valid = False
     if not valid:
-        raise ClientError("Backend URL must be an HTTP loopback origin (127.0.0.1 or [::1]).")
+        raise ClientError("Backend URL must be an HTTPS origin or HTTP loopback origin.")
     return value.rstrip("/")
 
 
@@ -90,8 +92,13 @@ def read_assignment_token(path: str | Path) -> str:
             os.close(descriptor)
 
 
-def stable_request_id(target_id: str, code: str, guidance: str | None = None) -> str:
+def stable_request_id(
+    target_id: str, code: str, guidance: str | None = None,
+    functional_test_feedback: list[str] | None = None,
+) -> str:
     content = {"target_id": target_id, "code": code, "guidance": guidance or ""}
+    if functional_test_feedback:
+        content["functional_test_feedback"] = functional_test_feedback
     canonical = json.dumps(content, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
     return "local-" + hashlib.sha256(canonical.encode("utf-8")).hexdigest()
 
@@ -120,6 +127,7 @@ def request_feedback(
     code: str,
     target_id: str = "example",
     guidance: str | None = None,
+    functional_test_feedback: list[str] | None = None,
     request_id: str | None = None,
     timeout: float = 90,
 ) -> dict:
@@ -130,10 +138,12 @@ def request_feedback(
     if not code.strip() or len(code.encode("utf-8")) > MAX_CODE_BYTES:
         raise ClientError("Code must be nonempty and at most 64 KiB; backend limits may be lower.")
     token = read_assignment_token(token_file)
-    identifier = request_id or stable_request_id(target_id, code, guidance)
+    identifier = request_id or stable_request_id(target_id, code, guidance, functional_test_feedback)
     if not re.fullmatch(r"[A-Za-z0-9._:-]{1,128}", identifier):
         raise ClientError("Request ID must contain 1–128 letters, digits, dots, underscores, colons, or hyphens.")
     payload = {"request_id": identifier, "target_id": target_id, "code": code, "guidance": guidance or ""}
+    if functional_test_feedback:
+        payload["functional_test_feedback"] = functional_test_feedback
     data = json.dumps(payload, ensure_ascii=False).encode("utf-8")
     request = Request(
         origin + "/v1/feedback",
@@ -153,7 +163,7 @@ def request_feedback(
     except (TimeoutError, socket.timeout):
         raise ClientError("Backend request timed out. Reuse this request ID to check its saved state.") from None
     except (URLError, OSError, ValueError, HTTPException):
-        raise ClientError("Cannot reach the local backend. Check its address and running process.") from None
+        raise ClientError("Cannot reach the backend. Check its address and running process.") from None
     try:
         result = json.loads(raw)
         if (
@@ -193,7 +203,7 @@ def _backend_from_config(path: Path) -> str:
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--config", type=Path, default=Path(".local-vertex/client/config.json"))
-    parser.add_argument("--backend-url", help="HTTP loopback origin; overrides the non-secret config file")
+    parser.add_argument("--backend-url", help="HTTPS or HTTP loopback origin; overrides the non-secret config file")
     parser.add_argument("--token-file", type=Path, default=Path(".local-vertex/client/token"))
     parser.add_argument("--code-file", type=Path, default=Path(__file__).parent / "examples/vertex_feedback_example.py")
     parser.add_argument("--target-id", default="example")

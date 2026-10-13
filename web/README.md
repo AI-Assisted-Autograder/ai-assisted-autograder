@@ -164,9 +164,10 @@ env -i PATH=/usr/bin:/bin /usr/bin/python3 -I -S local_client.py \
 ```
 
 The clean environment and `-I -S` exclude inherited Google settings and SDKs.
-The client only reads its assignment token and address, and only calls loopback
-HTTP; it never discovers Google credentials or falls back to Google. The request
-contains `request_id`, `target_id`, `code` and optional `guidance`; the response
+The client only reads its assignment token and address, and calls HTTPS or
+loopback HTTP; it never discovers Google credentials or falls back to Google. The request
+contains `request_id`, `target_id`, `code`, optional `guidance` and optional
+`functional_test_feedback` (a list of diagnostic strings); the response
 contains `request_id`, `feedback_text`, actual `model_name` and available `usage`.
 
 Repeat the identical command to reuse its stable request ID and saved result.
@@ -181,6 +182,141 @@ This prototype is single-worker, uses cumulative call counts, and has no
 deployment or SQL feedback store. It separates credentials at the code/interface
 boundary, not at the OS boundary: the same user or a local administrator can
 still read backend files.
+
+### Gradescope through a temporary HTTPS tunnel
+
+The package sources and generated `vertex autograder.zip` are in the independent
+`ai_grading/autograder-vertex-feedback/` directory, alongside the existing
+`ai_grading/autograder-gemini-feedback/` directory.
+The ZIP includes the original Java functional grader under `github/`, its
+compilation-error templates, `setup.sh`, `run_autograder`, `vertex_feedback.py`,
+`ai_feedback.json`, `local_client.py`, `config.json` and `assignment.token`. Every ZIP member is also
+present as a loose file at the same relative path in that directory.
+The ZIP and token are Git-ignored and mode `600`. Google credentials, Google SDKs,
+GitHub deploy keys, SSH configuration and backend state are excluded.
+`build.py` refreshes the client copy from the root `local_client.py` and generates
+the URL config and token file. Generated copies and downloaded grader files stay
+out of Git; the original functional tests are reused without editing them.
+
+The feedback configuration keeps the Gemini grader's filename and source syntax:
+
+```json
+{
+  "targets": [
+    {
+      "source": "**/SortedCollection.java",
+      "target_id": "sorted-collection"
+    }
+  ]
+}
+```
+
+`source` selects exactly one submitted file for each target. `target_id` selects
+an authorized backend target and its rubric; it does not select an assignment.
+The adapter processes each configured target and appends a zero-point feedback
+row, always using the original visible test diagnostics. The rubric's
+`criteria_text` and `feedback_guidance` retain their Gemini meanings but now live
+in the backend JSON. `config.json` holds only the backend URL, and
+`assignment.token` is the container's only authentication secret.
+
+Only the feedback adapter is configurable across source files. This upload package
+remains specific to SortedCollection: the compilation entry, Java functional
+tests, JDK 11 setup and build whitelist must still be adapted for another assignment.
+The backend and HTTP client can serve other configured assignments and targets;
+they do not infer an assignment's build or testing procedure.
+
+From the repository root, initialize a separate experiment **once**:
+
+```bash
+.venv/bin/python -m web.app.seed_feedback \
+  --state .local-vertex/gradescope/backend/state.json \
+  --token-file .local-vertex/gradescope/client/token \
+  --client-config .local-vertex/gradescope/client/config.json \
+  --max-calls 10 --expires-in-hours 24
+```
+
+Before starting the backend, add this target under `assignments.demo.targets`
+in `.local-vertex/gradescope/backend/state.json`. It corresponds to the existing
+CS101 assignment's `SortedCollection.java` submission. Keep the token records,
+request records and `used_calls` unchanged when updating an existing experiment.
+The rubric belongs only in this backend JSON, not in the upload package.
+
+```json
+"sorted-collection": {
+  "identifier": "SortedCollection.java",
+  "kind": "FILE",
+  "source_path": "SortedCollection.java",
+  "rubric": {
+    "id": "sorted-collection-rubric",
+    "version": 2,
+    "criteria_text": "Explain the reported functional-test failures for SortedCollection using the submitted code. Consider ordered removal, handling invalid arguments, and removal from an empty collection only where supported by the visible test results. If all visible tests pass, acknowledge that and suggest useful code-quality improvements.",
+    "feedback_guidance": "Give concise, actionable feedback. Point to relevant methods when possible. Distinguish confirmed failures from likely causes. Do not provide a complete replacement solution. Provide feedback only. Use SCORE: NONE; do not assign a grade."
+  }
+}
+```
+
+Start the backend (stop it before any later JSON configuration edits):
+
+```bash
+.venv/bin/python -m web.app.feedback \
+  --state .local-vertex/gradescope/backend/state.json --port 8001
+```
+
+In another terminal, start a [Cloudflare Quick Tunnel](https://developers.cloudflare.com/tunnel/get-started/quick-tunnels/):
+
+```bash
+brew install cloudflared
+cloudflared tunnel --url http://127.0.0.1:8001 --no-autoupdate --protocol http2
+```
+
+Keep both processes running. Obtain the original functional grader once on the
+build machine. This command uses the previously authorized local deploy key only
+to fetch source; the key is not included in the upload package:
+
+```bash
+GIT_SSH_COMMAND='ssh -i ai_grading/autograder-gemini-feedback/deploy_key -o IdentitiesOnly=yes' \
+  git clone --depth 1 --branch master \
+  git@github.com:wonsunahn/CS1632_Autograder_JavaAssessment.git \
+  .local-vertex/gradescope/functional-source
+```
+
+Skip cloning if that checkout already exists. The current package uses revision
+`15425db409b8f938b8cc3959f21e5d5dc419265d`. `build.py` includes only the original
+compile/run scripts, two Java grading files, four JARs, license and error templates.
+The Gradescope container uses this snapshot instead of pulling GitHub at runtime,
+so its only authentication secret is the assignment token. To refresh functional
+tests, update this local checkout, rebuild and re-upload the ZIP.
+
+Copy the printed HTTPS origin into the build command:
+
+```bash
+python3 ai_grading/autograder-vertex-feedback/build.py \
+  --backend-url https://YOUR-TUNNEL.trycloudflare.com
+```
+
+On the existing CS101 assignment, upload
+`ai_grading/autograder-vertex-feedback/vertex autograder.zip` on Configure
+Autograder (Ubuntu 22.04). For Test Autograder, upload the previous
+**`SortedCollection.java`** submission; a containing folder is also supported.
+The submission must contain exactly one file with that name. The original flow
+copies it, removes its package declaration, compiles with Java 11, then runs the
+unchanged functional tests to produce `results.json`. Compilation errors use the
+original templates and exit before any AI request.
+
+After functional testing, `vertex_feedback.py` sends each configured source file
+and the original visible test diagnostics to the backend. It appends one visible
+AI feedback row per target with `score: 0` and `max_score: 0`, preserving all original result fields and
+functional-test scores. AI failure only changes that row to an unavailable
+message; it never replaces the original grade. The result update uses an atomic
+file replacement. Hidden test diagnostics are not sent, matching the Gemini grader.
+The same source and diagnostics produce the same request ID, so reruns reuse
+saved feedback; changed test results produce a new request.
+
+The tunnel URL changes when restarted: rebuild and upload the package with the
+new URL, keeping the same backend state and token. The token expires 24 hours
+after initialization. To issue a new experiment, use new state/token/config
+paths and pass the new token path to `build.py --token-file`; never reset an
+existing experiment to restore quota. Stop the backend and tunnel when finished.
 
 ## Database schema
 
