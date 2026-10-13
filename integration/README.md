@@ -10,10 +10,17 @@ The current implementation is a rerun prototype:
 
 - `GradescopePlatform` can authenticate with a non-SSO account, open an
   explicitly selected submission, and click `Rerun Autograder`.
+- `ILearningPlatform` and `IGradingClient` define the boundaries used by the
+  trigger, with `GradescopePlatform` and `HttpGradingClient` as production
+  adapters.
+- `FakePlatform` and `FakeGradingClient` provide browser-free test doubles for
+  orchestration tests.
 - `NightlyTrigger` runs the orchestration order: authorize a submission first,
   then click the rerun button.
 - `GradingApiClient` reads pending `NIGHTLY` submissions, starts an audit run,
   authorizes submissions, and writes the aggregate result back to the Web API.
+- The Web API permits only one `RUNNING` nightly cycle at a time and records
+  each submission's authorization, success, or failure separately.
 - `nightly-runner.ts` is the scheduler entrypoint. A cron or GitHub Actions
   workflow can invoke it later.
 
@@ -22,8 +29,11 @@ The current implementation is a rerun prototype:
 | File | Responsibility |
 | --- | --- |
 | `gradescope-platform.ts` | Gradescope login, submission navigation, selectors, and rerun click |
+| `interfaces.ts` | `ILearningPlatform`, `IGradingClient`, and shared integration types |
 | `nightly-trigger.ts` | Authorize-then-rerun orchestration and run summary |
-| `grading-api-client.ts` | HTTP bridge to the Web API and SQL repository |
+| `grading-api-client.ts` | `HttpGradingClient`, the HTTP bridge to the Web API and SQL repository |
+| `fake-platform.ts` | Browser-free platform test double |
+| `fake-grading-client.ts` | In-memory database/API test double |
 | `nightly-runner.ts` | Creates Chromium and runs one nightly trigger cycle |
 
 ## Safety requirements
@@ -39,6 +49,11 @@ $env:GRADESCOPE_ALLOW_RERUN="1"
 
 The platform adapter also accepts only HTTPS URLs under
 `www.gradescope.com`.
+
+After clicking `Rerun Autograder`, the adapter waits for a visible success
+message instead of treating the click itself as proof that Gradescope accepted
+the request. If the site uses different wording, set a regular expression in
+`GRADESCOPE_RERUN_SUCCESS_TEXT`.
 
 ## Direct rerun test
 
@@ -67,6 +82,7 @@ exposes the operations needed before and after the browser action:
 GET  /internal/nightly/submissions?mode=NIGHTLY
 POST /internal/nightly/submissions/{submission_id}/authorize
 POST /internal/nightly/runs
+POST /internal/nightly/runs/{run_id}/submissions/{submission_id}
 POST /internal/nightly/runs/{run_id}/finish
 ```
 
@@ -135,6 +151,7 @@ $env:GRADESCOPE_PASSWORD="your password"
 $env:GRADING_API_URL="http://localhost:8000"
 $env:INTEGRATION_API_TOKEN="the same token configured for the Web API"
 $env:GRADESCOPE_COURSE_ID="your Gradescope course id"
+$env:GRADESCOPE_RERUN_SUCCESS_TEXT="optional regex matching the Gradescope success message"
 $env:GRADESCOPE_ALLOW_RERUN="1"
 
 npm run nightly:trigger

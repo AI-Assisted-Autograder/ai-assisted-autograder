@@ -1,48 +1,60 @@
-import { GradescopePlatform, SubmissionLocator } from './gradescope-platform';
+import type { IGradingClient, ILearningPlatform, SubmissionLocator, TriggerRunSummary } from './interfaces';
 
-export interface PendingSubmissionRepository {
-  startRun(): Promise<void>;
-  listSubmissionsPendingAi(mode: 'NIGHTLY'): Promise<SubmissionLocator[]>;
-  authorizeForGrading(submissionId: string): Promise<void>;
-  finishRun(summary: TriggerRunSummary): Promise<void>;
-}
-
-export type TriggerRunSummary = {
-  found: number;
-  authorized: number;
-  rerun: number;
-  failed: number;
-};
+export type { TriggerRunSummary } from './interfaces';
 
 /** Coordinates the service authorization and browser action. It never calls an LLM. */
 export class NightlyTrigger {
   public constructor(
-    private readonly repository: PendingSubmissionRepository,
-    private readonly platform: GradescopePlatform,
+    private readonly client: IGradingClient,
+    private readonly platform: ILearningPlatform,
   ) {}
 
   public async run(): Promise<TriggerRunSummary> {
     const summary: TriggerRunSummary = { found: 0, authorized: 0, rerun: 0, failed: 0 };
-    await this.repository.startRun();
+    await this.client.startRun();
+    let runError: unknown;
 
     try {
       await this.platform.authenticate();
-      const pending = await this.repository.listSubmissionsPendingAi('NIGHTLY');
+      const pending: SubmissionLocator[] = await this.client.listSubmissionsPendingAi('NIGHTLY');
       summary.found = pending.length;
 
       for (const submission of pending) {
         try {
           // Authorization must happen before the browser click to avoid a DEFER race.
-          await this.repository.authorizeForGrading(submission.submissionId);
+          await this.client.authorizeForGrading(submission.submissionId);
           summary.authorized += 1;
+          await this.client.recordSubmissionResult(submission.submissionId, 'AUTHORIZED');
           await this.platform.triggerRerun(submission);
           summary.rerun += 1;
-        } catch {
+          await this.client.recordSubmissionResult(submission.submissionId, 'RERUN_SUCCEEDED');
+        } catch (error) {
           summary.failed += 1;
+          const message = error instanceof Error ? error.message : String(error);
+          try {
+            await this.client.recordSubmissionResult(
+              submission.submissionId,
+              'RERUN_FAILED',
+              message,
+            );
+          } catch (recordError) {
+            console.error('Could not record submission failure:', recordError);
+          }
         }
       }
+    } catch (error) {
+      runError = error;
+      summary.fatalError = error instanceof Error ? error.message : String(error);
+      throw error;
     } finally {
-      await this.repository.finishRun(summary);
+      try {
+        await this.client.finishRun(summary);
+      } catch (finishError) {
+        if (runError === undefined) {
+          throw finishError;
+        }
+        console.error('Could not finish the nightly run audit:', finishError);
+      }
     }
 
     return summary;

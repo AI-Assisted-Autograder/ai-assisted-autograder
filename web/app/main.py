@@ -4,11 +4,12 @@ from uuid import UUID
 from fastapi import Depends, FastAPI, Header, HTTPException, Query
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
-from sqlalchemy import func, text
+from sqlalchemy import func, select, text
+from sqlalchemy.exc import IntegrityError
 
 from app.config import settings
 from app.db import SessionLocal, engine
-from app.models import TriggerRun
+from app.models import TriggerRun, TriggerRunSubmission
 from app.repository import NotFoundError, SqlGradingRepository
 from app.ui import router as ui_router
 
@@ -74,14 +75,57 @@ class TriggerRunFinishRequest(BaseModel):
     submissions_failed_to_trigger: int
 
 
+class TriggerRunSubmissionRequest(BaseModel):
+    status: Literal["AUTHORIZED", "RERUN_SUCCEEDED", "RERUN_FAILED"]
+    error_message: str | None = None
+
+
 @app.post("/internal/nightly/runs")
 def start_nightly_run(_: None = Depends(require_integration_token)):
     """Create an audit row before the nightly trigger starts browser work."""
+    try:
+        with SessionLocal.begin() as session:
+            run = TriggerRun(trigger="SCHEDULE", status="RUNNING")
+            session.add(run)
+            session.flush()
+            return {"run_id": str(run.id)}
+    except IntegrityError as error:
+        raise HTTPException(status_code=409, detail="another nightly run is already RUNNING") from error
+
+
+@app.post("/internal/nightly/runs/{run_id}/submissions/{submission_id}")
+def record_nightly_submission(
+    run_id: UUID,
+    submission_id: UUID,
+    request: TriggerRunSubmissionRequest,
+    _: None = Depends(require_integration_token),
+):
+    """Record the latest per-submission outcome for a nightly run."""
     with SessionLocal.begin() as session:
-        run = TriggerRun(trigger="SCHEDULE", status="RUNNING")
-        session.add(run)
-        session.flush()
-        return {"run_id": str(run.id)}
+        run = session.get(TriggerRun, run_id)
+        if run is None:
+            raise HTTPException(status_code=404, detail=f"Trigger run {run_id} not found")
+        if run.finished_at is not None:
+            raise HTTPException(status_code=409, detail=f"Trigger run {run_id} is already finished")
+        record = session.scalar(
+            select(TriggerRunSubmission).where(
+                TriggerRunSubmission.trigger_run_id == run_id,
+                TriggerRunSubmission.submission_id == submission_id,
+            )
+        )
+        if record is None:
+            record = TriggerRunSubmission(
+                trigger_run_id=run_id,
+                submission_id=submission_id,
+                status=request.status,
+                error_message=request.error_message,
+            )
+            session.add(record)
+        else:
+            record.status = request.status
+            record.error_message = request.error_message
+            record.recorded_at = func.now()
+    return {"run_id": str(run_id), "submission_id": str(submission_id), "status": request.status}
 
 
 @app.post("/internal/nightly/runs/{run_id}/finish")
