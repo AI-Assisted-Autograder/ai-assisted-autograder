@@ -224,3 +224,8 @@ __marimo__/
 
 # Streamlit
 .streamlit/secrets.toml
+
+# Local feedback tokens and JSON runtime state.
+.local-vertex/
+application_default_credentials.json
+*service-account*.json

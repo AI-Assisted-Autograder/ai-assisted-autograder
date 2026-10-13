@@ -92,6 +92,96 @@ alembic upgrade head
 uvicorn app.main:app --reload
 ```
 
+## Vertex feedback API (local prototype)
+
+`POST /v1/feedback` uses an assignment Bearer token. The backend determines the
+assignment, checks target scope and limits, builds the prompt with `ai_grading`,
+calls Vertex with its own credentials, and saves the result to JSON. Client
+parameters cannot change the model, Google identity, endpoint or allowance.
+Pages, PostgreSQL data and nightly endpoints keep their existing behavior.
+
+From the repository root, install the backend dependencies:
+
+```bash
+python3 -m venv .venv
+.venv/bin/python -m pip install -r web/requirements.txt
+```
+
+Non-secret defaults are project `project-bcedce55-e972-4a7b-bef`, location `global`,
+model `gemini-3.5-flash-lite`, and the service account below. The backend uses
+impersonation ADC and never reads legacy `.gemini.json`. If needed, install
+`gcloud` and complete its browser login:
+
+```bash
+brew install --cask gcloud-cli
+gcloud auth application-default login \
+  --impersonate-service-account=gradescope-vertex-test@project-bcedce55-e972-4a7b-bef.iam.gserviceaccount.com
+```
+
+Your identity needs permission to impersonate the account, which needs Vertex
+access. Initialize **once**; skip this step to keep an existing experiment:
+
+```bash
+.venv/bin/python -m web.app.seed_feedback \
+  --state .local-vertex/backend/state.json \
+  --token-file .local-vertex/client/token \
+  --client-config .local-vertex/client/config.json \
+  --backend-url http://127.0.0.1:8001 --max-calls 5 --expires-in-hours 24
+```
+
+This creates assignment `demo`, target `example`, a short rubric, and a random
+token. JSON holds only the token hash; the raw token goes into the private client
+file (mode `600`) and is never printed. The client config contains only
+`{"backend_url":"http://127.0.0.1:8001"}`. `.local-vertex/` is Git-ignored.
+Initialization refuses to overwrite files, so it cannot reset existing usage.
+
+Start the local entry point, which needs **no PostgreSQL**, from the root:
+
+```bash
+.venv/bin/python -m web.app.feedback \
+  --state .local-vertex/backend/state.json --port 8001
+```
+
+It exposes status-only `GET /health` and the same feedback router used by the web
+app. To enable that router in the existing PostgreSQL-backed app instead, run:
+
+```bash
+cd web
+FEEDBACK_STATE_PATH=../.local-vertex/backend/state.json PYTHONPATH=.. \
+  ../.venv/bin/uvicorn app.main:app --host 127.0.0.1 --port 8001 --workers 1
+```
+
+Without `FEEDBACK_STATE_PATH`, the app does not load feedback. Use one backend
+process/worker per JSON file; stop it before editing configuration and restart.
+
+In another terminal at the repository root, run the standard-library client:
+
+```bash
+env -i PATH=/usr/bin:/bin /usr/bin/python3 -I -S local_client.py \
+  --backend-url http://127.0.0.1:8001 --token-file .local-vertex/client/token \
+  --code-file examples/vertex_feedback_example.py --target-id example \
+  --guidance 'Explain one edge case and suggest a small improvement.' --json
+```
+
+The clean environment and `-I -S` exclude inherited Google settings and SDKs.
+The client only reads its assignment token and address, and only calls loopback
+HTTP; it never discovers Google credentials or falls back to Google. The request
+contains `request_id`, `target_id`, `code` and optional `guidance`; the response
+contains `request_id`, `feedback_text`, actual `model_name` and available `usage`.
+
+Repeat the identical command to reuse its stable request ID and saved result.
+Different content with the same ID is rejected. `--request-id` can set an explicit
+ID; choose a new one only for an intentional new attempt. Each model attempt
+persists a quota reservation first. Failures, timeouts, missing backend ADC and
+interruptions keep that reservation; failed/interrupted IDs are not retried.
+Restart preserves quota and results, including completed responses, in
+`.local-vertex/backend/state.json`. Locks and atomic writes protect this file.
+
+This prototype is single-worker, uses cumulative call counts, and has no
+deployment or SQL feedback store. It separates credentials at the code/interface
+boundary, not at the OS boundary: the same user or a local administrator can
+still read backend files.
+
 ## Database schema
 
 Tables are defined in `app/models.py`, which mirrors
@@ -161,13 +251,18 @@ read the generated file before committing it.
 
 ```
 app/
-  config.py      Settings read from .env (DATABASE_URL, INTEGRATION_API_TOKEN)
+  config.py      Settings read from .env (including optional FEEDBACK_STATE_PATH)
   db.py          SQLAlchemy engine and SessionLocal
-  main.py        FastAPI app: /health and the /internal/nightly endpoints
+  feedback.py    Feedback router and standalone local entry point
+  feedback_config.py  JSON configuration and request record types
+  feedback_store.py   JSON storage, quota reservation and idempotency
+  main.py        FastAPI app: health, nightly, UI and optional feedback router
   models.py      ORM tables (02-data-model.puml)
   repository/    Data access used by the grading pipeline (below)
   seed.py        Sample data (see "Sample data" above)
+  seed_feedback.py  Initialize JSON feedback state and a private assignment token
   ui.py          Instructor UI pages (below)
+  vertex.py      Backend-owned Vertex client using the existing GeminiProvider
   templates/     Jinja2 templates for the UI
   static/        CSS
 migrations/      Alembic migrations
@@ -311,7 +406,8 @@ different database.
 Done: the schema and migrations, the full repository (SQL and in
 memory) with tests, the sample data script, the internal endpoints the
 nightly trigger calls (shared-token auth), and the read-only instructor
-pages.
+pages. The optional Vertex feedback API uses assignment tokens and JSON storage
+(see above); it is separate from the PostgreSQL grading pipeline.
 
 Not done yet: the REST API the container calls, with per-assignment token
 auth (the schema has no token column yet); in the instructor UI, the

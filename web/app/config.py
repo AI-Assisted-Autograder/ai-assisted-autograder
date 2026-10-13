@@ -6,6 +6,7 @@ class Settings(BaseSettings):
 
     database_url: str = "postgresql+psycopg://autograder:autograder@db:5432/autograder"
     integration_api_token: str | None = None
+    feedback_state_path: str | None = None
 
 
 settings = Settings()
