@@ -275,3 +275,18 @@ class TriggerRun(Base):
     submissions_rerun: Mapped[int | None] = mapped_column(Integer)
     submissions_failed_to_trigger: Mapped[int | None] = mapped_column(Integer)
     log_uri: Mapped[str | None] = mapped_column(Text)
+
+
+class TriggerRunSubmission(Base):
+    __tablename__ = "trigger_run_submission"
+    __table_args__ = (
+        UniqueConstraint("trigger_run_id", "submission_id"),
+        one_of("status", ("AUTHORIZED", "RERUN_SUCCEEDED", "RERUN_FAILED")),
+    )
+
+    id: Mapped[uuid.UUID] = uuid_pk()
+    trigger_run_id: Mapped[uuid.UUID] = mapped_column(ForeignKey("trigger_run.id"), index=True)
+    submission_id: Mapped[uuid.UUID] = mapped_column(ForeignKey("submission.id"), index=True)
+    status: Mapped[str] = mapped_column(Text)
+    error_message: Mapped[str | None] = mapped_column(Text)
+    recorded_at: Mapped[datetime] = created_now()

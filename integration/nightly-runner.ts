@@ -1,6 +1,6 @@
 import { chromium } from '@playwright/test';
 
-import { GradingApiClient } from './grading-api-client';
+import { HttpGradingClient } from './grading-api-client';
 import { GradescopePlatform } from './gradescope-platform';
 import { NightlyTrigger } from './nightly-trigger';
 
@@ -15,7 +15,7 @@ async function main(): Promise<void> {
       baseURL: process.env.GRADESCOPE_BASE_URL ?? 'https://www.gradescope.com',
     });
     const summary = await new NightlyTrigger(
-      new GradingApiClient(),
+      new HttpGradingClient(),
       new GradescopePlatform(page),
     ).run();
     console.log(JSON.stringify(summary));

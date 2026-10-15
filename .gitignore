@@ -152,6 +152,9 @@ activemq-data/
 
 # Environments
 .env
+.env.local
+.env.local.*
+!.env.local.example
 .envrc
 .venv
 env/
@@ -216,6 +219,7 @@ tempCodeRunnerFile.py
 node_modules/
 playwright-report/
 test-results/
+logs/
 
 # Marimo
 marimo/_static/
