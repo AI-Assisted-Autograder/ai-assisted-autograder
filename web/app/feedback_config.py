@@ -1,4 +1,4 @@
-"""Validated, backend-owned JSON configuration and durable state records."""
+"""Validated database configuration and backend-owned runtime state records."""
 
 from datetime import datetime
 from typing import Annotated, Any, Literal
@@ -36,25 +36,30 @@ class BackendConfig(StrictModel):
 
 
 class RubricConfig(StrictModel):
-    criteria_text: str = Field(min_length=1, max_length=16_000)
+    criteria_text: str = Field(min_length=1, max_length=16_000, pattern=r"\S")
     feedback_guidance: str = Field(default="", max_length=8_000)
     version: int = Field(default=1, ge=1)
-    id: Identifier = "demo-rubric"
+    id: Identifier
 
 
 class TargetConfig(StrictModel):
-    identifier: str = Field(default="example.py", min_length=1, max_length=256)
-    kind: Literal["FILE", "METHOD", "CLASS"] = "FILE"
-    source_path: str = Field(default="example.py", min_length=1, max_length=256)
+    identifier: str = Field(min_length=1, max_length=256)
+    kind: Literal["FILE", "METHOD", "CLASS"]
+    source_path: str = Field(min_length=1, max_length=256)
     rubric: RubricConfig
 
 
 class AssignmentConfig(StrictModel):
+    id: Identifier
     enabled: bool = True
     model: ModelName
+    targets: Annotated[dict[Identifier, TargetConfig], Field(min_length=1)]
+
+
+class AssignmentAccess(StrictModel):
+    enabled: bool = True
     max_calls: int = Field(default=5, ge=0, le=100_000)
     used_calls: int = Field(default=0, ge=0)
-    targets: Annotated[dict[Identifier, TargetConfig], Field(min_length=1)]
 
 
 class TokenRecord(StrictModel):
@@ -104,17 +109,15 @@ class RequestRecord(StrictModel):
 
 
 class State(StrictModel):
-    schema_version: Literal[1] = 1
+    schema_version: Literal[2] = 2
     config: BackendConfig
-    assignments: dict[Identifier, AssignmentConfig]
+    assignments: dict[Identifier, AssignmentAccess]
     tokens: dict[Digest, TokenRecord]
     requests: dict[Identifier, dict[Identifier, RequestRecord]] = Field(default_factory=dict)
 
     @model_validator(mode="after")
     def validate_relationships(self) -> "State":
         for assignment_id, assignment in self.assignments.items():
-            if assignment.model not in self.config.allowed_models:
-                raise ValueError("assignment model must be allowed by backend policy")
             if assignment.used_calls < len(self.requests.get(assignment_id, {})):
                 raise ValueError("quota counter cannot be below reserved request count")
         for token in self.tokens.values():

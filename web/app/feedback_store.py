@@ -17,7 +17,7 @@ import threading
 from datetime import datetime, timezone
 from typing import Any
 
-from .feedback_config import AssignmentConfig, BackendConfig, RequestRecord, State
+from .feedback_config import AssignmentAccess, BackendConfig, RequestRecord, State
 
 
 class StoreError(Exception):
@@ -145,7 +145,7 @@ class JsonStore:
                 raise StoreError("assignment_forbidden", 403)
             return token.assignment_id
 
-    def get_assignment(self, assignment_id: str) -> AssignmentConfig:
+    def get_assignment(self, assignment_id: str) -> AssignmentAccess:
         with self._mutex:
             self._ensure_open()
             assignment = self._state.assignments.get(assignment_id)
@@ -172,12 +172,12 @@ class JsonStore:
             raise StoreError("state_unavailable") from None
 
     def reserve(self, assignment_id: str, request_id: str, digest: str,
-                target_id: str) -> tuple[RequestRecord, bool]:
+                target_id: str, model: str) -> tuple[RequestRecord, bool]:
         with self._mutex:
             self._ensure_open()
             assignment = self.get_assignment(assignment_id)
-            if target_id not in assignment.targets:
-                raise StoreError("target_forbidden", 403)
+            if model not in self._state.config.allowed_models:
+                raise StoreError("assignment_config_unavailable")
             existing = self._state.requests.get(assignment_id, {}).get(request_id)
             if existing is not None:
                 if existing.digest != digest:
@@ -187,7 +187,7 @@ class JsonStore:
                 raise StoreError("quota_exceeded", 429)
             now = utc_now()
             record = RequestRecord(request_id=request_id, target_id=target_id,
-                                   model=assignment.model, digest=digest,
+                                   model=model, digest=digest,
                                    status="processing", created_at=now, updated_at=now)
             candidate = self._state.model_copy(deep=True)
             candidate.assignments[assignment_id].used_calls += 1

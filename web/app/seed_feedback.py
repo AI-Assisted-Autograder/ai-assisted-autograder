@@ -1,4 +1,4 @@
-"""Initialize local JSON state and issue one private assignment token.
+"""Issue a private token and initialize runtime state for an existing DB assignment.
 
 No overwrite/reset mode exists. This tool never prints a token or loads Google
 credentials. Initialization is intended for a new local demonstration directory.
@@ -10,9 +10,10 @@ import math
 from datetime import timedelta
 from pathlib import Path
 import secrets
+from uuid import UUID
 
 from .feedback_config import (
-    AssignmentConfig, BackendConfig, RubricConfig, State, TargetConfig, TokenRecord,
+    AssignmentAccess, BackendConfig, State, TokenRecord,
 )
 from .feedback_store import atomic_write, token_hash, utc_now
 
@@ -31,6 +32,7 @@ def initialize(
     token_path: str | Path = ".local-vertex/client/token",
     client_config_path: str | Path = ".local-vertex/client/config.json",
     *,
+    assignment_id: str,
     max_calls: int = 5,
     expires_in_hours: float = 24.0,
     backend_url: str = DEFAULT_BACKEND_URL,
@@ -38,6 +40,7 @@ def initialize(
     """Create config/state and issue a random token; refuse every existing output."""
     from urllib.parse import urlsplit
 
+    assignment_id = str(UUID(assignment_id))
     address = urlsplit(backend_url)
     if (not address.hostname or not (address.scheme == "https" or (
             address.scheme == "http" and address.hostname in ("127.0.0.1", "::1")))
@@ -57,17 +60,9 @@ def initialize(
         config=BackendConfig(project=DEFAULT_PROJECT, location=DEFAULT_LOCATION,
                              service_account=DEFAULT_SERVICE_ACCOUNT,
                              allowed_models=[DEFAULT_MODEL]),
-        assignments={"demo": AssignmentConfig(
-            model=DEFAULT_MODEL, max_calls=max_calls,
-            targets={"example": TargetConfig(rubric=RubricConfig(
-                criteria_text=("Review whether the function correctly computes an average, "
-                               "including its behavior for empty input. "
-                               "Give concise, constructive feedback on correctness and clarity. "
-                               "Do not assign a numerical score."),
-            ))},
-        )},
+        assignments={assignment_id: AssignmentAccess(max_calls=max_calls)},
         tokens={token_hash(raw_token): TokenRecord(
-            assignment_id="demo", expires_at=utc_now() + timedelta(hours=expires_in_hours),
+            assignment_id=assignment_id, expires_at=utc_now() + timedelta(hours=expires_in_hours),
         )},
     )
     payloads = (
@@ -92,19 +87,22 @@ def main() -> int:
     parser.add_argument("--state", default=".local-vertex/backend/state.json")
     parser.add_argument("--token-file", default=".local-vertex/client/token")
     parser.add_argument("--client-config", default=".local-vertex/client/config.json")
+    parser.add_argument("--assignment-id", required=True, type=UUID,
+                        help="Existing database assignment UUID; does not create database rows")
     parser.add_argument("--max-calls", type=int, default=5)
     parser.add_argument("--expires-in-hours", type=float, default=24.0)
     parser.add_argument("--backend-url", default=DEFAULT_BACKEND_URL)
     args = parser.parse_args()
     try:
         initialize(args.state, args.token_file, args.client_config,
+                   assignment_id=str(args.assignment_id),
                    max_calls=args.max_calls, expires_in_hours=args.expires_in_hours,
                    backend_url=args.backend_url)
     except FileExistsError:
         parser.exit(2, "Initialization refused: an output already exists or paths overlap.\n")
     except Exception:
         parser.exit(2, "Initialization failed: check paths and non-sensitive settings.\n")
-    print("Initialized assignment demo, target example; private token written to the token file.")
+    print(f"Initialized runtime state for assignment {args.assignment_id}; private token written to the token file.")
     print("No token or Google credentials are included in this output.")
     return 0
 

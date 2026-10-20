@@ -1,7 +1,7 @@
 from typing import Literal
 from uuid import UUID
 
-from fastapi import Depends, FastAPI, Header, HTTPException, Query
+from fastapi import Depends, FastAPI, Header, HTTPException, Query, Response
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
 from sqlalchemy import func, select, text
@@ -9,6 +9,9 @@ from sqlalchemy.exc import IntegrityError
 
 from app.config import settings
 from app.db import SessionLocal, engine
+from .feedback_assignment import read_assignment_config
+from .feedback_config import AssignmentConfig
+from .feedback_store import StoreError
 from app.models import TriggerRun, TriggerRunSubmission
 from app.repository import NotFoundError, SqlGradingRepository
 from app.ui import router as ui_router
@@ -22,7 +25,12 @@ grading_repository = SqlGradingRepository(SessionLocal)
 if settings.feedback_state_path:
     from .feedback import create_feedback_router
 
-    app.include_router(create_feedback_router(settings.feedback_state_path))
+    app.include_router(create_feedback_router(
+        settings.feedback_state_path,
+        assignment_loader=lambda assignment_id: read_assignment_config(
+            grading_repository, assignment_id,
+        ),
+    ))
 
 
 def require_integration_token(x_internal_token: str | None = Header(default=None)) -> None:
@@ -36,6 +44,23 @@ def health():
     with engine.connect() as conn:
         conn.execute(text("SELECT 1"))
     return {"status": "ok"}
+
+
+@app.get("/internal/assignments/{assignment_id}/config", response_model=AssignmentConfig)
+def assignment_config(
+    assignment_id: UUID,
+    response: Response,
+    _: None = Depends(require_integration_token),
+):
+    """Read current feedback configuration without recording submissions or feedback."""
+    response.headers["Cache-Control"] = "no-store"
+    try:
+        return read_assignment_config(grading_repository, str(assignment_id))
+    except StoreError as error:
+        raise HTTPException(
+            status_code=error.status_code, detail=error.code,
+            headers={"Cache-Control": "no-store"},
+        ) from None
 
 
 @app.get("/internal/nightly/submissions")
