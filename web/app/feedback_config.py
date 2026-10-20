@@ -47,7 +47,7 @@ class RubricConfig(RubricInput):
 
 
 class TargetConfig(StrictModel):
-    identifier: str = Field(min_length=1, max_length=256)
+    identifier: str = Field(min_length=1, max_length=256, pattern=r"\S")
     kind: Literal["FILE", "METHOD", "CLASS"]
     source_path: str = Field(min_length=1, max_length=256)
     rubric: RubricConfig

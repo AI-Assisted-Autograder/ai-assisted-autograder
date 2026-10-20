@@ -76,7 +76,7 @@ def create_feedback_router(state_path: str | Path, *, assignment_loader,
         try:
             store = JsonStore(Path(state_path))
         except Exception:
-            raise RuntimeError("Local backend state is unavailable or locked.") from None
+            raise RuntimeError("Backend state is unavailable or locked.") from None
         runtime.store = store
         runtime.providers = {}
         runtime.provider_lock = threading.Lock()
@@ -284,7 +284,7 @@ def main():
     from .feedback_assignment import HttpAssignmentConfigReader
 
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--state", type=Path, default=Path(".local-vertex/backend/state.json"))
+    parser.add_argument("--state", type=Path, default=Path("ai_grading/.local-vertex/backend/state.json"))
     parser.add_argument("--port", type=int, default=8001)
     parser.add_argument("--assignment-api-url", default=os.environ.get("ASSIGNMENT_API_URL"),
                         help="Web API HTTPS or loopback origin; defaults to ASSIGNMENT_API_URL")

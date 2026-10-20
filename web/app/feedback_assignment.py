@@ -49,9 +49,8 @@ def read_assignment_config(repository, assignment_id: str) -> AssignmentConfig:
         targets = {}
         for target in assignment.targets:
             rubric = target.rubric
-            if (not target.identifier.strip() or rubric is None
-                    or not (rubric.criteria_text or "").strip()):
-                raise ValueError("Each target requires an identifier and current rubric")
+            if rubric is None:
+                raise ValueError("Each target requires a current rubric")
             targets[str(target.id)] = TargetConfig(
                 identifier=target.identifier,
                 kind=target.kind,
