@@ -1,56 +1,79 @@
-# AI grading (Student A)
+# AI grading (Ivan)
 
-Python library for generating feedback on one grading target at a time.
-The grading core, three LLM provider adapters, and FakeProvider are implemented.
-FakeProvider returns fixed feedback without API calls for offline integration.
-Integration with the Web module and Gradescope is not implemented yet.
+AI feedback for submitted code, with a reusable Python core and a Gradescope
+client. The current integration uses the Web backend and Google Vertex AI.
 
-## Setup
+## Current flow
 
-Install dependencies before importing the `ai_grading` module.
-Run these commands from the repository root, using the same Python environment as the program calling it.
+1. The Gradescope connector sends source code, a DB target UUID and visible
+   functional-test diagnostics to `POST /v1/feedback`, using an assignment token.
+2. The Web backend authenticates the token, reads assignment/target/rubric/model
+   configuration from PostgreSQL, checks limits and calls Vertex.
+3. Feedback is appended to Gradescope `results.json` as a `0/0` row. This path
+   does not write submissions, test results or feedback to DB. Backend JSON keeps
+   token hashes, call quota and replay responses.
+
+Google credentials stay on the backend, which uses service-account impersonation
+ADC. The Gradescope package contains only an assignment token for authentication;
+it does not need Google credentials or a provider SDK.
+
+## Use the backend
+
+Follow the [Web deployment guide](../web/README.md#deploy-the-combined-web-and-ai-backend)
+to configure the DB assignment, model, Google identity and assignment token.
+For a local backend process, install `web/requirements.txt`; Docker installs those
+dependencies during its build.
+
+The HTTP client uses only the Python standard library. From the repository root:
 
 ```bash
-python3 -m venv .venv
-source .venv/bin/activate  # .venv\Scripts\activate on Windows
-python -m pip install -r ai_grading/requirements.txt
+python3 -I -S ai_grading/local_client.py \
+  --backend-url https://YOUR-SERVER \
+  --token-file ai_grading/.local-vertex/server-client/assignment.token \
+  --code-file /absolute/path/to/SortedCollection.java \
+  --target-id YOUR_TARGET_UUID --json
 ```
 
-## Configure a provider
+`--code-file` is required; `--target-id` is the DB target UUID. Public backend
+URLs must use HTTPS. For Gradescope, map `targets[].source` to the submitted file
+and `targets[].target_id` to that UUID, then follow the
+[packaging steps](../web/README.md#package-and-run-in-gradescope).
+The build copies the canonical `local_client.py` into the ZIP; keep tokens and
+generated ZIPs out of Git.
 
-A Gemini free-tier API is available for testing through
-[`.gemini.json`](ILLMProvider/.gemini.json). `GeminiProvider()` loads the model and API key from this file, so the example below needs no environment variables.
+## Module layout
 
-To use other credentials, set the model and API key:
+| Location | Responsibility |
+| --- | --- |
+| [local_client.py](local_client.py) | Assignment-token HTTP client and CLI |
+| [autograder-vertex-feedback/](autograder-vertex-feedback/) | Gradescope connector, functional-grader package and ZIP builder |
+| [models.py](models.py) | Typed source, target, rubric, request and response contracts |
+| [FileResolver.py](FileResolver.py) | Resolve a target to one source file without executing student code |
+| [PromptBuilder.py](PromptBuilder.py) | Build prompts from code, rubric and test diagnostics |
+| [ILLMProvider/](ILLMProvider/) | Gemini, OpenAI, Claude and offline FakeProvider adapters |
+| [AIGradingComponent.py](AIGradingComponent.py) | Reusable provider orchestration, retries and result selection |
+| [web/app/](../web/app/) | HTTP routes, DB configuration, token/quota state and Vertex credentials |
 
-| Provider | Model variable | API key variable |
-| --- | --- | --- |
-| OpenAI | `OPENAI_MODEL` | `OPENAI_API_KEY` |
-| Claude | `ANTHROPIC_MODEL` | `ANTHROPIC_API_KEY` |
-| Gemini | `GEMINI_MODEL` | `GEMINI_API_KEY` or `GOOGLE_API_KEY` |
+## Reuse the Python core
 
-## Call from Python
+Install `ai_grading/requirements.txt` to use the core and provider adapters directly.
+Construct a `FeedbackRequest` with `target`, `rubric`, `resolved` source and
+`functional_test_feedback`. `FileResolver.resolve(...)` can supply the source;
+`AIGradingComponent(providers).grade(request)` returns provider responses and a
+selected result. The default selector chooses the first provider, without quality
+ranking; `FakeProvider` supports offline use.
 
-For container deployment, include the `ai_grading/` source folder and make it importable by the Python entrypoint.
-Prepare a [`FeedbackRequest`](models.py) with `target` (the item to grade),
-`rubric` (grading rules), `resolved` (source contents and other file paths),
-and `functional_test_feedback` (messages from the instructor's tests, in reporting order).
-Use [`FileResolver`](FileResolver.py) to read the source:
-`FileResolver().resolve(identifier, kind, language, submission_dir)` returns `resolved`.
+The current Web route calls `VertexProvider` → `GeminiProvider` directly.
+`AIGradingComponent` is available for other integrations; its optional scores and
+comparison fields are not exposed by the current Gradescope feedback flow.
 
-```python
-from ai_grading.AIGradingComponent import AIGradingComponent
-from ai_grading.ILLMProvider.GeminiProvider import GeminiProvider
-from ai_grading.models import FeedbackRequest
+## Current limits
 
-def grade_target(request: FeedbackRequest):
-    provider = GeminiProvider()
-    try:
-        return AIGradingComponent([provider]).grade(request)
-    finally:
-        provider.close()
-```
-
-Call `result = grade_target(request)`. Read `result.selected.feedback_text` for
-feedback and `result.selected.suggested_score` for the optional score.
-The caller handles fetching backend data, saving results and updating submission state.
+- The supplied ZIP uses the SortedCollection/Java grader. Other assignments need
+  an instructor-provided functional grader and invocation hook.
+- AI failure preserves functional scores; compilation failure currently skips AI.
+- A local-backend Gradescope-to-Vertex run was verified. Deployment and the full
+  server DB-to-Vertex-to-Gradescope flow still need verification.
+- OpenAI/Claude adapters and the older `autograder-gemini-feedback/` package remain
+  in the repository. They are not the current Vertex integration path; their live
+  integrations are not all verified.
