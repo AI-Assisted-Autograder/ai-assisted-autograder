@@ -19,6 +19,11 @@ app.mount("/static", StaticFiles(directory="app/static"), name="static")
 app.include_router(ui_router)
 grading_repository = SqlGradingRepository(SessionLocal)
 
+if settings.feedback_state_path:
+    from .feedback import create_feedback_router
+
+    app.include_router(create_feedback_router(settings.feedback_state_path))
+
 
 def require_integration_token(x_internal_token: str | None = Header(default=None)) -> None:
     """Protect integration endpoints with a shared secret."""

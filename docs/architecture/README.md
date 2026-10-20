@@ -4,6 +4,13 @@ UML documentation for the Automated Code Feedback system. Sources are
 PlantUML (`.puml`); rendered SVG and PNG are committed under `rendered/`
 by the `Render UML` GitHub Actions workflow.
 
+On `vertex-backend-refactor`, the [web Vertex feedback
+API](../../web/README.md#vertex-feedback-api-local-prototype) supersedes AD-4 for its client path:
+clients hold assignment tokens, and the backend owns Google authentication,
+proxies Vertex calls, and persists quota and results in JSON. The diagrams below
+still describe the earlier architecture; this local experiment does not change
+the existing nightly or container flow.
+
 Edit the `.puml` sources, never the images. The workflow re-renders on
 every push to `main` and fails a pull request whose committed images are
 stale.

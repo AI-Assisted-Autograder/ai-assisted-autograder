@@ -31,11 +31,13 @@ class GeminiProvider:
         max_output_tokens: int = 4096,
         builder: PromptBuilder | None = None,
     ) -> None:
-        model = model if model is not None else os.getenv("GEMINI_MODEL")
+        # An injected backend client must never consult legacy caller credentials.
+        model = model if model is not None else (os.getenv("GEMINI_MODEL") if client is None else None)
         api_key = api_key if api_key is not None else (
-            os.getenv("GEMINI_API_KEY") or os.getenv("GOOGLE_API_KEY")
+            (os.getenv("GEMINI_API_KEY") or os.getenv("GOOGLE_API_KEY"))
+            if client is None else None
         )
-        if (model is None or (client is None and api_key is None)) and LOCAL_CONFIG_PATH.is_file():
+        if client is None and (model is None or api_key is None) and LOCAL_CONFIG_PATH.is_file():
             config = json.loads(LOCAL_CONFIG_PATH.read_text(encoding="utf-8"))
             if model is None:
                 model = config.get("model")
