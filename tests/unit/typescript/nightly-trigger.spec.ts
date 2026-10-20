@@ -1,9 +1,9 @@
 import { expect, test } from '@playwright/test';
 
-import { FakeGradingClient } from '../../integration/fake-grading-client';
-import { FakePlatform } from '../../integration/fake-platform';
-import { NightlyTrigger } from '../../integration/nightly-trigger';
-import type { SubmissionLocator } from '../../integration/interfaces';
+import { FakeGradingClient } from '../../../integration/fake-grading-client';
+import { FakePlatform } from '../../../integration/fake-platform';
+import { NightlyTrigger } from '../../../integration/nightly-trigger';
+import type { SubmissionLocator } from '../../../integration/interfaces';
 
 const submissions: SubmissionLocator[] = [
   {
