@@ -7,8 +7,24 @@ from urllib.parse import urlsplit
 from urllib.request import HTTPRedirectHandler, ProxyHandler, Request, build_opener
 from uuid import UUID
 
-from .feedback_config import AssignmentConfig, RubricConfig, TargetConfig
+from pydantic import TypeAdapter
+
+from .feedback_config import AssignmentConfig, ModelName, RubricConfig, TargetConfig
 from .feedback_store import StoreError
+
+
+MAX_CONFIG_BYTES = 1_048_576
+
+
+def primary_google_model(providers) -> str:
+    """Select the existing primary model without changing global provider policy."""
+    primary = [provider for provider in providers if provider.is_primary]
+    try:
+        if len(primary) != 1 or primary[0].provider != "GOOGLE":
+            raise ValueError("An enabled primary Google provider is required")
+        return TypeAdapter(ModelName).validate_python(primary[0].model_name)
+    except ValueError:
+        raise StoreError("assignment_config_unavailable", 503) from None
 
 
 def read_assignment_config(repository, assignment_id: str) -> AssignmentConfig:
@@ -29,9 +45,7 @@ def read_assignment_config(repository, assignment_id: str) -> AssignmentConfig:
     if not assignment.is_active:
         raise StoreError("assignment_forbidden", 403)
     try:
-        primary = [provider for provider in assignment.providers if provider.is_primary]
-        if len(primary) != 1 or primary[0].provider != "GOOGLE":
-            raise ValueError("An enabled primary Google provider is required")
+        model = primary_google_model(assignment.providers)
         targets = {}
         for target in assignment.targets:
             rubric = target.rubric
@@ -50,7 +64,7 @@ def read_assignment_config(repository, assignment_id: str) -> AssignmentConfig:
             )
         return AssignmentConfig(
             id=str(assignment.id), enabled=assignment.is_active,
-            model=primary[0].model_name, targets=targets,
+            model=model, targets=targets,
         )
     except (TypeError, ValueError):
         raise StoreError("assignment_config_unavailable", 503) from None
@@ -102,8 +116,8 @@ class HttpAssignmentConfigReader:
         )
         try:
             with self._opener.open(request, timeout=self._timeout) as response:
-                raw = response.read(1_048_577)
-            if len(raw) > 1_048_576:
+                raw = response.read(MAX_CONFIG_BYTES + 1)
+            if len(raw) > MAX_CONFIG_BYTES:
                 raise ValueError("Assignment configuration exceeds the response limit")
             assignment = AssignmentConfig.model_validate_json(raw)
             if assignment.id != key:

@@ -2,6 +2,7 @@
 
 from datetime import datetime
 from typing import Annotated, Any, Literal
+from uuid import UUID
 
 from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
@@ -35,9 +36,12 @@ class BackendConfig(StrictModel):
         return value
 
 
-class RubricConfig(StrictModel):
+class RubricInput(StrictModel):
     criteria_text: str = Field(min_length=1, max_length=16_000, pattern=r"\S")
     feedback_guidance: str = Field(default="", max_length=8_000)
+
+
+class RubricConfig(RubricInput):
     version: int = Field(default=1, ge=1)
     id: Identifier
 
@@ -54,6 +58,41 @@ class AssignmentConfig(StrictModel):
     enabled: bool = True
     model: ModelName
     targets: Annotated[dict[Identifier, TargetConfig], Field(min_length=1)]
+
+
+class CourseInput(StrictModel):
+    name: str = Field(min_length=1, max_length=256, pattern=r"\S")
+    term: str | None = Field(default=None, max_length=128)
+
+
+class TargetInput(StrictModel):
+    identifier: str = Field(min_length=1, max_length=256, pattern=r"\S")
+    kind: Literal["FILE", "METHOD", "CLASS"] = "FILE"
+    rubric: RubricInput
+
+
+class AssignmentCreateInput(StrictModel):
+    course_id: UUID | None = Field(default=None, strict=False)
+    course: CourseInput | None = None
+    platform: Literal["GRADESCOPE"] = "GRADESCOPE"
+    platform_assignment_id: str = Field(min_length=1, max_length=256, pattern=r"\S")
+    name: str = Field(min_length=1, max_length=256, pattern=r"\S")
+    language: str = Field(min_length=1, max_length=64, pattern=r"\S")
+    grading_mode: Literal["IMMEDIATE", "NIGHTLY"] = "IMMEDIATE"
+    targets: list[TargetInput] = Field(min_length=1, max_length=64)
+
+    @model_validator(mode="after")
+    def validate_configuration(self) -> "AssignmentCreateInput":
+        if (self.course_id is None) == (self.course is None):
+            raise ValueError("Provide either course_id or a new course, not both")
+        identifiers = [target.identifier for target in self.targets]
+        if len(identifiers) != len(set(identifiers)):
+            raise ValueError("Target identifiers must be unique within the assignment")
+        return self
+
+
+class CreatedAssignmentConfig(AssignmentConfig):
+    course_id: UUID
 
 
 class AssignmentAccess(StrictModel):

@@ -9,10 +9,14 @@ from sqlalchemy.exc import IntegrityError
 
 from app.config import settings
 from app.db import SessionLocal, engine
-from .feedback_assignment import read_assignment_config
-from .feedback_config import AssignmentConfig
+from .feedback_assignment import MAX_CONFIG_BYTES, primary_google_model, read_assignment_config
+from .feedback_config import (
+    AssignmentConfig, AssignmentCreateInput, CreatedAssignmentConfig, RubricConfig, TargetConfig,
+)
 from .feedback_store import StoreError
-from app.models import TriggerRun, TriggerRunSubmission
+from app.models import (
+    Assignment, Course, GradingTarget, LlmProviderConfig, Rubric, TriggerRun, TriggerRunSubmission,
+)
 from app.repository import NotFoundError, SqlGradingRepository
 from app.ui import router as ui_router
 
@@ -61,6 +65,79 @@ def assignment_config(
             status_code=error.status_code, detail=error.code,
             headers={"Cache-Control": "no-store"},
         ) from None
+
+
+@app.post("/internal/assignments", status_code=201, response_model=CreatedAssignmentConfig)
+def create_assignment(
+    request: AssignmentCreateInput,
+    response: Response,
+    _: None = Depends(require_integration_token),
+):
+    """Atomically create instructor configuration; never write submission or feedback data."""
+    try:
+        with SessionLocal.begin() as session:
+            existing = session.scalar(select(Assignment.id).where(
+                Assignment.platform == request.platform,
+                Assignment.platform_assignment_id == request.platform_assignment_id,
+            ))
+            if existing is not None:
+                raise HTTPException(status_code=409, detail="Assignment already exists for this platform ID")
+            model = primary_google_model(session.scalars(
+                select(LlmProviderConfig).where(LlmProviderConfig.is_enabled)
+            ).all())
+            if request.course_id is not None:
+                course = session.get(Course, request.course_id)
+                if course is None:
+                    raise HTTPException(status_code=404, detail="Course not found")
+            else:
+                course = Course(name=request.course.name, term=request.course.term)
+                session.add(course)
+                session.flush()
+            assignment = Assignment(
+                course_id=course.id, platform=request.platform,
+                platform_assignment_id=request.platform_assignment_id,
+                name=request.name, language=request.language,
+                grading_mode=request.grading_mode, is_active=True,
+            )
+            session.add(assignment)
+            session.flush()
+            targets = {}
+            for order, item in enumerate(request.targets):
+                target = GradingTarget(
+                    assignment_id=assignment.id, identifier=item.identifier,
+                    kind=item.kind, display_order=order,
+                )
+                session.add(target)
+                session.flush()
+                rubric = Rubric(
+                    grading_target_id=target.id, version=1, is_current=True,
+                    criteria_text=item.rubric.criteria_text,
+                    feedback_guidance=item.rubric.feedback_guidance,
+                )
+                session.add(rubric)
+                session.flush()
+                targets[str(target.id)] = TargetConfig(
+                    identifier=target.identifier, kind=target.kind,
+                    source_path=target.identifier if target.kind == "FILE" else "submitted-source",
+                    rubric=RubricConfig(id=str(rubric.id), version=rubric.version,
+                                        **item.rubric.model_dump()),
+                )
+            result = CreatedAssignmentConfig(
+                id=str(assignment.id), course_id=course.id, enabled=True,
+                model=model, targets=targets,
+            )
+            if len(result.model_dump_json().encode("utf-8")) > MAX_CONFIG_BYTES:
+                raise HTTPException(status_code=413, detail="Assignment configuration exceeds 1 MiB")
+    except StoreError:
+        raise HTTPException(
+            status_code=503,
+            detail="Configure an enabled primary GOOGLE provider with a supported Gemini model first",
+        ) from None
+    except IntegrityError:
+        raise HTTPException(status_code=409, detail="Assignment configuration conflicts with existing data") from None
+    response.headers["Cache-Control"] = "no-store"
+    response.headers["Location"] = f"/internal/assignments/{result.id}/config"
+    return result
 
 
 @app.get("/internal/nightly/submissions")

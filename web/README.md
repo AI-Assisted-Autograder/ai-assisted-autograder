@@ -41,9 +41,9 @@ follows the server output, and `docker compose down` stops everything
 (the database volume is kept).
 
 `.env.example` sets `INTEGRATION_API_TOKEN` to `local-development-token`.
-The `/internal/nightly/...` endpoints return 401 unless requests send
-that value in an `X-Internal-Token` header, so the nightly trigger in
-`integration/` must use the same token. Restart the containers after
+The `/internal/nightly/...` and assignment configuration endpoints return 401
+unless requests send that value in an `X-Internal-Token` header. The nightly
+trigger in `integration/` must use the same token. Restart the containers after
 changing `.env`.
 
 ### Sample data
@@ -113,11 +113,11 @@ Vertex again. It is backend state, not a Web feedback history or SQL store.
 
 ### Prepare the database configuration
 
-Have the Web/DB owner populate the existing configuration tables for the desired
-assignment: `course`, `assignment`, `grading_target`, `rubric`, and the global
-`llm_provider_config`. No migration or new write endpoint is required by this
-change. The general `app.seed` command also creates submissions and feedback;
-do not use it for a configuration-only setup on a shared database.
+Have the Web/DB owner configure the global `llm_provider_config` first. Then use
+the authenticated creation API below to insert an assignment, its targets and
+current rubrics into the existing tables. No migration is required. The general
+`app.seed` command also creates submissions and feedback; do not use it for a
+configuration-only setup on a shared database.
 
 Requirements:
 
@@ -132,6 +132,62 @@ Requirements:
   targets use the neutral prompt source label `submitted-source`. Actual source
   selection remains in the container's `targets[].source`.
 
+`POST /internal/assignments` creates an active assignment atomically, with targets
+in request order and version 1 current rubrics. Supply either an existing
+`course_id` UUID or an explicit `course` object with a required `name` and optional
+`term`. An explicit course is created in the same transaction; names are never
+used to find or overwrite an existing course.
+
+After the Web/DB teammate deploys the configuration endpoints, set the API origin
+and internal token, then create the configuration:
+
+```bash
+export ASSIGNMENT_API_URL=https://YOUR-WEB-HOST
+export INTEGRATION_API_TOKEN=YOUR_INTERNAL_TOKEN
+curl --fail -i -H "X-Internal-Token: $INTEGRATION_API_TOKEN" \
+  -H "Content-Type: application/json" --data-binary @- \
+  "$ASSIGNMENT_API_URL/internal/assignments" <<'JSON'
+{
+  "course": {"name": "AI Feedback Integration", "term": "Fall 2026"},
+  "platform_assignment_id": "YOUR_GRADESCOPE_ASSIGNMENT_ID",
+  "name": "Sorted Collection Feedback",
+  "language": "JAVA",
+  "targets": [
+    {
+      "identifier": "SortedCollection.java",
+      "kind": "FILE",
+      "rubric": {
+        "criteria_text": "Review correctness and clarity using the supplied functional test diagnostics.",
+        "feedback_guidance": "Give concise, actionable feedback. Use SCORE: NONE; do not assign a grade."
+      }
+    }
+  ]
+}
+JSON
+```
+
+To reuse a course, replace `course` with `"course_id": "YOUR_COURSE_UUID"`.
+`platform` defaults to `GRADESCOPE`; `grading_mode` defaults to `IMMEDIATE` and
+also accepts `NIGHTLY`. The request accepts 1–64 targets with unique, nonblank
+identifiers (up to 256 characters); `kind` defaults to `FILE` and also accepts
+`METHOD` or `CLASS`. Assignment name and platform assignment ID are required,
+nonblank and limited to 256 characters; language is required and limited to 64.
+Rubric criteria must be nonblank and at most 16,000 characters; guidance defaults
+to empty and allows 8,000 characters. Client IDs, rubric versions, scores and
+provider settings are not accepted.
+
+Success returns **201** with the same configuration as the GET endpoint below,
+plus `course_id`. Save `id` as the assignment UUID and the `targets` object keys
+as target UUIDs; each rubric includes its generated ID. `Location` points to the
+read endpoint, and the response uses `Cache-Control: no-store`.
+
+A duplicate `(platform, platform_assignment_id)` returns **409** without
+overwriting anything; a missing course returns **404**. Invalid input returns
+**422**, configuration larger than 1 MiB returns **413**, and a missing or
+unsupported enabled primary Google provider returns **503**. Creation leaves
+the global provider configuration unchanged. It does not issue assignment tokens,
+write submissions or feedback, or connect this flow to nightly execution.
+
 The protected read endpoint is:
 
 ```text
@@ -145,8 +201,7 @@ Each target includes its identifier, kind, source label and current rubric
 inactive assignments return 403; incomplete or unsupported configuration returns
 503. These failures do not reserve an AI call.
 
-The Web/DB teammate must deploy this endpoint before the local AI backend can
-use it. The local reader accepts HTTPS or loopback HTTP. For the currently shared
+The local reader accepts HTTPS or loopback HTTP. For the currently shared
 HTTP server address, use a teammate-provided HTTPS origin or an authorized local
 port forward before sending the internal token. The internal token stays on the
 backend and never enters the Gradescope package.
@@ -169,13 +224,11 @@ gcloud auth application-default login \
   --impersonate-service-account=gradescope-vertex-test@project-bcedce55-e972-4a7b-bef.iam.gserviceaccount.com
 ```
 
-Set the configuration API origin and its existing internal token in the backend
-environment. For a local Web app or port forward, the origin can be
-`http://127.0.0.1:8000`:
+Keep the configuration API origin and internal token in the backend environment.
+For a local Web app or port forward, the origin can be `http://127.0.0.1:8000`.
+Read the assignment using the UUID returned by creation:
 
 ```bash
-export ASSIGNMENT_API_URL=https://YOUR-WEB-HOST
-export INTEGRATION_API_TOKEN=YOUR_INTERNAL_TOKEN
 curl --fail -H "X-Internal-Token: $INTEGRATION_API_TOKEN" \
   "$ASSIGNMENT_API_URL/internal/assignments/YOUR_ASSIGNMENT_UUID/config"
 ```
@@ -222,10 +275,10 @@ FEEDBACK_STATE_PATH=../ai_grading/.local-vertex/db/backend/state.json PYTHONPATH
   ../.venv/bin/uvicorn app.main:app --host 127.0.0.1 --port 8001 --workers 1
 ```
 
-Without `FEEDBACK_STATE_PATH`, the Web app exposes the configuration read
-endpoint but does not enable feedback generation. The current Web Docker image
-can serve the read endpoint; enabling Vertex inside that image also requires
-packaging `ai_grading` and configuring credentials, which is outside this change.
+Without `FEEDBACK_STATE_PATH`, the Web app exposes both configuration endpoints
+but does not enable feedback generation. Both endpoints run in the existing Web
+Docker image. Packaging and deploying the AI backend in Docker, including
+`ai_grading` and credentials, is the next step and is not included in this change.
 
 Use one backend process/worker per state file. Stop it before editing JSON policy;
 DB configuration is read afresh. Each new request ID reserves one call before
@@ -305,8 +358,8 @@ container starts.
 
 ### Tables
 
-Instructor configuration, set up per course (directly or by
-`app.seed` until the instructor UI exists):
+Instructor configuration, created through the assignment API or directly;
+global providers are managed separately. `app.seed` also supplies sample data:
 
 | Table | One row per | Notes |
 | --- | --- | --- |
@@ -371,7 +424,7 @@ app/
   feedback_config.py  DB configuration and JSON runtime record types
   feedback_assignment.py  DB configuration adapter and protected API reader
   feedback_store.py   JSON storage, quota reservation and idempotency
-  main.py        FastAPI app: health, nightly, UI and optional feedback router
+  main.py        FastAPI app: assignment configuration, health, nightly, UI and optional feedback
   models.py      ORM tables (02-data-model.puml)
   repository/    Data access used by the grading pipeline (below)
   seed.py        Sample data (see "Sample data" above)
@@ -520,8 +573,9 @@ different database.
 
 Done: the schema and migrations, the full repository (SQL and in
 memory) with tests, the sample data script, the internal endpoints the
-nightly trigger calls (shared-token auth), and the read-only instructor
-pages. The optional Vertex feedback API reads assignment configuration from PostgreSQL
+nightly trigger calls (shared-token auth), authenticated assignment creation and
+configuration reads, and the read-only instructor pages. The optional Vertex
+feedback API reads assignment configuration from PostgreSQL
 and retains assignment tokens, quota and replay state in JSON (see above). It
 does not persist feedback or participate in the submission/nightly lifecycle.
 
