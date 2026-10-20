@@ -154,12 +154,14 @@ FEEDBACK_STATE_PATH=../.local-vertex/backend/state.json PYTHONPATH=.. \
 Without `FEEDBACK_STATE_PATH`, the app does not load feedback. Use one backend
 process/worker per JSON file; stop it before editing configuration and restart.
 
-In another terminal at the repository root, run the standard-library client:
+In another terminal at the repository root, run the standard-library client.
+`--code-file` is required: replace the path below with your own UTF-8 source file
+and use a configured target whose rubric matches that code.
 
 ```bash
-env -i PATH=/usr/bin:/bin /usr/bin/python3 -I -S local_client.py \
+env -i PATH=/usr/bin:/bin /usr/bin/python3 -I -S ai_grading/local_client.py \
   --backend-url http://127.0.0.1:8001 --token-file .local-vertex/client/token \
-  --code-file examples/vertex_feedback_example.py --target-id example \
+  --code-file /absolute/path/to/submission.py --target-id example \
   --guidance 'Explain one edge case and suggest a small improvement.' --json
 ```
 
@@ -194,7 +196,7 @@ compilation-error templates, `setup.sh`, `run_autograder`, `vertex_feedback.py`,
 present as a loose file at the same relative path in that directory.
 The ZIP and token are Git-ignored and mode `600`. Google credentials, Google SDKs,
 GitHub deploy keys, SSH configuration and backend state are excluded.
-`build.py` refreshes the client copy from the root `local_client.py` and generates
+`build.py` refreshes the client copy from `ai_grading/local_client.py` and generates
 the URL config and token file. Generated copies and downloaded grader files stay
 out of Git; the original functional tests are reused without editing them.
 

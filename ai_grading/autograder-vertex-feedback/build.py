@@ -9,7 +9,7 @@ from zipfile import ZipFile, ZipInfo, ZIP_DEFLATED
 SOURCE = Path(__file__).resolve().parent
 ROOT = SOURCE.parents[1]
 sys.path.insert(0, str(ROOT))
-from local_client import ClientError, read_assignment_token, validate_backend_url
+from ai_grading.local_client import ClientError, read_assignment_token, validate_backend_url
 
 
 def main():
@@ -34,7 +34,7 @@ def main():
         "run_autograder": ((SOURCE / "run_autograder").read_bytes(), 0o755),
         "vertex_feedback.py": ((SOURCE / "vertex_feedback.py").read_bytes(), 0o644),
         "ai_feedback.json": ((SOURCE / "ai_feedback.json").read_bytes(), 0o644),
-        "local_client.py": ((ROOT / "local_client.py").read_bytes(), 0o644),
+        "local_client.py": ((ROOT / "ai_grading/local_client.py").read_bytes(), 0o644),
         "config.json": ((json.dumps({"backend_url": backend_url}) + "\n").encode(), 0o644),
         "assignment.token": ((token + "\n").encode("ascii"), 0o600),
     }

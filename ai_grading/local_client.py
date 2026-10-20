@@ -205,7 +205,7 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--config", type=Path, default=Path(".local-vertex/client/config.json"))
     parser.add_argument("--backend-url", help="HTTPS or HTTP loopback origin; overrides the non-secret config file")
     parser.add_argument("--token-file", type=Path, default=Path(".local-vertex/client/token"))
-    parser.add_argument("--code-file", type=Path, default=Path(__file__).parent / "examples/vertex_feedback_example.py")
+    parser.add_argument("--code-file", type=Path, required=True, help="UTF-8 source file to review")
     parser.add_argument("--target-id", default="example")
     parser.add_argument("--guidance", help="Optional feedback preference, subject to backend limits")
     parser.add_argument("--request-id", help="Default: stable SHA-256 identifier of target, code, and guidance")
@@ -238,7 +238,7 @@ def main(argv: list[str] | None = None) -> int:
         print("Error:", str(error), file=sys.stderr)
         return 1
     except (OSError, UnicodeError):
-        print("Error: Cannot read the UTF-8 example code file.", file=sys.stderr)
+        print("Error: Cannot read the UTF-8 source file.", file=sys.stderr)
         return 1
 
 
