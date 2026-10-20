@@ -96,193 +96,68 @@ uvicorn app.main:app --reload
 
 ## Vertex feedback API (database configuration)
 
-`POST /v1/feedback` uses an assignment Bearer token. The backend reads the
-assignment, targets, current rubrics and primary Google model from PostgreSQL,
-then calls Vertex with its own credentials. Feedback returns to Gradescope as a
-zero-point row; this path does not create submissions, test results or feedback
-in the database and does not participate in nightly scheduling.
-
-| Data | Source |
-| --- | --- |
-| Assignment active status, targets, current rubric | PostgreSQL |
-| Model | Enabled primary `GOOGLE` row in `llm_provider_config` (global) |
-| Google project/identity, model allowlist, request limits | Backend runtime JSON |
-| Assignment token hashes, call quota, request status and replay cache | Backend runtime JSON |
-| Feedback displayed to the student | Gradescope `results.json` |
-
-The JSON replay cache still contains completed responses so retries do not call
-Vertex again. It is backend state, not a Web feedback history or SQL store.
+The Web Docker service reads assignment, target, rubric and primary Google model
+configuration from PostgreSQL and calls Vertex. Feedback is displayed in Gradescope
+as a zero-point row; this path does not write submissions, test results or feedback
+to DB or participate in nightly scheduling. JSON retains backend policy, assignment
+token hashes, call quota and replay responses.
 
 ### Prepare the database configuration
 
-Have the Web/DB owner configure the global `llm_provider_config` first. Then use
-the authenticated creation API below to insert an assignment, its targets and
-current rubrics into the existing tables. No migration is required. The general
-`app.seed` command also creates submissions and feedback; do not use it for a
-configuration-only setup on a shared database.
+| Endpoint | Authentication | Purpose |
+| --- | --- | --- |
+| `POST /internal/assignments` | `X-Internal-Token` | Create an assignment, targets and current rubrics atomically |
+| `GET /internal/assignments/{id}/config` | `X-Internal-Token` | Read current AI configuration |
+| `POST /v1/feedback` | Assignment Bearer token | Generate feedback; enabled after runtime initialization |
 
-Requirements:
+Use `/docs` for request schemas and to create a test assignment. For example:
 
-- The assignment is active, with at least one target. Each target has a current
-  rubric with nonblank `criteria_text`; `feedback_guidance` may be empty.
-- Exactly one enabled provider is primary, with provider `GOOGLE` and a Gemini
-  model allowed by the AI backend. Other providers are not invoked by this path.
-- The assignment token binds the **database assignment UUID**, not the Gradescope
-  assignment number. The client's `target_id` is the **database target UUID**.
-- For a `FILE` target, use its filename as `identifier`, such as
-  `SortedCollection.java`. The DB has no separate source path; method/class
-  targets use the neutral prompt source label `submitted-source`. Actual source
-  selection remains in the container's `targets[].source`.
-
-`POST /internal/assignments` creates an active assignment atomically, with targets
-in request order and version 1 current rubrics. Supply either an existing
-`course_id` UUID or an explicit `course` object with a required `name` and optional
-`term`. An explicit course is created in the same transaction; names are never
-used to find or overwrite an existing course.
-
-After the Web/DB teammate deploys the configuration endpoints, set the API origin
-and internal token, then create the configuration:
-
-```bash
-export ASSIGNMENT_API_URL=https://YOUR-WEB-HOST
-export INTEGRATION_API_TOKEN=YOUR_INTERNAL_TOKEN
-curl --fail -i -H "X-Internal-Token: $INTEGRATION_API_TOKEN" \
-  -H "Content-Type: application/json" --data-binary @- \
-  "$ASSIGNMENT_API_URL/internal/assignments" <<'JSON'
+```json
 {
   "course": {"name": "AI Feedback Integration", "term": "Fall 2026"},
   "platform_assignment_id": "YOUR_GRADESCOPE_ASSIGNMENT_ID",
   "name": "Sorted Collection Feedback",
   "language": "JAVA",
-  "targets": [
-    {
-      "identifier": "SortedCollection.java",
-      "kind": "FILE",
-      "rubric": {
-        "criteria_text": "Review correctness and clarity using the supplied functional test diagnostics.",
-        "feedback_guidance": "Give concise, actionable feedback. Use SCORE: NONE; do not assign a grade."
-      }
+  "targets": [{
+    "identifier": "SortedCollection.java",
+    "kind": "FILE",
+    "rubric": {
+      "criteria_text": "Review correctness and clarity using the supplied test diagnostics.",
+      "feedback_guidance": "Give concise, actionable feedback. Use SCORE: NONE; do not assign a grade."
     }
-  ]
+  }]
 }
-JSON
 ```
 
-To reuse a course, replace `course` with `"course_id": "YOUR_COURSE_UUID"`.
-`platform` defaults to `GRADESCOPE`; `grading_mode` defaults to `IMMEDIATE` and
-also accepts `NIGHTLY`. The request accepts 1–64 targets with unique, nonblank
-identifiers (up to 256 characters); `kind` defaults to `FILE` and also accepts
-`METHOD` or `CLASS`. Assignment name and platform assignment ID are required,
-nonblank and limited to 256 characters; language is required and limited to 64.
-Rubric criteria must be nonblank and at most 16,000 characters; guidance defaults
-to empty and allows 8,000 characters. Client IDs, rubric versions, scores and
-provider settings are not accepted.
-
-Success returns **201** with the same configuration as the GET endpoint below,
-plus `course_id`. Save `id` as the assignment UUID and the `targets` object keys
-as target UUIDs; each rubric includes its generated ID. `Location` points to the
-read endpoint, and the response uses `Cache-Control: no-store`.
-
-A duplicate `(platform, platform_assignment_id)` returns **409** without
-overwriting anything; a missing course returns **404**. Invalid input returns
-**422**, configuration larger than 1 MiB returns **413**, and a missing or
-unsupported enabled primary Google provider returns **503**. Creation leaves
-the global provider configuration unchanged. It does not issue assignment tokens,
-write submissions or feedback, or connect this flow to nightly execution.
-
-The protected read endpoint is:
-
-```text
-GET /internal/assignments/{assignment_id}/config
-X-Internal-Token: <INTEGRATION_API_TOKEN>
-```
-
-It returns `id`, `enabled`, `model`, and a `targets` object keyed by target UUID.
-Each target includes its identifier, kind, source label and current rubric
-(id, version, criteria and guidance). Responses are not HTTP-cached. Missing or
-inactive assignments return 403; incomplete or unsupported configuration returns
-503. These failures do not reserve an AI call.
-
-The local reader accepts HTTPS or loopback HTTP. For the currently shared
-HTTP server address, use a teammate-provided HTTPS origin or an authorized local
-port forward before sending the internal token. The internal token stays on the
-backend and never enters the Gradescope package.
+Replace `course` with `"course_id": "YOUR_COURSE_UUID"` to reuse a course.
+Creation returns 201 with the assignment UUID in `id` and target UUIDs as keys in
+`targets`; duplicates return 409 without overwriting data. These DB UUIDs, not the
+Gradescope assignment number or filename, bind the token and feedback requests.
+No schema migration is needed; global provider settings are managed separately.
 
 ### Deploy the combined Web and AI backend
 
-The Docker image includes `ai_grading`. The existing Web service serves both
-configuration endpoints and `POST /v1/feedback` on port 8000; the feedback router
-reads SQL directly, so it needs no `ASSIGNMENT_API_URL` or additional backend port.
-Google credentials stay on the server. The team manages its public HTTPS origin
-and reverse proxy to this service; the public HTTP IP address alone is not accepted
-by the Gradescope client. Allow enough proxy timeout for the configured AI request
-limit (30 seconds by default).
+The team must provide public HTTPS to Web port 8000, with proxy timeouts covering
+AI requests (30 seconds by default). The combined service reads SQL directly;
+`ASSIGNMENT_API_URL` is only needed for a separate AI process.
 
-1. Check out the reviewed branch/commit on the server and use the existing `web/`
-   directory and Compose project name. Preserve `.env`, `db_data`, and any existing
-   `feedback_data` volume. Never run `docker compose down -v` for an update. If this
-   is the first setup, copy `.env.example` only when `.env` does not exist.
-2. In `.env`, set a private, nondefault `INTEGRATION_API_TOKEN`; retain the token
-   already shared with nightly automation if it is configured. For the first AI
-   setup, leave `FEEDBACK_STATE_PATH=` empty. `GOOGLE_ADC_DIR` identifies a host
-   directory mounted read-only at `/run/google`; its default is
-   `../ai_grading/.local-vertex/google` relative to `web/`.
-3. Prepare **impersonation ADC** for the chosen service account, using an authorized
-   workstation or server login:
-
-   ```bash
-   gcloud auth application-default login --impersonate-service-account=YOUR_SERVICE_ACCOUNT
-   ```
-
-   Securely transfer the resulting `application_default_credentials.json` to the
-   server, then install it in the configured directory. For the default path,
-   from `web/`:
-
-   ```bash
-   install -d -m 700 ../ai_grading/.local-vertex/google
-   install -m 600 /secure/path/application_default_credentials.json \
-     ../ai_grading/.local-vertex/google/application_default_credentials.json
-   ```
-
-   The account must match `--service-account` below and have Vertex access in the
-   configured project. The identity creating impersonation ADC needs Service
-   Account Token Creator permission on that account. This implementation accepts
-   impersonation ADC; ordinary user ADC and service-account keys are not supported.
-   Credentials are never copied into the image or Gradescope ZIP. See Google's
-   [impersonation ADC setup](https://docs.cloud.google.com/docs/authentication/set-up-adc-local-dev-environment).
-4. Build and start Web/DB with feedback still disabled:
-
-   ```bash
-   docker compose up -d --build web
-   curl --fail https://YOUR-SERVER/health
-   ```
-
-   Wait until `/health` returns 200 so migrations and Web startup have finished,
-   then inspect the provider configuration:
-
-   ```bash
-   docker compose exec db psql -U autograder -d autograder -c \
-     'SELECT provider, model_name, is_enabled, is_primary FROM llm_provider_config;'
-   ```
-
-   Exactly one enabled primary `GOOGLE` provider is required. Use its existing
-   Gemini model in the state allowlist. If a different or disabled primary exists,
-   coordinate any global change with the DB owner. **Only when no primary exists**,
-   the DB owner can initialize one with the following conditional insert, replacing
-   the example model with one available in the chosen Vertex project/location:
-
-   ```bash
-   docker compose exec -T db psql -U autograder -d autograder <<'SQL'
-   INSERT INTO llm_provider_config (id, provider, model_name, is_enabled, is_primary)
-   SELECT gen_random_uuid(), 'GOOGLE', 'gemini-3.5-flash-lite', true, true
-   WHERE NOT EXISTS (SELECT 1 FROM llm_provider_config WHERE is_primary);
-   SQL
-   ```
-
-   This leaves existing rows unchanged. Do not run `app.seed` on the shared DB.
-5. Use [Prepare the database configuration](#prepare-the-database-configuration)
-   to call `POST /internal/assignments`, then GET its configuration. Save the returned
-   assignment UUID and target UUID. From `web/`, initialize the runtime volume once:
+1. From the existing `web/` directory, preserve the Compose project name and `.env`.
+   Retain the private `INTEGRATION_API_TOKEN` shared with nightly automation; replace
+   the example token on a new server. Leave `FEEDBACK_STATE_PATH=` empty for initial setup.
+2. Put `application_default_credentials.json` in the host directory specified by
+   `GOOGLE_ADC_DIR` (default: `../ai_grading/.local-vertex/google`, relative to `web/`).
+   Use a dedicated private directory and file permissions `700`/`600`; Compose mounts
+   it read-only. Generate **impersonation ADC** with
+   `gcloud auth application-default login --impersonate-service-account=YOUR_SERVICE_ACCOUNT`.
+   That service account must match the initializer and have Vertex access; the caller
+   needs Service Account Token Creator permission. Ordinary user ADC and service-account
+   keys are unsupported. See [Google's ADC setup](https://docs.cloud.google.com/docs/authentication/set-up-adc-local-dev-environment).
+3. Run `docker compose up -d --build web` and wait for `/health` to return 200.
+   Have the DB owner configure one enabled primary `GOOGLE` row in `llm_provider_config`
+   with a Gemini model available in the chosen project/location. Do not run `app.seed`
+   on the shared DB. Create and read the assignment using the endpoints above.
+4. Initialize the persistent state once, using the returned assignment UUID and the
+   same model as the DB. Choose the call allowance and expiry for the planned test:
 
    ```bash
    docker compose exec web python -m app.seed_feedback \
@@ -292,14 +167,12 @@ limit (30 seconds by default).
      --client-config /var/lib/ai-feedback/client/config.json \
      --backend-url https://YOUR-SERVER \
      --project YOUR_GOOGLE_PROJECT --location global \
-     --service-account YOUR_SERVICE_ACCOUNT \
-     --allowed-model YOUR_DB_GEMINI_MODEL \
+     --service-account YOUR_SERVICE_ACCOUNT --allowed-model YOUR_DB_GEMINI_MODEL \
      --max-calls 10 --expires-in-hours 168
    ```
 
-   Choose a location supporting the selected model; repeat `--allowed-model` only
-   for additional approved Gemini models. This command creates no DB rows and
-   prints no token. Export only the client token for packaging:
+5. Export the assignment token and securely transfer it to the packaging workstation
+   at the same repository-relative path, owned by that user with mode `600`:
 
    ```bash
    install -d -m 700 ../ai_grading/.local-vertex/server-client
@@ -308,76 +181,31 @@ limit (30 seconds by default).
    chmod 600 ../ai_grading/.local-vertex/server-client/assignment.token
    ```
 
-   Securely transfer that token to the packaging workstation at the same
-   repository-relative path, owned by the packaging user with mode `600`. Do not
-   transfer Google credentials, the internal API token, or backend state to Gradescope.
-6. Set `FEEDBACK_STATE_PATH=/var/lib/ai-feedback/state.json` in `.env`, then enable
-   feedback without restarting the database:
+   Google credentials, the internal token and backend state stay on the server.
+6. Set `FEEDBACK_STATE_PATH=/var/lib/ai-feedback/state.json` in `.env`, then run
+   `docker compose up -d --no-deps web`. `/docs` should include `/v1/feedback`.
+   `/health` checks the DB, not Vertex access; verify a real request below.
 
-   ```bash
-   docker compose up -d --no-deps web
-   curl --fail https://YOUR-SERVER/health
-   ```
-
-   `/docs` should now include `POST /v1/feedback`. `/health` checks DB connectivity,
-   not Vertex authentication. From the packaging workstation's repository root,
-   make one real request with the exported token and target UUID:
-
-   ```bash
-   python3 -I -S ai_grading/local_client.py \
-     --backend-url https://YOUR-SERVER \
-     --token-file ai_grading/.local-vertex/server-client/assignment.token \
-     --code-file /absolute/path/to/SortedCollection.java \
-     --target-id YOUR_TARGET_UUID --json
-   ```
-
-   This request consumes one call. After it succeeds, build the Gradescope ZIP
-   using the same server URL and token as described below.
-
-For subsequent code updates, preserve `.env` and both named volumes, then run
-`docker compose up -d --build web` from the same Compose project. Do not rerun the
-initializer or recreate state: quota, token hashes and replay history must survive.
-The state directory is mounted because writes also need a sibling lock file and
-atomic replacements. Run exactly one Web worker/container against this volume.
-
-The initializer creates one assignment/token in new state and refuses existing
-outputs. Adding another assignment or rotating an expired token in existing state
-is not yet implemented; this release supports the first controlled assignment test,
-not unattended multi-assignment administration. Set a suitable test expiry and call
-allowance before issuing the token. State schema 1 demo files are incompatible;
-use new schema 2 state without deleting old experiments.
-
-DB configuration is read on every valid request. Each new request ID reserves one
-call before Vertex runs; failures/timeouts retain it. A replay returns its cached
-response even if the rubric/model has changed. Use a new request ID for deliberate
-reevaluation. Configuration edits neither reset quota nor invalidate cache; DB
-outages prevent replays. Stop Web before editing JSON policy.
+For later updates, run `docker compose up -d --build web`. Preserve `.env`,
+`db_data` and `feedback_data`; never use `down -v` or rerun the initializer to update.
+Use one Web worker/container per state volume.
 
 ### Package and run in Gradescope
 
-Keep the existing functional grader and connector. In
-`ai_grading/autograder-vertex-feedback/ai_feedback.json`, use the target UUID
-returned by the configuration endpoint:
+From the packaging workstation's repository root, verify one real request first
+(it consumes one call):
 
-```json
-{
-  "targets": [
-    {
-      "source": "**/SortedCollection.java",
-      "target_id": "YOUR_TARGET_UUID"
-    }
-  ]
-}
+```bash
+python3 -I -S ai_grading/local_client.py \
+  --backend-url https://YOUR-SERVER \
+  --token-file ai_grading/.local-vertex/server-client/assignment.token \
+  --code-file /absolute/path/to/SortedCollection.java \
+  --target-id YOUR_TARGET_UUID --json
 ```
 
-Keep the rubric in DB. For feedback-only use, request `SCORE: NONE` and no numerical
-grade. The connector sends visible test diagnostics and appends `score: 0`,
-`max_score: 0` AI rows to `results.json`. AI failure preserves functional scores;
-compilation failure currently exits before AI.
-
-From the repository root on the packaging workstation, rebuild using the exported
-token and an existing functional-grader checkout (previously verified revision:
-`15425db409b8f938b8cc3959f21e5d5dc419265d`):
+In `ai_grading/autograder-vertex-feedback/ai_feedback.json`, set `targets[].target_id`
+to the returned DB target UUID and `targets[].source` to `**/SortedCollection.java`.
+Rebuild with the server URL, token and existing functional-grader checkout:
 
 ```bash
 python3 ai_grading/autograder-vertex-feedback/build.py \
@@ -386,52 +214,22 @@ python3 ai_grading/autograder-vertex-feedback/build.py \
   --functional-source /absolute/path/to/functional-grader
 ```
 
-Upload `ai_grading/autograder-vertex-feedback/vertex autograder.zip` to that
-Gradescope assignment and submit `SortedCollection.java`. The build refreshes
-packaged `local_client.py` from its canonical `ai_grading/local_client.py` source.
-The ZIP/token remain Git-ignored. This package still contains the original
-SortedCollection/Java grader; it is not an arbitrary-assignment build system.
-A deployed HTTPS backend needs no temporary tunnel.
+Upload `ai_grading/autograder-vertex-feedback/vertex autograder.zip` and submit
+`SortedCollection.java`. The package remains specific to the SortedCollection/Java
+grader. AI failure preserves functional scores; compilation failure exits before AI.
+Server deployment, live Vertex access and the final Gradescope run still need verification.
 
-| Flow | Implemented | Deployment prerequisite |
-| --- | --- | --- |
-| Create assignment, targets and rubrics | `POST /internal/assignments` | Internal token; enabled primary Google model |
-| Read current DB configuration | `GET /internal/assignments/{id}/config`; direct SQL inside Web | Valid assignment and target UUIDs; current rubric |
-| Generate feedback | `POST /v1/feedback` in the same image | Persistent initialized state; matching ADC; permitted Vertex model |
-| Display feedback in Gradescope | Existing client and connector | Public HTTPS; unexpired assignment token; rebuilt ZIP with target UUID |
+### Current limits and local use
 
-These interfaces cover a real single-assignment test without DB feedback writes.
-Server deployment, live server-to-Vertex access and the final Gradescope run still
-need verification; a healthy Web page alone does not establish that flow.
-
-### Optional separate local AI backend
-
-Use this only when running the AI process on your workstation against the Web API.
-From the repository root, install `web/requirements.txt` in your Python environment
-and configure impersonation ADC as above. Set `ASSIGNMENT_API_URL` to the deployed
-HTTPS origin (or a loopback port forward) and `INTEGRATION_API_TOKEN` to its shared
-secret. The current public HTTP IP address cannot be used for authenticated calls.
-
-```bash
-python3 -m web.app.seed_feedback \
-  --assignment-id YOUR_ASSIGNMENT_UUID \
-  --state ai_grading/.local-vertex/db/backend/state.json \
-  --token-file ai_grading/.local-vertex/db/client/token \
-  --client-config ai_grading/.local-vertex/db/client/config.json \
-  --project YOUR_GOOGLE_PROJECT --location global \
-  --service-account YOUR_SERVICE_ACCOUNT --allowed-model YOUR_DB_GEMINI_MODEL \
-  --backend-url http://127.0.0.1:8001 --max-calls 10 --expires-in-hours 24
-python3 -m web.app.feedback \
-  --state ai_grading/.local-vertex/db/backend/state.json --port 8001
-```
-
-This process reads configuration through the protected Web API and needs no local
-PostgreSQL connection. Its `/health` checks process health only. Use the client
-command above with `http://127.0.0.1:8001` and the local token path. To reach this
-local process from Gradescope, run `cloudflared tunnel --url http://127.0.0.1:8001
---no-autoupdate --protocol http2` and build the ZIP with the tunnel HTTPS origin
-and local token. A restarted tunnel needs a rebuilt ZIP. Keep this local state
-separate from the server volume. `integration/` is unchanged.
+- Initialization creates one assignment/token in new schema-2 state. Adding assignments
+  or rotating tokens in existing state is not implemented; schema-1 state is incompatible.
+- Failures/timeouts retain reserved calls. Reusing a request ID returns its cached
+  response even after rubric/model changes; use a new ID for reevaluation. DB outages
+  also prevent replay. Stop Web before editing JSON policy.
+- For a separate local AI process, set `ASSIGNMENT_API_URL` and `INTEGRATION_API_TOKEN`,
+  then use `python3 -m web.app.seed_feedback --help` and `python3 -m web.app.feedback --help`
+  from the repository root. Keep local state separate from the server volume. The API
+  reader and Gradescope client accept HTTPS or loopback HTTP origins only.
 
 ## Database schema
 
@@ -663,8 +461,8 @@ feedback API reads assignment configuration from PostgreSQL
 and retains assignment tokens, quota and replay state in JSON (see above). It
 does not persist feedback or participate in the submission/nightly lifecycle.
 
-Not done yet: the REST API the container calls, with per-assignment token
-auth (the schema has no token column yet); in the instructor UI, the
+Not done yet: the container API for the DB-backed submission/grading lifecycle;
+in the instructor UI, the
 forms for assignments, targets and rubrics, feedback rating and the
 results dashboard (waiting on OQ-1); instructor login (OQ-9); and
 deployment.
