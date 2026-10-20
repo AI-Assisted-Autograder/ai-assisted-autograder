@@ -1,7 +1,8 @@
-"""Validated, backend-owned JSON configuration and durable state records."""
+"""Validated database configuration and backend-owned runtime state records."""
 
 from datetime import datetime
 from typing import Annotated, Any, Literal
+from uuid import UUID
 
 from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
@@ -35,26 +36,69 @@ class BackendConfig(StrictModel):
         return value
 
 
-class RubricConfig(StrictModel):
-    criteria_text: str = Field(min_length=1, max_length=16_000)
+class RubricInput(StrictModel):
+    criteria_text: str = Field(min_length=1, max_length=16_000, pattern=r"\S")
     feedback_guidance: str = Field(default="", max_length=8_000)
+
+
+class RubricConfig(RubricInput):
     version: int = Field(default=1, ge=1)
-    id: Identifier = "demo-rubric"
+    id: Identifier
 
 
 class TargetConfig(StrictModel):
-    identifier: str = Field(default="example.py", min_length=1, max_length=256)
-    kind: Literal["FILE", "METHOD", "CLASS"] = "FILE"
-    source_path: str = Field(default="example.py", min_length=1, max_length=256)
+    identifier: str = Field(min_length=1, max_length=256, pattern=r"\S")
+    kind: Literal["FILE", "METHOD", "CLASS"]
+    source_path: str = Field(min_length=1, max_length=256)
     rubric: RubricConfig
 
 
 class AssignmentConfig(StrictModel):
+    id: Identifier
     enabled: bool = True
     model: ModelName
+    targets: Annotated[dict[Identifier, TargetConfig], Field(min_length=1)]
+
+
+class CourseInput(StrictModel):
+    name: str = Field(min_length=1, max_length=256, pattern=r"\S")
+    term: str | None = Field(default=None, max_length=128)
+
+
+class TargetInput(StrictModel):
+    identifier: str = Field(min_length=1, max_length=256, pattern=r"\S")
+    kind: Literal["FILE", "METHOD", "CLASS"] = "FILE"
+    rubric: RubricInput
+
+
+class AssignmentCreateInput(StrictModel):
+    course_id: UUID | None = Field(default=None, strict=False)
+    course: CourseInput | None = None
+    platform: Literal["GRADESCOPE"] = "GRADESCOPE"
+    platform_assignment_id: str = Field(min_length=1, max_length=256, pattern=r"\S")
+    name: str = Field(min_length=1, max_length=256, pattern=r"\S")
+    language: str = Field(min_length=1, max_length=64, pattern=r"\S")
+    grading_mode: Literal["IMMEDIATE", "NIGHTLY"] = "IMMEDIATE"
+    targets: list[TargetInput] = Field(min_length=1, max_length=64)
+
+    @model_validator(mode="after")
+    def validate_configuration(self) -> "AssignmentCreateInput":
+        if (self.course_id is None) == (self.course is None):
+            raise ValueError("Provide either course_id or a new course, not both")
+        identifiers = [target.identifier for target in self.targets]
+        if len(identifiers) != len(set(identifiers)):
+            raise ValueError("Target identifiers must be unique within the assignment")
+        return self
+
+
+class CreatedAssignmentConfig(AssignmentConfig):
+    course_id: UUID
+
+
+class AssignmentAccess(StrictModel):
+    enabled: bool = True
     max_calls: int = Field(default=5, ge=0, le=100_000)
     used_calls: int = Field(default=0, ge=0)
-    targets: Annotated[dict[Identifier, TargetConfig], Field(min_length=1)]
 
 
 class TokenRecord(StrictModel):
@@ -104,17 +148,15 @@ class RequestRecord(StrictModel):
 
 
 class State(StrictModel):
-    schema_version: Literal[1] = 1
+    schema_version: Literal[2] = 2
     config: BackendConfig
-    assignments: dict[Identifier, AssignmentConfig]
+    assignments: dict[Identifier, AssignmentAccess]
     tokens: dict[Digest, TokenRecord]
     requests: dict[Identifier, dict[Identifier, RequestRecord]] = Field(default_factory=dict)
 
     @model_validator(mode="after")
     def validate_relationships(self) -> "State":
         for assignment_id, assignment in self.assignments.items():
-            if assignment.model not in self.config.allowed_models:
-                raise ValueError("assignment model must be allowed by backend policy")
             if assignment.used_calls < len(self.requests.get(assignment_id, {})):
                 raise ValueError("quota counter cannot be below reserved request count")
         for token in self.tokens.values():

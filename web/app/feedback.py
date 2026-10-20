@@ -1,4 +1,4 @@
-"""Assignment-token feedback router; also runnable locally without PostgreSQL."""
+"""Assignment-token feedback using DB configuration and local runtime state."""
 
 import asyncio
 from concurrent.futures import ThreadPoolExecutor
@@ -6,6 +6,7 @@ from contextlib import asynccontextmanager
 import hashlib
 import json
 import logging
+import os
 from pathlib import Path
 from types import SimpleNamespace
 import threading
@@ -27,6 +28,7 @@ MESSAGES = {
     "unauthorized": "A valid assignment token is required.",
     "assignment_forbidden": "Assignment is unavailable.",
     "target_forbidden": "Target is not available for this assignment.",
+    "assignment_config_unavailable": "Database assignment configuration is unavailable.",
     "invalid_request": "Request fields or JSON are invalid.",
     "input_too_large": "Input exceeds the backend limit.",
     "quota_exceeded": "Assignment call quota is exhausted.",
@@ -63,7 +65,8 @@ def default_provider_factory(config, assignment):
     return VertexProvider(config, assignment)
 
 
-def create_feedback_router(state_path: str | Path, *, provider_factory=None) -> APIRouter:
+def create_feedback_router(state_path: str | Path, *, assignment_loader,
+                           provider_factory=None) -> APIRouter:
     factory = provider_factory or default_provider_factory
     runtime = SimpleNamespace()
 
@@ -73,7 +76,7 @@ def create_feedback_router(state_path: str | Path, *, provider_factory=None) -> 
         try:
             store = JsonStore(Path(state_path))
         except Exception:
-            raise RuntimeError("Local backend state is unavailable or locked.") from None
+            raise RuntimeError("Backend state is unavailable or locked.") from None
         runtime.store = store
         runtime.providers = {}
         runtime.provider_lock = threading.Lock()
@@ -111,9 +114,10 @@ def create_feedback_router(state_path: str | Path, *, provider_factory=None) -> 
         if time.monotonic() >= deadline:
             raise TimeoutError
         with runtime.provider_lock:
-            if assignment_id not in runtime.providers:
-                runtime.providers[assignment_id] = factory(runtime.store.config, assignment)
-            provider = runtime.providers[assignment_id]
+            key = (assignment_id, assignment.model)
+            if key not in runtime.providers:
+                runtime.providers[key] = factory(runtime.store.config, assignment)
+            provider = runtime.providers[key]
         if time.monotonic() >= deadline:
             raise TimeoutError
         return provider.generate_feedback(grading_request)
@@ -129,7 +133,6 @@ def create_feedback_router(state_path: str | Path, *, provider_factory=None) -> 
             return error("unauthorized", 401)
         try:
             assignment_id = store.authenticate(token)
-            assignment = store.get_assignment(assignment_id)
         except StoreError as exc:
             return error(exc.code, exc.status_code)
 
@@ -149,6 +152,16 @@ def create_feedback_router(state_path: str | Path, *, provider_factory=None) -> 
         if (len(payload.code) > config.max_code_chars
                 or len(payload.guidance or "") > config.max_guidance_chars):
             return error("input_too_large", 413, rid)
+        try:
+            assignment = await asyncio.to_thread(assignment_loader, assignment_id)
+            if assignment.id != assignment_id or not assignment.enabled:
+                return error("assignment_forbidden", 403, rid)
+            if assignment.model not in config.allowed_models:
+                return error("assignment_config_unavailable", 503, rid)
+        except StoreError as exc:
+            return error(exc.code, exc.status_code, rid)
+        except Exception:
+            return error("assignment_config_unavailable", 503, rid)
         target = assignment.targets.get(payload.target_id)
         if target is None:
             return error("target_forbidden", 403, rid)
@@ -181,7 +194,8 @@ def create_feedback_router(state_path: str | Path, *, provider_factory=None) -> 
             existing = store.get_request(assignment_id, rid)
             if existing is None and runtime.inflight >= config.max_concurrency:
                 return error("busy", 429, rid)
-            record, created = store.reserve(assignment_id, rid, digest, payload.target_id)
+            record, created = store.reserve(assignment_id, rid, digest, payload.target_id,
+                                            assignment.model)
         except StoreError as exc:
             return error(exc.code, exc.status_code, rid)
         except Exception:
@@ -250,10 +264,12 @@ def create_feedback_router(state_path: str | Path, *, provider_factory=None) -> 
     return router
 
 
-def create_app(state_path: str | Path, *, provider_factory=None) -> FastAPI:
+def create_app(state_path: str | Path, *, assignment_loader, provider_factory=None) -> FastAPI:
     """Local entry point using the same router, without importing web.main/db/ui."""
     app = FastAPI(docs_url=None, redoc_url=None, openapi_url=None)
-    app.include_router(create_feedback_router(state_path, provider_factory=provider_factory))
+    app.include_router(create_feedback_router(
+        state_path, assignment_loader=assignment_loader, provider_factory=provider_factory,
+    ))
 
     @app.get("/health")
     async def health():
@@ -265,14 +281,23 @@ def create_app(state_path: str | Path, *, provider_factory=None) -> FastAPI:
 def main():
     import argparse
     import uvicorn
+    from .feedback_assignment import HttpAssignmentConfigReader
 
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--state", type=Path, default=Path(".local-vertex/backend/state.json"))
+    parser.add_argument("--state", type=Path, default=Path("ai_grading/.local-vertex/backend/state.json"))
     parser.add_argument("--port", type=int, default=8001)
+    parser.add_argument("--assignment-api-url", default=os.environ.get("ASSIGNMENT_API_URL"),
+                        help="Web API HTTPS or loopback origin; defaults to ASSIGNMENT_API_URL")
     args = parser.parse_args()
     if not 1 <= args.port <= 65535:
         parser.error("port must be between 1 and 65535")
-    uvicorn.run(create_app(args.state), host="127.0.0.1", port=args.port,
+    try:
+        reader = HttpAssignmentConfigReader(
+            args.assignment_api_url, os.environ.get("INTEGRATION_API_TOKEN"),
+        )
+    except ValueError as exc:
+        parser.error(str(exc))
+    uvicorn.run(create_app(args.state, assignment_loader=reader), host="127.0.0.1", port=args.port,
                 workers=1, access_log=False, log_level="warning")
 
 

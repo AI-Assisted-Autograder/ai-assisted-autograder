@@ -1,7 +1,7 @@
-"""Initialize local JSON state and issue one private assignment token.
+"""Issue a private token and initialize runtime state for an existing DB assignment.
 
 No overwrite/reset mode exists. This tool never prints a token or loads Google
-credentials. Initialization is intended for a new local demonstration directory.
+credentials. Initialize once before enabling the feedback router.
 """
 
 import argparse
@@ -10,9 +10,12 @@ import math
 from datetime import timedelta
 from pathlib import Path
 import secrets
+from uuid import UUID
+
+from ai_grading.local_client import validate_backend_url
 
 from .feedback_config import (
-    AssignmentConfig, BackendConfig, RubricConfig, State, TargetConfig, TokenRecord,
+    AssignmentAccess, BackendConfig, State, TokenRecord,
 )
 from .feedback_store import atomic_write, token_hash, utc_now
 
@@ -27,25 +30,22 @@ DEFAULT_BACKEND_URL = "http://127.0.0.1:8001"
 
 
 def initialize(
-    state_path: str | Path = ".local-vertex/backend/state.json",
-    token_path: str | Path = ".local-vertex/client/token",
-    client_config_path: str | Path = ".local-vertex/client/config.json",
+    state_path: str | Path = "ai_grading/.local-vertex/backend/state.json",
+    token_path: str | Path = "ai_grading/.local-vertex/client/token",
+    client_config_path: str | Path = "ai_grading/.local-vertex/client/config.json",
     *,
+    assignment_id: str,
     max_calls: int = 5,
     expires_in_hours: float = 24.0,
     backend_url: str = DEFAULT_BACKEND_URL,
+    project: str = DEFAULT_PROJECT,
+    location: str = DEFAULT_LOCATION,
+    service_account: str = DEFAULT_SERVICE_ACCOUNT,
+    allowed_models: list[str] | None = None,
 ) -> None:
     """Create config/state and issue a random token; refuse every existing output."""
-    from urllib.parse import urlsplit
-
-    address = urlsplit(backend_url)
-    if (not address.hostname or not (address.scheme == "https" or (
-            address.scheme == "http" and address.hostname in ("127.0.0.1", "::1")))
-            or address.username is not None or address.password is not None
-            or address.path not in ("", "/") or address.query or address.fragment
-            or any(character.isspace() for character in backend_url)
-            or address.port is not None and not 1 <= address.port <= 65535):
-        raise ValueError("backend URL must be an HTTPS or loopback HTTP origin")
+    assignment_id = str(UUID(assignment_id))
+    backend_url = validate_backend_url(backend_url)
     if not math.isfinite(expires_in_hours) or not 0 < expires_in_hours <= 24 * 365:
         raise ValueError("expiration must be between zero and one year")
     paths = tuple(Path(path).expanduser().absolute()
@@ -54,20 +54,12 @@ def initialize(
         raise FileExistsError("initialization outputs must be distinct new files")
     raw_token = secrets.token_urlsafe(32)
     state = State(
-        config=BackendConfig(project=DEFAULT_PROJECT, location=DEFAULT_LOCATION,
-                             service_account=DEFAULT_SERVICE_ACCOUNT,
-                             allowed_models=[DEFAULT_MODEL]),
-        assignments={"demo": AssignmentConfig(
-            model=DEFAULT_MODEL, max_calls=max_calls,
-            targets={"example": TargetConfig(rubric=RubricConfig(
-                criteria_text=("Review whether the function correctly computes an average, "
-                               "including its behavior for empty input. "
-                               "Give concise, constructive feedback on correctness and clarity. "
-                               "Do not assign a numerical score."),
-            ))},
-        )},
+        config=BackendConfig(project=project, location=location,
+                             service_account=service_account,
+                             allowed_models=allowed_models if allowed_models is not None else [DEFAULT_MODEL]),
+        assignments={assignment_id: AssignmentAccess(max_calls=max_calls)},
         tokens={token_hash(raw_token): TokenRecord(
-            assignment_id="demo", expires_at=utc_now() + timedelta(hours=expires_in_hours),
+            assignment_id=assignment_id, expires_at=utc_now() + timedelta(hours=expires_in_hours),
         )},
     )
     payloads = (
@@ -89,22 +81,31 @@ def initialize(
 
 def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--state", default=".local-vertex/backend/state.json")
-    parser.add_argument("--token-file", default=".local-vertex/client/token")
-    parser.add_argument("--client-config", default=".local-vertex/client/config.json")
+    parser.add_argument("--state", default="ai_grading/.local-vertex/backend/state.json")
+    parser.add_argument("--token-file", default="ai_grading/.local-vertex/client/token")
+    parser.add_argument("--client-config", default="ai_grading/.local-vertex/client/config.json")
+    parser.add_argument("--assignment-id", required=True, type=UUID,
+                        help="Existing database assignment UUID; does not create database rows")
     parser.add_argument("--max-calls", type=int, default=5)
     parser.add_argument("--expires-in-hours", type=float, default=24.0)
     parser.add_argument("--backend-url", default=DEFAULT_BACKEND_URL)
+    parser.add_argument("--project", default=DEFAULT_PROJECT)
+    parser.add_argument("--location", default=DEFAULT_LOCATION)
+    parser.add_argument("--service-account", default=DEFAULT_SERVICE_ACCOUNT)
+    parser.add_argument("--allowed-model", action="append", dest="allowed_models",
+                        help="Allowed Gemini model; repeat for multiple models")
     args = parser.parse_args()
     try:
         initialize(args.state, args.token_file, args.client_config,
+                   assignment_id=str(args.assignment_id),
                    max_calls=args.max_calls, expires_in_hours=args.expires_in_hours,
-                   backend_url=args.backend_url)
+                   backend_url=args.backend_url, project=args.project, location=args.location,
+                   service_account=args.service_account, allowed_models=args.allowed_models)
     except FileExistsError:
         parser.exit(2, "Initialization refused: an output already exists or paths overlap.\n")
     except Exception:
         parser.exit(2, "Initialization failed: check paths and non-sensitive settings.\n")
-    print("Initialized assignment demo, target example; private token written to the token file.")
+    print(f"Initialized runtime state for assignment {args.assignment_id}; private token written to the token file.")
     print("No token or Google credentials are included in this output.")
     return 0
 
