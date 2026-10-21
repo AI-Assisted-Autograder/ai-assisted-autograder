@@ -1,26 +1,37 @@
 # AI grading (Ivan)
 
 AI feedback for submitted code, with a reusable Python core and a Gradescope
-client. The current integration uses the Web backend and Google Vertex AI.
+client. The Web backend selects an engine and model from database configuration.
 
 ## Current flow
 
 1. The Gradescope connector sends source code, a DB target UUID and visible
    functional-test diagnostics to `POST /v1/feedback`, using an assignment token.
 2. The Web backend authenticates the token, reads assignment/target/rubric/model
-   configuration from PostgreSQL, checks limits and calls Vertex.
+   configuration from PostgreSQL, checks limits and calls the selected engine.
 3. Feedback is appended to Gradescope `results.json` as a `0/0` row. This path
    does not write submissions, test results or feedback to DB. Backend JSON keeps
    token hashes, call quota and replay responses.
 
-Google credentials stay on the backend, which uses service-account impersonation
-ADC. The Gradescope package contains only an assignment token for authentication;
-it does not need Google credentials or a provider SDK.
+All provider credentials stay on the backend. The Gradescope package contains
+only an assignment token; it cannot choose an engine/model or call providers directly.
+
+| Engine | Backend credentials | Adapter and model selection |
+| --- | --- | --- |
+| `vertex` | Google IAM through impersonation ADC | `VertexProvider` reuses `GeminiProvider`; Vertex Gemini model ID |
+| `pitt` | `PITT_API_KEY` | `PittProvider`; full project-authorized `@.../...` model ID |
+| `gemini_api` | `GEMINI_API_KEY` | `GeminiProvider`; Gemini Developer API model ID |
+
+Pitt uses `POST https://api.portkey.ai/v1/chat/completions` with
+`x-portkey-api-key`, a `model` and `messages`. One adapter supports the project's
+GPT, Claude and Gemini routes. Gemini API free-tier access depends on the account,
+model and quota; `gemini_api` also supports paid access. The old direct OpenAI and
+Claude adapters have been removed.
 
 ## Use the backend
 
 Follow the [Web deployment guide](../web/README.md#deploy-the-combined-web-and-ai-backend)
-to configure the DB assignment, model, Google identity and assignment token.
+to configure the DB assignment, engine/model, credentials and assignment token.
 For a local backend process, install `web/requirements.txt`; Docker installs those
 dependencies during its build.
 
@@ -41,6 +52,14 @@ and `targets[].target_id` to that UUID, then follow the
 The build copies the canonical `local_client.py` into the ZIP; keep tokens and
 generated ZIPs out of Git.
 
+The response identifies `engine`, vendor `provider`, `requested_model`, returned
+`model_name`, feedback and available usage. For each independent repeat or model
+comparison, supply a new `--request-id`, for example `pitt-gpt51-trial-001`.
+Reuse the same ID only to retry/check the same request. The default content hash
+replays cached feedback even after an engine, model or rubric change. Fix the code,
+rubric and prompt inputs when comparing predictability across repeated generations.
+Pitt requests force a fresh gateway call with `x-portkey-cache-force-refresh: true`.
+
 ## Module layout
 
 | Location | Responsibility |
@@ -50,9 +69,9 @@ generated ZIPs out of Git.
 | [models.py](models.py) | Typed source, target, rubric, request and response contracts |
 | [FileResolver.py](FileResolver.py) | Resolve a target to one source file without executing student code |
 | [PromptBuilder.py](PromptBuilder.py) | Build prompts from code, rubric and test diagnostics |
-| [ILLMProvider/](ILLMProvider/) | Gemini, OpenAI, Claude and offline FakeProvider adapters |
+| [ILLMProvider/](ILLMProvider/) | Vertex, shared Gemini, Pitt Chat Completions and offline FakeProvider adapters |
 | [AIGradingComponent.py](AIGradingComponent.py) | Reusable provider orchestration, retries and result selection |
-| [web/app/](../web/app/) | HTTP routes, DB configuration, token/quota state and Vertex credentials |
+| [web/app/](../web/app/) | HTTP routes, DB configuration, token/quota state and backend credentials |
 
 ## Reuse the Python core
 
@@ -63,7 +82,10 @@ Construct a `FeedbackRequest` with `target`, `rubric`, `resolved` source and
 selected result. The default selector chooses the first provider, without quality
 ranking; `FakeProvider` supports offline use.
 
-The current Web route calls `VertexProvider` → `GeminiProvider` directly.
+The Web route selects a backend provider using the configured engine and model;
+`VertexProvider` owns the IAM client and delegates to `GeminiProvider`; Gemini API
+uses `GeminiProvider` directly, while Pitt uses `PittProvider`. All adapters live
+in `ILLMProvider/` and receive explicit settings without depending on Web types.
 `AIGradingComponent` is available for other integrations; its optional scores and
 comparison fields are not exposed by the current Gradescope feedback flow.
 
@@ -74,6 +96,7 @@ comparison fields are not exposed by the current Gradescope feedback flow.
 - AI failure preserves functional scores; compilation failure currently skips AI.
 - A local-backend Gradescope-to-Vertex run was verified. Deployment and the full
   server DB-to-Vertex-to-Gradescope flow still need verification.
-- OpenAI/Claude adapters and the older `autograder-gemini-feedback/` package remain
-  in the repository. They are not the current Vertex integration path; their live
-  integrations are not all verified.
+- Local Docker feedback through all three engines has been verified with live
+  models. Each deployment still needs its own credential/access check.
+  The historical `autograder-gemini-feedback/` package calls Google
+  directly; use the backend client above for the selectable-engine architecture.

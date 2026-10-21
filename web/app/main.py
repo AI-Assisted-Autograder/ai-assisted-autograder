@@ -3,13 +3,13 @@ from uuid import UUID
 
 from fastapi import Depends, FastAPI, Header, HTTPException, Query, Response
 from fastapi.staticfiles import StaticFiles
-from pydantic import BaseModel
+from pydantic import BaseModel, ValidationError
 from sqlalchemy import func, select, text
 from sqlalchemy.exc import IntegrityError
 
 from app.config import settings
 from app.db import SessionLocal, engine
-from .feedback_assignment import MAX_CONFIG_BYTES, primary_google_model, read_assignment_config
+from .feedback_assignment import MAX_CONFIG_BYTES, primary_model_config, read_assignment_config
 from .feedback_config import (
     AssignmentConfig, AssignmentCreateInput, CreatedAssignmentConfig, RubricConfig, TargetConfig,
 )
@@ -82,7 +82,7 @@ def create_assignment(
             ))
             if existing is not None:
                 raise HTTPException(status_code=409, detail="Assignment already exists for this platform ID")
-            model = primary_google_model(session.scalars(
+            model_config = primary_model_config(session.scalars(
                 select(LlmProviderConfig).where(LlmProviderConfig.is_enabled)
             ).all())
             if request.course_id is not None:
@@ -124,14 +124,14 @@ def create_assignment(
                 )
             result = CreatedAssignmentConfig(
                 id=str(assignment.id), course_id=course.id, enabled=True,
-                model=model, targets=targets,
+                **model_config, targets=targets,
             )
             if len(result.model_dump_json().encode("utf-8")) > MAX_CONFIG_BYTES:
                 raise HTTPException(status_code=413, detail="Assignment configuration exceeds 1 MiB")
-    except StoreError:
+    except (StoreError, ValidationError):
         raise HTTPException(
             status_code=503,
-            detail="Configure an enabled primary GOOGLE provider with a supported Gemini model first",
+            detail="Configure an enabled primary provider with a valid engine and model first",
         ) from None
     except IntegrityError:
         raise HTTPException(status_code=409, detail="Assignment configuration conflicts with existing data") from None

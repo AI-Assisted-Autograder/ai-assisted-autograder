@@ -258,7 +258,7 @@ class SqlGradingRepository(IGradingRepository):
                 a.language,
                 a.is_active,
                 targets,
-                tuple(ProviderConfig(p.provider, p.model_name, p.is_primary) for p in providers),
+                tuple(ProviderConfig(p.provider, p.model_name, p.is_primary, p.engine) for p in providers),
             )
 
     def get_selected_feedback(self, submission_id: uuid.UUID) -> FeedbackPackage:

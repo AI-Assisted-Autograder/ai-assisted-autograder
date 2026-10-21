@@ -8,7 +8,9 @@ from pydantic import BaseModel, ConfigDict, Field, field_validator, model_valida
 
 
 Identifier = Annotated[str, Field(min_length=1, max_length=128, pattern=r"^[A-Za-z0-9_.:-]+$")]
-ModelName = Annotated[str, Field(min_length=1, max_length=128, pattern=r"^gemini-[a-z0-9.-]+$")]
+Engine = Literal["vertex", "pitt", "gemini_api"]
+ModelName = Annotated[str, Field(min_length=1, max_length=256, pattern=r"^[A-Za-z0-9@][A-Za-z0-9_./:@+-]*$")]
+ModelList = Annotated[list[ModelName], Field(min_length=1, max_length=64)]
 Digest = Annotated[str, Field(pattern=r"^[0-9a-f]{64}$")]
 
 
@@ -17,10 +19,10 @@ class StrictModel(BaseModel):
 
 
 class BackendConfig(StrictModel):
-    project: Annotated[str, Field(pattern=r"^[a-z][a-z0-9-]{4,61}[a-z0-9]$")]
-    location: Annotated[str, Field(pattern=r"^[a-z][a-z0-9-]{0,62}$")]
-    service_account: Annotated[str, Field(pattern=r"^[a-z0-9-]+@[a-z0-9-]+\.iam\.gserviceaccount\.com$")]
-    allowed_models: Annotated[list[ModelName], Field(min_length=1, max_length=16)]
+    project: Annotated[str, Field(pattern=r"^[a-z][a-z0-9-]{4,61}[a-z0-9]$")] | None = None
+    location: Annotated[str, Field(pattern=r"^[a-z][a-z0-9-]{0,62}$")] | None = None
+    service_account: Annotated[str, Field(pattern=r"^[a-z0-9-]+@[a-z0-9-]+\.iam\.gserviceaccount\.com$")] | None = None
+    allowed_models: Annotated[dict[Engine, ModelList], Field(min_length=1)]
     max_code_chars: int = Field(default=12_000, ge=1, le=120_000)
     max_guidance_chars: int = Field(default=2_000, ge=0, le=16_000)
     max_output_tokens: int = Field(default=1_024, ge=1, le=8_192)
@@ -30,10 +32,28 @@ class BackendConfig(StrictModel):
 
     @field_validator("allowed_models")
     @classmethod
-    def unique_models(cls, value: list[str]) -> list[str]:
-        if len(value) != len(set(value)):
-            raise ValueError("allowed models must be unique")
+    def unique_models(cls, value: dict[str, list[str]]) -> dict[str, list[str]]:
+        for engine, models in value.items():
+            if len(models) != len(set(models)):
+                raise ValueError("allowed models must be unique within each engine")
+            for model in models:
+                validate_engine_model(engine, model)
         return value
+
+    @model_validator(mode="after")
+    def vertex_configuration(self) -> "BackendConfig":
+        if "vertex" in self.allowed_models and not all((self.project, self.location, self.service_account)):
+            raise ValueError("Vertex requires project, location and service_account")
+        return self
+
+
+def validate_engine_model(engine: str, model: str) -> None:
+    if engine == "pitt":
+        route, separator, name = model.partition("/")
+        if not route.startswith("@") or len(route) < 2 or not separator or not name:
+            raise ValueError("Pitt requires the full @provider/model ID")
+    elif not model.startswith("gemini-"):
+        raise ValueError("Google engines require a Gemini model ID")
 
 
 class RubricInput(StrictModel):
@@ -56,8 +76,17 @@ class TargetConfig(StrictModel):
 class AssignmentConfig(StrictModel):
     id: Identifier
     enabled: bool = True
+    engine: Engine = "vertex"
+    provider: Literal["GOOGLE", "OPENAI", "ANTHROPIC"] = "GOOGLE"
     model: ModelName
     targets: Annotated[dict[Identifier, TargetConfig], Field(min_length=1)]
+
+    @model_validator(mode="after")
+    def selected_model(self) -> "AssignmentConfig":
+        validate_engine_model(self.engine, self.model)
+        if self.engine != "pitt" and self.provider != "GOOGLE":
+            raise ValueError("Google engines require provider GOOGLE")
+        return self
 
 
 class CourseInput(StrictModel):
@@ -118,6 +147,8 @@ class TokenRecord(StrictModel):
 class RequestRecord(StrictModel):
     request_id: Identifier
     target_id: Identifier
+    engine: Engine = "vertex"
+    provider: Literal["GOOGLE", "OPENAI", "ANTHROPIC"] = "GOOGLE"
     model: ModelName
     digest: Digest
     status: Literal["processing", "completed", "failed", "interrupted"]
@@ -148,7 +179,7 @@ class RequestRecord(StrictModel):
 
 
 class State(StrictModel):
-    schema_version: Literal[2] = 2
+    schema_version: Literal[3] = 3
     config: BackendConfig
     assignments: dict[Identifier, AssignmentAccess]
     tokens: dict[Digest, TokenRecord]

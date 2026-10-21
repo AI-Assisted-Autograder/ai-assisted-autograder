@@ -10,9 +10,8 @@ from google.auth.exceptions import GoogleAuthError
 from google import genai
 from google.genai import types
 
-from ai_grading.ILLMProvider.GeminiProvider import GeminiProvider
-from ai_grading.ILLMProvider.ILLMProvider import ProviderError
-from .feedback_config import AssignmentConfig, BackendConfig
+from .GeminiProvider import GeminiProvider
+from .ILLMProvider import ProviderError
 
 
 _auth_log_lock = threading.Lock()
@@ -48,7 +47,16 @@ def _private_auth_logs():
 
 class VertexProvider:
     @_private_auth_logs()
-    def __init__(self, config: BackendConfig, assignment: AssignmentConfig):
+    def __init__(
+        self,
+        model: str,
+        *,
+        project: str,
+        location: str,
+        service_account: str,
+        timeout_seconds: float = 60.0,
+        max_output_tokens: int = 4096,
+    ) -> None:
         self._client = None
         try:
             credentials, _ = google.auth.default(
@@ -56,25 +64,25 @@ class VertexProvider:
             )
             # This local prototype deliberately accepts keyless impersonation ADC.
             if (not isinstance(credentials, impersonated_credentials.Credentials)
-                    or credentials.service_account_email != config.service_account):
+                    or credentials.service_account_email != service_account):
                 raise ValueError("Impersonation ADC required")
-            endpoint = ("https://aiplatform.googleapis.com" if config.location == "global"
-                        else f"https://{config.location}-aiplatform.googleapis.com")
+            endpoint = ("https://aiplatform.googleapis.com" if location == "global"
+                        else f"https://{location}-aiplatform.googleapis.com")
             self._client = genai.Client(
                 vertexai=True, credentials=credentials,
-                project=config.project, location=config.location,
+                project=project, location=location,
                 http_options=types.HttpOptions(
                     api_version="v1", base_url=endpoint,
-                    timeout=max(1, int(config.timeout_seconds * 1000)),
+                    timeout=max(1, int(timeout_seconds * 1000)),
                     retry_options=types.HttpRetryOptions(attempts=1),
                     client_args={"trust_env": False, "follow_redirects": False},
                     async_client_args={"trust_env": False, "follow_redirects": False},
                 ),
             )
             self._provider = GeminiProvider(
-                model=assignment.model, client=self._client,
-                timeout_seconds=config.timeout_seconds,
-                max_output_tokens=config.max_output_tokens,
+                model=model, client=self._client,
+                timeout_seconds=timeout_seconds,
+                max_output_tokens=max_output_tokens,
             )
         except Exception:
             try:

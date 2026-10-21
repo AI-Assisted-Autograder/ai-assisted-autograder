@@ -42,6 +42,7 @@ def initialize(
     location: str = DEFAULT_LOCATION,
     service_account: str = DEFAULT_SERVICE_ACCOUNT,
     allowed_models: list[str] | None = None,
+    engine_models: dict[str, list[str]] | None = None,
 ) -> None:
     """Create config/state and issue a random token; refuse every existing output."""
     assignment_id = str(UUID(assignment_id))
@@ -53,10 +54,17 @@ def initialize(
     if len(set(paths)) != 3 or any(path.exists() or path.is_symlink() for path in paths):
         raise FileExistsError("initialization outputs must be distinct new files")
     raw_token = secrets.token_urlsafe(32)
+    models = {key: list(value) for key, value in (engine_models or {}).items()}
+    if allowed_models:
+        models.setdefault("vertex", []).extend(allowed_models)
+    if not models:
+        models = {"vertex": [DEFAULT_MODEL]}
+    vertex = "vertex" in models
     state = State(
-        config=BackendConfig(project=project, location=location,
-                             service_account=service_account,
-                             allowed_models=allowed_models if allowed_models is not None else [DEFAULT_MODEL]),
+        config=BackendConfig(project=project if vertex else None,
+                             location=location if vertex else None,
+                             service_account=service_account if vertex else None,
+                             allowed_models=models),
         assignments={assignment_id: AssignmentAccess(max_calls=max_calls)},
         tokens={token_hash(raw_token): TokenRecord(
             assignment_id=assignment_id, expires_at=utc_now() + timedelta(hours=expires_in_hours),
@@ -93,14 +101,23 @@ def main() -> int:
     parser.add_argument("--location", default=DEFAULT_LOCATION)
     parser.add_argument("--service-account", default=DEFAULT_SERVICE_ACCOUNT)
     parser.add_argument("--allowed-model", action="append", dest="allowed_models",
-                        help="Allowed Gemini model; repeat for multiple models")
+                        help="Allowed Vertex model (legacy option); repeat for multiple models")
+    parser.add_argument("--allow-model", action="append", default=[], metavar="ENGINE:MODEL",
+                        help="Allow an engine/model pair; repeat for multiple models or engines")
     args = parser.parse_args()
+    engine_models = {}
+    for item in args.allow_model:
+        engine, separator, model = item.partition(":")
+        if not separator or engine not in ("vertex", "pitt", "gemini_api") or not model:
+            parser.error("--allow-model requires vertex:MODEL, pitt:MODEL or gemini_api:MODEL")
+        engine_models.setdefault(engine, []).append(model)
     try:
         initialize(args.state, args.token_file, args.client_config,
                    assignment_id=str(args.assignment_id),
                    max_calls=args.max_calls, expires_in_hours=args.expires_in_hours,
                    backend_url=args.backend_url, project=args.project, location=args.location,
-                   service_account=args.service_account, allowed_models=args.allowed_models)
+                   service_account=args.service_account, allowed_models=args.allowed_models,
+                   engine_models=engine_models)
     except FileExistsError:
         parser.exit(2, "Initialization refused: an output already exists or paths overlap.\n")
     except Exception:

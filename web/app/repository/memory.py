@@ -80,6 +80,7 @@ class _LlmProviderConfig:
     model_name: str
     is_enabled: bool
     is_primary: bool
+    engine: str = "vertex"
 
 
 @dataclass
@@ -201,9 +202,10 @@ class InMemoryRepository(IGradingRepository):
         return r.id
 
     def add_provider(
-        self, provider: str, model_name: str, *, is_enabled: bool = True, is_primary: bool = False
+        self, provider: str, model_name: str, *, is_enabled: bool = True,
+        is_primary: bool = False, engine: str = "vertex",
     ) -> None:
-        self.providers.append(_LlmProviderConfig(provider, model_name, is_enabled, is_primary))
+        self.providers.append(_LlmProviderConfig(provider, model_name, is_enabled, is_primary, engine))
 
     def upsert_submission(self, ref: SubmissionRef) -> uuid.UUID:
         if ref.assignment_id not in self.assignments:
@@ -338,7 +340,7 @@ class InMemoryRepository(IGradingRepository):
                 TargetConfig(gt.id, gt.identifier, gt.kind, gt.max_score, self._current_rubric(gt.id))
                 for gt in targets
             ),
-            tuple(ProviderConfig(p.provider, p.model_name, p.is_primary) for p in providers),
+            tuple(ProviderConfig(p.provider, p.model_name, p.is_primary, p.engine) for p in providers),
         )
 
     def get_selected_feedback(self, submission_id: uuid.UUID) -> FeedbackPackage:

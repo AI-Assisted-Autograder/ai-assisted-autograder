@@ -1,4 +1,4 @@
-"""Gemini adapter for the container, with instructor credentials and local config."""
+"""Gemini adapter for an injected Vertex client or a Gemini API-key client."""
 
 import json
 from math import isfinite
@@ -60,6 +60,7 @@ class GeminiProvider:
         )
         self._owns_client = client is None
         self._client = client if client is not None else genai.Client(
+            vertexai=False,
             api_key=api_key,
             http_options=self._http_options,
         )

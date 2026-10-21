@@ -9,20 +9,28 @@ from uuid import UUID
 
 from pydantic import TypeAdapter
 
-from .feedback_config import AssignmentConfig, ModelName, RubricConfig, TargetConfig
+from .feedback_config import (
+    AssignmentConfig, Engine, ModelName, RubricConfig, TargetConfig, validate_engine_model,
+)
 from .feedback_store import StoreError
 
 
 MAX_CONFIG_BYTES = 1_048_576
 
 
-def primary_google_model(providers) -> str:
-    """Select the existing primary model without changing global provider policy."""
+def primary_model_config(providers) -> dict[str, str]:
+    """Select the enabled primary engine and model without changing global policy."""
     primary = [provider for provider in providers if provider.is_primary]
     try:
-        if len(primary) != 1 or primary[0].provider != "GOOGLE":
-            raise ValueError("An enabled primary Google provider is required")
-        return TypeAdapter(ModelName).validate_python(primary[0].model_name)
+        if len(primary) != 1:
+            raise ValueError("Exactly one enabled primary provider is required")
+        selected = primary[0]
+        engine = TypeAdapter(Engine).validate_python(selected.engine)
+        model = TypeAdapter(ModelName).validate_python(selected.model_name)
+        if engine in ("vertex", "gemini_api") and selected.provider != "GOOGLE":
+            raise ValueError("Google engines require a GOOGLE provider")
+        validate_engine_model(engine, model)
+        return {"engine": engine, "provider": selected.provider, "model": model}
     except ValueError:
         raise StoreError("assignment_config_unavailable", 503) from None
 
@@ -45,7 +53,7 @@ def read_assignment_config(repository, assignment_id: str) -> AssignmentConfig:
     if not assignment.is_active:
         raise StoreError("assignment_forbidden", 403)
     try:
-        model = primary_google_model(assignment.providers)
+        model_config = primary_model_config(assignment.providers)
         targets = {}
         for target in assignment.targets:
             rubric = target.rubric
@@ -63,7 +71,7 @@ def read_assignment_config(repository, assignment_id: str) -> AssignmentConfig:
             )
         return AssignmentConfig(
             id=str(assignment.id), enabled=assignment.is_active,
-            model=model, targets=targets,
+            **model_config, targets=targets,
         )
     except (TypeError, ValueError):
         raise StoreError("assignment_config_unavailable", 503) from None

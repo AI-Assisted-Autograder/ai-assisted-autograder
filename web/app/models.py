@@ -61,6 +61,7 @@ PLATFORMS = ("GRADESCOPE",)
 GRADING_MODES = ("IMMEDIATE", "NIGHTLY")
 TARGET_KINDS = ("METHOD", "CLASS", "FILE")
 PROVIDERS = ("ANTHROPIC", "OPENAI", "GOOGLE")
+ENGINES = ("vertex", "pitt", "gemini_api")
 TEST_STATUSES = ("PASS", "FAIL", "ERROR", "SKIP")
 TRIGGERS = ("SCHEDULE", "MANUAL")
 
@@ -142,6 +143,7 @@ class LlmProviderConfig(Base):
     __tablename__ = "llm_provider_config"
     __table_args__ = (
         one_of("provider", PROVIDERS),
+        one_of("engine", ENGINES),
         # At most one primary provider.
         Index(
             "uq_llm_provider_config_one_primary",
@@ -153,6 +155,7 @@ class LlmProviderConfig(Base):
 
     id: Mapped[uuid.UUID] = uuid_pk()
     provider: Mapped[str] = mapped_column(Text)
+    engine: Mapped[str] = mapped_column(Text, server_default="vertex")
     model_name: Mapped[str] = mapped_column(Text)
     is_enabled: Mapped[bool] = mapped_column(server_default=true())
     is_primary: Mapped[bool] = mapped_column(server_default=false())

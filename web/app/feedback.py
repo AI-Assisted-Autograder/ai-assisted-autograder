@@ -36,9 +36,9 @@ MESSAGES = {
     "request_conflict": "This request_id was used with different content.",
     "processing": "This request is already processing; no new call was made.",
     "interrupted": "This request was interrupted; its reserved call remains consumed.",
-    "model_error": "Vertex did not return usable feedback; the reserved call remains consumed.",
-    "upstream_timeout": "Vertex timed out; the reserved call remains consumed.",
-    "backend_auth_unavailable": "Backend Vertex authentication is unavailable.",
+    "model_error": "The model did not return usable feedback; the reserved call remains consumed.",
+    "upstream_timeout": "The model timed out; the reserved call remains consumed.",
+    "backend_auth_unavailable": "Backend model authentication is unavailable.",
     "backend_error": "Backend could not safely finish this request.",
 }
 
@@ -61,8 +61,24 @@ def error(code: str, status: int, request_id: str | None = None):
 
 
 def default_provider_factory(config, assignment):
-    from .vertex import VertexProvider
-    return VertexProvider(config, assignment)
+    options = {"model": assignment.model, "timeout_seconds": config.timeout_seconds,
+               "max_output_tokens": config.max_output_tokens}
+    if assignment.engine == "vertex":
+        from ai_grading.ILLMProvider.VertexProvider import VertexProvider
+        return VertexProvider(
+            **options, project=config.project, location=config.location,
+            service_account=config.service_account,
+        )
+    if assignment.engine == "pitt":
+        from ai_grading.ILLMProvider.PittProvider import PittProvider
+        return PittProvider(**options, provider=assignment.provider)
+    if assignment.engine == "gemini_api":
+        from ai_grading.ILLMProvider.GeminiProvider import GeminiProvider
+        key = os.environ.get("GEMINI_API_KEY") or os.environ.get("GOOGLE_API_KEY")
+        if not key or not key.strip():
+            raise ProviderError("backend_auth_unavailable", MESSAGES["backend_auth_unavailable"])
+        return GeminiProvider(**options, api_key=key)
+    raise ValueError("Unsupported feedback engine")
 
 
 def create_feedback_router(state_path: str | Path, *, assignment_loader,
@@ -83,7 +99,7 @@ def create_feedback_router(state_path: str | Path, *, assignment_loader,
         runtime.inflight = 0
         runtime.tasks = set()
         pool = ThreadPoolExecutor(max_workers=store.config.max_concurrency,
-                                  thread_name_prefix="vertex")
+                                  thread_name_prefix="feedback")
         runtime.pool = pool
         try:
             yield
@@ -114,7 +130,7 @@ def create_feedback_router(state_path: str | Path, *, assignment_loader,
         if time.monotonic() >= deadline:
             raise TimeoutError
         with runtime.provider_lock:
-            key = (assignment_id, assignment.model)
+            key = (assignment_id, assignment.engine, assignment.provider, assignment.model)
             if key not in runtime.providers:
                 runtime.providers[key] = factory(runtime.store.config, assignment)
             provider = runtime.providers[key]
@@ -156,7 +172,7 @@ def create_feedback_router(state_path: str | Path, *, assignment_loader,
             assignment = await asyncio.to_thread(assignment_loader, assignment_id)
             if assignment.id != assignment_id or not assignment.enabled:
                 return error("assignment_forbidden", 403, rid)
-            if assignment.model not in config.allowed_models:
+            if assignment.model not in config.allowed_models.get(assignment.engine, []):
                 return error("assignment_config_unavailable", 503, rid)
         except StoreError as exc:
             return error(exc.code, exc.status_code, rid)
@@ -195,14 +211,17 @@ def create_feedback_router(state_path: str | Path, *, assignment_loader,
             if existing is None and runtime.inflight >= config.max_concurrency:
                 return error("busy", 429, rid)
             record, created = store.reserve(assignment_id, rid, digest, payload.target_id,
-                                            assignment.model)
+                                            assignment.model, engine=assignment.engine,
+                                            provider=assignment.provider)
         except StoreError as exc:
             return error(exc.code, exc.status_code, rid)
         except Exception:
             return error("backend_error", 500, rid)
         if not created:
             if record.status == "completed":
-                return JSONResponse(record.result, headers={"Cache-Control": "no-store"})
+                result = {"engine": record.engine, "provider": record.provider,
+                          "requested_model": record.model, **record.result}
+                return JSONResponse(result, headers={"Cache-Control": "no-store"})
             if record.status in ("processing", "interrupted"):
                 return error(record.status, 409, rid)
             code = record.error_code or "model_error"
@@ -227,6 +246,8 @@ def create_feedback_router(state_path: str | Path, *, assignment_loader,
             response = await asyncio.wait_for(asyncio.shield(future), config.timeout_seconds)
             result = {
                 "request_id": rid, "status": "completed",
+                "engine": assignment.engine, "provider": assignment.provider,
+                "requested_model": assignment.model,
                 "feedback_text": response.feedback_text, "model_name": response.model_name,
                 "usage": {"input_tokens": response.input_tokens,
                           "output_tokens": response.output_tokens},

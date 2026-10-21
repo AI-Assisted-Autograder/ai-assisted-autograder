@@ -44,7 +44,7 @@ follows the server output, and `docker compose down` stops everything
 The `/internal/nightly/...` and assignment configuration endpoints return 401
 unless requests send that value in an `X-Internal-Token` header. The nightly
 trigger in `integration/` must use the same token. Recreate Web with
-`docker compose up -d web` after changing `.env`. For server deployment with Vertex, follow
+`docker compose up -d web` after changing `.env`. For server deployment with AI feedback, follow
 [Deploy the combined Web and AI backend](#deploy-the-combined-web-and-ai-backend).
 
 ### Sample data
@@ -94,13 +94,29 @@ alembic upgrade head
 uvicorn app.main:app --reload
 ```
 
-## Vertex feedback API (database configuration)
+## AI feedback API (database configuration)
 
-The Web Docker service reads assignment, target, rubric and primary Google model
-configuration from PostgreSQL and calls Vertex. Feedback is displayed in Gradescope
+The Web Docker service reads assignment, target, rubric and the primary engine/model
+configuration from PostgreSQL. Feedback is displayed in Gradescope
 as a zero-point row; this path does not write submissions, test results or feedback
 to DB or participate in nightly scheduling. JSON retains backend policy, assignment
-token hashes, call quota and replay responses.
+token hashes, call quota and replay responses. The backend supports three engines:
+
+| Engine | Credentials on the backend | Model |
+| --- | --- | --- |
+| `vertex` | Google IAM through impersonation ADC | Vertex Gemini ID; vendor `GOOGLE` |
+| `pitt` | `PITT_API_KEY` | Exact Pitt project route; vendor `OPENAI`, `ANTHROPIC` or `GOOGLE` |
+| `gemini_api` | `GEMINI_API_KEY` | Gemini Developer API ID; vendor `GOOGLE` |
+
+Pitt requests use `POST https://api.portkey.ai/v1/chat/completions`,
+`x-portkey-api-key`, and JSON `model`/`messages`. Copy model IDs from the Pitt
+project details, including their full routing prefix. Gemini API free-tier access
+depends on the account, model and quota; the same engine supports paid use.
+The container sends neither model choices nor provider credentials.
+
+When running Web without Docker, export `PITT_API_KEY` or `GEMINI_API_KEY` in
+the server process environment before starting Uvicorn. Reading `.env` through
+Web settings does not export provider keys; Compose injects them automatically.
 
 ### Prepare the database configuration
 
@@ -133,7 +149,9 @@ Replace `course` with `"course_id": "YOUR_COURSE_UUID"` to reuse a course.
 Creation returns 201 with the assignment UUID in `id` and target UUIDs as keys in
 `targets`; duplicates return 409 without overwriting data. These DB UUIDs, not the
 Gradescope assignment number or filename, bind the token and feedback requests.
-No schema migration is needed; global provider settings are managed separately.
+Migration `0003` adds the global provider's `engine` column; Docker applies it at
+startup. Existing rows default to `vertex`. Global provider settings are managed
+separately from assignment creation.
 
 ### Deploy the combined Web and AI backend
 
@@ -144,20 +162,31 @@ AI requests (30 seconds by default). The combined service reads SQL directly;
 1. From the existing `web/` directory, preserve the Compose project name and `.env`.
    Retain the private `INTEGRATION_API_TOKEN` shared with nightly automation; replace
    the example token on a new server. Leave `FEEDBACK_STATE_PATH=` empty for initial setup.
-2. Put `application_default_credentials.json` in the host directory specified by
-   `GOOGLE_ADC_DIR` (default: `../ai_grading/.local-vertex/google`, relative to `web/`).
-   Use a dedicated private directory and file permissions `700`/`600`; Compose mounts
-   it read-only. Generate **impersonation ADC** with
+2. Set `PITT_API_KEY` and/or `GEMINI_API_KEY` in private `.env` for those engines.
+   For Vertex, set `GOOGLE_ADC_DIR` to a private host directory containing
+   `application_default_credentials.json` (for example,
+   `../ai_grading/.local-vertex/google`, relative to `web/`). Use directory/file
+   permissions `700`/`600`; Compose mounts it read-only. Generate **impersonation ADC** with
    `gcloud auth application-default login --impersonate-service-account=YOUR_SERVICE_ACCOUNT`.
    That service account must match the initializer and have Vertex access; the caller
    needs Service Account Token Creator permission. Ordinary user ADC and service-account
    keys are unsupported. See [Google's ADC setup](https://docs.cloud.google.com/docs/authentication/set-up-adc-local-dev-environment).
+   Pitt/Gemini API do not need ADC: leave `GOOGLE_ADC_DIR` empty to mount an inert
+   `/dev/null` placeholder. Provider API keys are never stored in runtime JSON or the ZIP.
 3. Run `docker compose up -d --build web` and wait for `/health` to return 200.
-   Have the DB owner configure one enabled primary `GOOGLE` row in `llm_provider_config`
-   with a Gemini model available in the chosen project/location. Do not run `app.seed`
-   on the shared DB. Create and read the assignment using the endpoints above.
+   Have the DB owner configure one enabled primary row in `llm_provider_config`
+   with the engine, vendor and accessible model. For an empty provider table:
+
+   ```sql
+   INSERT INTO llm_provider_config (engine, provider, model_name, is_enabled, is_primary)
+   VALUES ('pitt', 'OPENAI', '@pitt-ai-connect-azure-foundry/gpt-5.1', true, true);
+   ```
+
+   Substitute a model authorized for the Pitt project. For an existing primary row,
+   use the update below. Do not run `app.seed` on the shared DB. Create and read the
+   assignment using the endpoints above.
 4. Initialize the persistent state once, using the returned assignment UUID and the
-   same model as the DB. Choose the call allowance and expiry for the planned test:
+   same engine/model as the DB. Choose the call allowance and expiry for the planned test:
 
    ```bash
    docker compose exec web python -m app.seed_feedback \
@@ -166,10 +195,14 @@ AI requests (30 seconds by default). The combined service reads SQL directly;
      --token-file /var/lib/ai-feedback/client/assignment.token \
      --client-config /var/lib/ai-feedback/client/config.json \
      --backend-url https://YOUR-SERVER \
-     --project YOUR_GOOGLE_PROJECT --location global \
-     --service-account YOUR_SERVICE_ACCOUNT --allowed-model YOUR_DB_GEMINI_MODEL \
+     --allow-model pitt:@pitt-ai-connect-azure-foundry/gpt-5.1 \
      --max-calls 10 --expires-in-hours 168
    ```
+
+   Repeat `--allow-model ENGINE:MODEL` for each permitted engine/model combination.
+   For Gemini API, use `--allow-model gemini_api:YOUR_GEMINI_MODEL`. For Vertex,
+   use `--allow-model vertex:YOUR_GEMINI_MODEL` and specify `--project`, `--location`
+   and `--service-account`. The legacy `--allowed-model` flag means Vertex only.
 
 5. Export the assignment token and securely transfer it to the packaging workstation
    at the same repository-relative path, owned by that user with mode `600`:
@@ -181,14 +214,46 @@ AI requests (30 seconds by default). The combined service reads SQL directly;
    chmod 600 ../ai_grading/.local-vertex/server-client/assignment.token
    ```
 
-   Google credentials, the internal token and backend state stay on the server.
+   All provider credentials, the internal token and backend state stay on the server.
 6. Set `FEEDBACK_STATE_PATH=/var/lib/ai-feedback/state.json` in `.env`, then run
    `docker compose up -d --no-deps web`. `/docs` should include `/v1/feedback`.
-   `/health` checks the DB, not Vertex access; verify a real request below.
+   `/health` checks the DB, not provider access; verify a real request below.
 
 For later updates, run `docker compose up -d --build web`. Preserve `.env`,
 `db_data` and `feedback_data`; never use `down -v` or rerun the initializer to update.
 Use one Web worker/container per state volume.
+
+### Change engine or model
+
+The enabled primary DB row selects the engine/model for **all assignments**. The
+JSON `config.allowed_models` allowlist must also include that exact pair. Stop Web
+before editing the existing state file, preserve tokens/quota/replay records, and
+restart afterward. Do not rerun the initializer. Example allowlist:
+
+```json
+{
+  "vertex": ["YOUR_VERTEX_GEMINI_MODEL"],
+  "pitt": ["@pitt-ai-connect-azure-foundry/gpt-5.1"],
+  "gemini_api": ["YOUR_GEMINI_API_MODEL"]
+}
+```
+
+Omit engines you do not enable. If adding Vertex, also configure `project`,
+`location` and `service_account` in the existing `config` and supply its ADC.
+After the allowlist and credentials are ready, update the current primary row:
+
+```sql
+BEGIN;
+UPDATE llm_provider_config
+SET engine = 'pitt', provider = 'OPENAI',
+    model_name = '@pitt-ai-connect-azure-foundry/gpt-5.1', is_enabled = true
+WHERE is_primary = true;
+COMMIT;
+```
+
+Use the corresponding vendor when changing models, and verify the update affected
+one row. Read the assignment configuration endpoint to confirm the selection.
+There is no configuration editor in the current instructor UI.
 
 ### Package and run in Gradescope
 
@@ -200,7 +265,7 @@ python3 -I -S ai_grading/local_client.py \
   --backend-url https://YOUR-SERVER \
   --token-file ai_grading/.local-vertex/server-client/assignment.token \
   --code-file /absolute/path/to/SortedCollection.java \
-  --target-id YOUR_TARGET_UUID --json
+  --target-id YOUR_TARGET_UUID --request-id pitt-gpt51-trial-001 --json
 ```
 
 In `ai_grading/autograder-vertex-feedback/ai_feedback.json`, set `targets[].target_id`
@@ -217,19 +282,28 @@ python3 ai_grading/autograder-vertex-feedback/build.py \
 Upload `ai_grading/autograder-vertex-feedback/vertex autograder.zip` and submit
 `SortedCollection.java`. The package remains specific to the SortedCollection/Java
 grader. AI failure preserves functional scores; compilation failure exits before AI.
-Server deployment, live Vertex access and the final Gradescope run still need verification.
+The response and Gradescope `extra_data` identify the engine, vendor, requested
+model and returned model. Local Docker DB-to-feedback requests have succeeded
+through all three engines. Production deployment still needs verification with
+the deployment credentials.
 
 ### Current limits and local use
 
-- Initialization creates one assignment/token in new schema-2 state. Adding assignments
-  or rotating tokens in existing state is not implemented; schema-1 state is incompatible.
+- Initialization creates one assignment/token in new schema-3 state. Schema-2 state
+  upgrades on load while retaining tokens, quota and replay results; schema-1 is
+  incompatible. Adding assignments or rotating tokens is not implemented.
 - Failures/timeouts retain reserved calls. Reusing a request ID returns its cached
-  response even after rubric/model changes; use a new ID for reevaluation. DB outages
-  also prevent replay. Stop Web before editing JSON policy.
+  response even after engine/model/rubric changes. Use a new `--request-id` for every
+  independent repeat or comparison; use the same ID for retries. The Gradescope
+  connector uses a stable content hash, so unchanged resubmissions replay feedback.
+  Pitt requests set `x-portkey-cache-force-refresh: true` to bypass the gateway cache.
+  DB outages also prevent replay. Stop Web before editing JSON policy.
 - For a separate local AI process, set `ASSIGNMENT_API_URL` and `INTEGRATION_API_TOKEN`,
   then use `python3 -m web.app.seed_feedback --help` and `python3 -m web.app.feedback --help`
   from the repository root. Keep local state separate from the server volume. The API
-  reader and Gradescope client accept HTTPS or loopback HTTP origins only.
+  reader and Gradescope client accept HTTPS or loopback HTTP origins only. Export
+  `PITT_API_KEY`/`GEMINI_API_KEY` or `GOOGLE_APPLICATION_CREDENTIALS` in the process
+  environment as needed; standalone Python does not automatically load `web/.env`.
 
 ## Database schema
 
@@ -312,7 +386,6 @@ app/
   seed.py        Sample data (see "Sample data" above)
   seed_feedback.py  Bind private token/runtime state to an existing DB assignment
   ui.py          Instructor UI pages (below)
-  vertex.py      Backend-owned Vertex client using the existing GeminiProvider
   templates/     Jinja2 templates for the UI
   static/        CSS
 migrations/      Alembic migrations
@@ -456,8 +529,8 @@ different database.
 Done: the schema and migrations, the full repository (SQL and in
 memory) with tests, the sample data script, the internal endpoints the
 nightly trigger calls (shared-token auth), authenticated assignment creation and
-configuration reads, and the read-only instructor pages. The optional Vertex
-feedback API reads assignment configuration from PostgreSQL
+configuration reads, and the read-only instructor pages. The optional AI
+feedback API selects Vertex, Pitt or Gemini API from PostgreSQL configuration
 and retains assignment tokens, quota and replay state in JSON (see above). It
 does not persist feedback or participate in the submission/nightly lifecycle.
 

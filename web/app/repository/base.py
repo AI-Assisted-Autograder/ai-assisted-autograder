@@ -120,6 +120,7 @@ class ProviderConfig:
     provider: str
     model_name: str
     is_primary: bool
+    engine: str = "vertex"
 
 
 @dataclass(frozen=True)

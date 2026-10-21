@@ -174,6 +174,16 @@ def request_feedback(
             or not isinstance(result.get("usage"), (dict, type(None)))
         ):
             raise ValueError
+        engine = result.get("engine", "vertex")
+        provider = result.get("provider", "GOOGLE")
+        requested_model = result.get("requested_model", result["model_name"])
+        if (
+            engine not in {"vertex", "pitt", "gemini_api"}
+            or provider not in {"GOOGLE", "OPENAI", "ANTHROPIC"}
+            or not isinstance(requested_model, str)
+            or not requested_model.strip()
+        ):
+            raise ValueError
         usage = result.get("usage")
         if usage is not None:
             usage = {key: usage[key] for key in ("input_tokens", "output_tokens", "total_tokens") if key in usage}
@@ -181,6 +191,7 @@ def request_feedback(
                 raise ValueError
         # Do not expose unknown response fields, headers, or diagnostic payloads.
         return {"request_id": identifier, "feedback_text": result["feedback_text"],
+                "engine": engine, "provider": provider, "requested_model": requested_model,
                 "model_name": result["model_name"], "usage": usage}
     except (UnicodeError, ValueError, TypeError):
         raise ClientError("Backend returned an invalid response.") from None
@@ -208,7 +219,7 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--code-file", type=Path, required=True, help="UTF-8 source file to review")
     parser.add_argument("--target-id", default="example")
     parser.add_argument("--guidance", help="Optional feedback preference, subject to backend limits")
-    parser.add_argument("--request-id", help="Default: stable SHA-256 identifier of target, code, and guidance")
+    parser.add_argument("--request-id", help="New ID for each independent trial; reuse an ID for retries. Default: stable content hash")
     parser.add_argument("--timeout", type=float, default=90)
     parser.add_argument("--json", action="store_true", help="Print the safe response fields as JSON")
     args = parser.parse_args(argv)
@@ -229,6 +240,8 @@ def main(argv: list[str] | None = None) -> int:
             print(json.dumps(result, ensure_ascii=False, indent=2))
         else:
             print("Request:", result["request_id"])
+            print("Engine:", result["engine"])
+            print("Requested model:", result["requested_model"])
             print("Model:", result["model_name"])
             print(result["feedback_text"])
             if result["usage"] is not None:
