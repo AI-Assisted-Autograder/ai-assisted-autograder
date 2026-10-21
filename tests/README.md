@@ -1,9 +1,19 @@
 ## Running Tests
 
-The project's tests are located under `tests/unit/` and are organized by component:
+## Test Folder Structure
 
-tests/ ├── requirements.txt └── unit/ ├── aigradingtest/ │ ├── conftest.py │ └── testAIGradingComponent.py └── webtest/ ├── conftest.py ├── pytest.ini ├── testmain.py └── testrepository.py
+The `tests/` directory contains the project's automated tests, organized by language and purpose.
 
+```text
+tests/
+├── requirements.txt
+├── unit/
+│   ├── aigradingtest/
+│   │   ...
+│   ├── webtest/
+│   │   ...
+│   └── typescript/
+```
 
 ### 1. Create the Virtual Environment
 
