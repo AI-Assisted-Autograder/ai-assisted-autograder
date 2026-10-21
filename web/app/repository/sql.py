@@ -241,6 +241,7 @@ class SqlGradingRepository(IGradingRepository):
                     gt.kind,
                     gt.max_score,
                     None if r is None else RubricConfig(r.id, r.version, r.criteria_text, r.feedback_guidance),
+                    gt.analysis_config,
                 )
                 for gt, r in rows
             )

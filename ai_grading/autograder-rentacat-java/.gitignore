@@ -1,0 +1,3 @@
+# The functional grading harness requires these bundled runtime libraries.
+!lib/
+!lib/*.jar

@@ -9,7 +9,7 @@ services:
       - feedback_data:/var/lib/ai-feedback
       - ${GOOGLE_ADC_DIR:-/dev/null}:/run/google:ro
     environment:
-      DATABASE_URL: postgresql+psycopg://autograder:autograder@db:5432/autograder
+      DATABASE_URL: ${DATABASE_URL:-postgresql+psycopg://autograder:autograder@db:5432/autograder}
       INTEGRATION_API_TOKEN: ${INTEGRATION_API_TOKEN:-}
       FEEDBACK_STATE_PATH: ${FEEDBACK_STATE_PATH:-}
       GOOGLE_APPLICATION_CREDENTIALS: /run/google/application_default_credentials.json

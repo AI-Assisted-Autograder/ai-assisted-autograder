@@ -1,0 +1,192 @@
+#!/usr/bin/env bash
+
+set -o pipefail
+
+# Gradescope extracts the autograder zip here.
+BASE_DIR=/autograder/source
+
+# Shared feedback runs after functional grading, including compilation errors.
+append_ai_feedback() {
+    local functional_status=$?
+    python3 "$BASE_DIR/gradescope_feedback.py" || echo "AI feedback was unavailable; functional results are unchanged." >&2
+    exit "$functional_status"
+}
+trap append_ai_feedback EXIT
+
+write_submission_error() {
+    python3 - "$@" <<'PY' > /autograder/results/results.json
+import json
+import sys
+
+errors = "\n".join("- " + error for error in sys.argv[1:])
+json.dump(
+    {
+        "tests": [{
+            "name": "Submission structure",
+            "score": 0,
+            "max_score": 90,
+            "visibility": "visible",
+            "output_format": "simple_format",
+            "output": "Your submission could not be graded because required files were missing or ambiguous.\n\n" + errors,
+        }],
+        "max_score": 90,
+        "test_output_format": "simple_format",
+    },
+    sys.stdout,
+)
+PY
+}
+
+write_internal_error() {
+    python3 - "$1" <<'PY' > /autograder/results/results.json
+import json
+import sys
+
+json.dump(
+    {
+        "tests": [{
+            "name": "Autograder error",
+            "score": 0,
+            "max_score": 90,
+            "visibility": "visible",
+            "output_format": "simple_format",
+            "output": sys.argv[1],
+        }],
+        "max_score": 90,
+        "test_output_format": "simple_format",
+    },
+    sys.stdout,
+)
+PY
+}
+
+submission_errors=()
+
+copy_submission_file() {
+    local relative_path="$1"
+    local destination="$2"
+    local required="$3"
+    local matches=()
+
+    mapfile -d '' matches < <(find /autograder/submission -type f -path "*/$relative_path" -print0)
+    if [ "${#matches[@]}" -eq 0 ]; then
+        if [ "$required" = "required" ]; then
+            submission_errors+=("Required file not found: $relative_path")
+        fi
+        return
+    fi
+    if [ "${#matches[@]}" -ne 1 ]; then
+        submission_errors+=("Expected one copy of $relative_path, but found ${#matches[@]}.")
+        return
+    fi
+    if ! cp -- "${matches[0]}" "$destination"; then
+        submission_errors+=("Could not copy $relative_path into the grading workspace.")
+    fi
+}
+
+cd "$BASE_DIR"
+
+# Copy to src/main directory
+copy_submission_file "src/main/java/edu/pitt/cs/Cat.java" ./src/main/java/edu/pitt/cs/CatSubmission.java required
+copy_submission_file "src/main/java/edu/pitt/cs/CatImpl.java" ./src/main/java/edu/pitt/cs required
+copy_submission_file "src/test/java/edu/pitt/cs/CatUnitTest.java" ./src/main/java/edu/pitt/cs required
+copy_submission_file "src/main/java/edu/pitt/cs/RentACat.java" ./src/main/java/edu/pitt/cs/RentACatSubmission.java required
+copy_submission_file "src/main/java/edu/pitt/cs/RentACatImpl.java" ./src/main/java/edu/pitt/cs required
+copy_submission_file "src/test/java/edu/pitt/cs/RentACatUnitTest.java" ./src/main/java/edu/pitt/cs required
+copy_submission_file "src/test/java/edu/pitt/cs/RentACatIntegrationTest.java" ./src/main/java/edu/pitt/cs required
+# SystemsTest.java is new in this deliverable and is not checked in as a
+# placeholder, so that SystemsTestGrading can report its absence as a zero
+# rather than the build failing. A missing file here is expected and the cp
+# error in the log is harmless.
+copy_submission_file "src/test/java/edu/pitt/cs/SystemsTest.java" ./src/main/java/edu/pitt/cs optional
+
+if [ "${#submission_errors[@]}" -ne 0 ]; then
+    write_submission_error "${submission_errors[@]}"
+    exit 0
+fi
+
+# Rename classes
+if ! sed -i 's/public interface Cat/public interface CatSubmission/g' ./src/main/java/edu/pitt/cs/CatSubmission.java \
+    || ! sed -i 's/public interface RentACat/public interface RentACatSubmission/g' ./src/main/java/edu/pitt/cs/RentACatSubmission.java; then
+    write_internal_error "The autograder could not prepare your submitted interfaces for grading.  Please let the instructor know."
+    exit 0
+fi
+
+# Copy to src/test directory
+mkdir -p ./src/test/java/edu/pitt/cs
+copy_submission_file "src/main/java/edu/pitt/cs/Cat.java" ./src/test/java/edu/pitt/cs required
+copy_submission_file "src/test/java/edu/pitt/cs/CatUnitTest.java" ./src/test/java/edu/pitt/cs required
+copy_submission_file "src/main/java/edu/pitt/cs/RentACat.java" ./src/test/java/edu/pitt/cs required
+copy_submission_file "src/test/java/edu/pitt/cs/RentACatUnitTest.java" ./src/test/java/edu/pitt/cs required
+copy_submission_file "src/test/java/edu/pitt/cs/RentACatIntegrationTest.java" ./src/test/java/edu/pitt/cs required
+copy_submission_file "src/test/java/edu/pitt/cs/SystemsTest.java" ./src/test/java/edu/pitt/cs optional
+
+if [ "${#submission_errors[@]}" -ne 0 ]; then
+    write_submission_error "${submission_errors[@]}"
+    exit 0
+fi
+
+# Compile the student's code with autograder code
+mvn -q test-compile > /autograder/compile.out 2> /autograder/compile.err
+MVN_STATUS=$?
+if [ $MVN_STATUS -ne 0 ] || [ $(grep -c "ERROR" /autograder/compile.out) -gt 0 ];
+then
+    if grep -q "COMPILATION ERROR" /autograder/compile.out;
+    then
+        # The student's code does not compile. Show them the javac
+        # diagnostics only, not the surrounding Maven log.
+        MESSAGE_PREFIX=/autograder/source/compile_error.prefix
+        sed -n '/COMPILATION ERROR/,$p' /autograder/compile.out | grep -v -e '^\[INFO\] -' -e 'Failed to execute goal' -e '> \[Help' > /autograder/compile.msg
+        if [ ! -s /autograder/compile.msg ];
+        then
+            cp /autograder/compile.out /autograder/compile.msg
+        fi
+    else
+        # Maven failed for some reason other than the student's code, for
+        # instance because it could not reach Maven Central. Do not tell the
+        # student to go compile locally, because that is not the problem.
+        MESSAGE_PREFIX=/autograder/source/internal_error.prefix
+        cat /autograder/compile.out /autograder/compile.err > /autograder/compile.msg
+    fi
+    cat $MESSAGE_PREFIX | tr -d '\n' | tr -d '\r' > /autograder/results/results.json
+    # Add display line breaks before JSON-escaping the diagnostics, so their
+    # long source paths and compiler messages do not require horizontal scroll.
+    fold -s -w 100 /autograder/compile.msg | sed -E 's/\\/\\\\/g' | sed -E ':a;N;$!ba;s/\r{0,1}\n/\\n/g' | sed -E 's/"/\\"/g' | sed -E 's/\//\\\//g' | sed -E 's/\t/\\t/g' | sed -r 's/\x1B\[([0-9]{1,3}(;[0-9]{1,2};?)?)?[mGK]//g' | tr -d '\n' >> /autograder/results/results.json
+    cat /autograder/source/compile_error.postfix | tr -d '\n' | tr -d '\r' >> /autograder/results/results.json
+    exit;
+fi;
+
+# Run the grader
+if ! java -ea -cp "lib/*:target/classes" com.github.tkutche1.jgrade.JGrade -c edu.pitt.cs.tests.MainGrader -o /autograder/results/results.json; then
+    write_internal_error "The autograder could not run the grading tests.  Please let the instructor know."
+    exit 0
+fi
+
+# Generate coverage info
+if ! mvn test; then
+    echo "run_autograder: Maven test run failed; coverage may receive the fallback score" >&2
+fi
+if ! mvn jacoco:report; then
+    echo "run_autograder: JaCoCo report generation failed; coverage may receive the fallback score" >&2
+fi
+
+# Fill coverage json with coverage statistics, then insert it. results.json
+# already holds the 64 points from JGrade, so neither step is allowed to
+# damage it: if either one fails, the student keeps those points and the
+# reason is left in the autograder log.
+if bash fill_json.sh;
+then
+    if ! python3 insert_json.py;
+    then
+        echo "run_autograder: insert_json.py failed, results.json left unchanged" >&2
+    fi
+else
+    echo "run_autograder: fill_json.sh failed, no coverage entries added" >&2
+fi
+
+# This runs after the merge attempt so all completed test feedback, including
+# coverage feedback when available, has display line breaks.
+if ! python3 format_results.py;
+then
+    echo "run_autograder: format_results.py failed, results.json left unchanged" >&2
+fi

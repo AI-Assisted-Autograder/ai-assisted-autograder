@@ -1,10 +1,15 @@
 """Validated database configuration and backend-owned runtime state records."""
 
 from datetime import datetime
+from decimal import Decimal
+from pathlib import PurePosixPath
+import re
 from typing import Annotated, Any, Literal
 from uuid import UUID
 
-from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
+from pydantic import AfterValidator, BaseModel, ConfigDict, Field, field_validator, model_validator
+
+from ai_grading.models import AnalysisConfig, Score
 
 
 Identifier = Annotated[str, Field(min_length=1, max_length=128, pattern=r"^[A-Za-z0-9_.:-]+$")]
@@ -56,6 +61,51 @@ def validate_engine_model(engine: str, model: str) -> None:
         raise ValueError("Google engines require a Gemini model ID")
 
 
+def validate_relative_path(value: str) -> str:
+    path = PurePosixPath(value)
+    if (not value or not path.parts or len(value) > 256 or path.is_absolute() or ".." in path.parts
+            or "\\" in value or "\x00" in value or str(path) != value):
+        raise ValueError("paths must be normalized relative POSIX paths")
+    return value
+
+
+def validate_analysis(value: AnalysisConfig) -> AnalysisConfig:
+    if value.mode == "testplan" and not value.expected_tests:
+        raise ValueError("testplan analysis requires expected test identifiers")
+    if (len(value.source_globs) + len(value.context_globs) > 64
+            or len(value.evidence_sources) > 64 or len(value.expected_tests) > 256
+            or len(value.test_plan) > 64_000):
+        raise ValueError("analysis configuration exceeds its limits")
+    for pattern in (*value.source_globs, *value.context_globs):
+        validate_relative_path(pattern)
+    for source in value.evidence_sources:
+        validate_relative_path(source.path)
+        if len(source.label) > 256 or len(source.include) > 64:
+            raise ValueError("evidence source exceeds its limits")
+        for pattern in source.include:
+            if len(pattern) > 512:
+                raise ValueError("evidence selector is too long")
+            try:
+                re.compile(pattern)
+            except re.error:
+                raise ValueError("invalid evidence selector") from None
+    if any(len(identifier) > 256 for identifier in value.expected_tests):
+        raise ValueError("expected test identifier is too long")
+    return value
+
+
+Analysis = Annotated[AnalysisConfig, AfterValidator(validate_analysis)]
+
+
+def validate_target_scoring(target):
+    points = target.analysis.points_per_test
+    if points is not None:
+        expected = Decimal(str(points)) * len(target.analysis.expected_tests)
+        if target.max_score is None or Decimal(str(target.max_score)) != expected:
+            raise ValueError("max_score must equal points_per_test times the expected test count")
+    return target
+
+
 class RubricInput(StrictModel):
     criteria_text: str = Field(min_length=1, max_length=16_000, pattern=r"\S")
     feedback_guidance: str = Field(default="", max_length=8_000)
@@ -71,6 +121,12 @@ class TargetConfig(StrictModel):
     kind: Literal["FILE", "METHOD", "CLASS"]
     source_path: str = Field(min_length=1, max_length=256)
     rubric: RubricConfig
+    analysis: Analysis = Field(default_factory=AnalysisConfig)
+    max_score: Score | None = None
+
+    @model_validator(mode="after")
+    def scoring(self):
+        return validate_target_scoring(self)
 
 
 class AssignmentConfig(StrictModel):
@@ -98,6 +154,12 @@ class TargetInput(StrictModel):
     identifier: str = Field(min_length=1, max_length=256, pattern=r"\S")
     kind: Literal["FILE", "METHOD", "CLASS"] = "FILE"
     rubric: RubricInput
+    analysis: Analysis = Field(default_factory=AnalysisConfig)
+    max_score: Score | None = None
+
+    @model_validator(mode="after")
+    def scoring(self):
+        return validate_target_scoring(self)
 
 
 class AssignmentCreateInput(StrictModel):

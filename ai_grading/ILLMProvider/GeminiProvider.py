@@ -75,7 +75,9 @@ class GeminiProvider:
                 config=types.GenerateContentConfig(
                     system_instruction=prompt.system_instruction,
                     http_options=self._http_options,
-                    response_mime_type="text/plain",
+                    response_mime_type=(
+                        "text/plain" if req.analysis.mode == "code_feedback" else "application/json"
+                    ),
                     max_output_tokens=self._max_output_tokens,
                     candidate_count=1,
                     automatic_function_calling=types.AutomaticFunctionCallingConfig(

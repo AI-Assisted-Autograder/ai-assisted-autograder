@@ -62,6 +62,7 @@ class _GradingTarget:
     display_order: int | None
     kind: str
     max_score: Decimal | None
+    analysis_config: dict = field(default_factory=dict)
 
 
 @dataclass
@@ -178,8 +179,10 @@ class InMemoryRepository(IGradingRepository):
         *,
         kind: str = "METHOD",
         max_score: Decimal | None = None,
+        analysis_config: dict | None = None,
     ) -> uuid.UUID:
-        gt = _GradingTarget(uuid.uuid4(), assignment_id, identifier, display_order, kind, max_score)
+        gt = _GradingTarget(uuid.uuid4(), assignment_id, identifier, display_order, kind, max_score,
+                            dict(analysis_config or {}))
         self.grading_targets[gt.id] = gt
         return gt.id
 
@@ -337,7 +340,8 @@ class InMemoryRepository(IGradingRepository):
             a.language,
             a.is_active,
             tuple(
-                TargetConfig(gt.id, gt.identifier, gt.kind, gt.max_score, self._current_rubric(gt.id))
+                TargetConfig(gt.id, gt.identifier, gt.kind, gt.max_score, self._current_rubric(gt.id),
+                             dict(gt.analysis_config))
                 for gt in targets
             ),
             tuple(ProviderConfig(p.provider, p.model_name, p.is_primary, p.engine) for p in providers),

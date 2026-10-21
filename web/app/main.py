@@ -1,3 +1,4 @@
+from dataclasses import asdict
 from typing import Literal
 from uuid import UUID
 
@@ -106,6 +107,8 @@ def create_assignment(
                 target = GradingTarget(
                     assignment_id=assignment.id, identifier=item.identifier,
                     kind=item.kind, display_order=order,
+                    analysis_config=asdict(item.analysis),
+                    max_score=item.max_score,
                 )
                 session.add(target)
                 session.flush()
@@ -119,6 +122,8 @@ def create_assignment(
                 targets[str(target.id)] = TargetConfig(
                     identifier=target.identifier, kind=target.kind,
                     source_path=target.identifier if target.kind == "FILE" else "submitted-source",
+                    analysis=item.analysis,
+                    max_score=item.max_score,
                     rubric=RubricConfig(id=str(rubric.id), version=rubric.version,
                                         **item.rubric.model_dump()),
                 )

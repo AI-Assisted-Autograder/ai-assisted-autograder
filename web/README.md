@@ -97,8 +97,8 @@ uvicorn app.main:app --reload
 ## AI feedback API (database configuration)
 
 The Web Docker service reads assignment, target, rubric and the primary engine/model
-configuration from PostgreSQL. Feedback is displayed in Gradescope
-as a zero-point row; this path does not write submissions, test results or feedback
+configuration from PostgreSQL. Feedback is displayed in Gradescope, with optional
+DB-configured scoring; this path does not write submissions, test results or feedback
 to DB or participate in nightly scheduling. JSON retains backend policy, assignment
 token hashes, call quota and replay responses. The backend supports three engines:
 
@@ -291,7 +291,9 @@ the deployment credentials.
 
 - Initialization creates one assignment/token in new schema-3 state. Schema-2 state
   upgrades on load while retaining tokens, quota and replay results; schema-1 is
-  incompatible. Adding assignments or rotating tokens is not implemented.
+  incompatible. Stop Web and use `seed_feedback --add-assignment` with the existing
+  state path and new client output paths to add another assignment without resetting
+  quota or replay records. Token rotation remains unimplemented.
 - Failures/timeouts retain reserved calls. Reusing a request ID returns its cached
   response even after engine/model/rubric changes. Use a new `--request-id` for every
   independent repeat or comparison; use the same ID for retries. The Gradescope

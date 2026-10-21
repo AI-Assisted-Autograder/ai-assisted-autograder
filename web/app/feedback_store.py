@@ -17,7 +17,7 @@ import threading
 from datetime import datetime, timezone
 from typing import Any
 
-from .feedback_config import AssignmentAccess, BackendConfig, RequestRecord, State
+from .feedback_config import AssignmentAccess, BackendConfig, RequestRecord, State, TokenRecord
 
 
 class StoreError(Exception):
@@ -158,6 +158,21 @@ class JsonStore:
             if assignment is None or not assignment.enabled:
                 raise StoreError("assignment_forbidden", 403)
             return assignment.model_copy(deep=True)
+
+    def add_assignment(self, assignment_id: str, access: AssignmentAccess,
+                       digest: str, token: TokenRecord) -> None:
+        """Append access records while holding the same lock as the Web worker."""
+        with self._mutex:
+            self._ensure_open()
+            if assignment_id in self._state.assignments or digest in self._state.tokens:
+                raise ValueError("assignment or token already exists")
+            if token.assignment_id != assignment_id:
+                raise ValueError("token assignment must match")
+            candidate = self._state.model_copy(deep=True)
+            candidate.assignments[assignment_id] = access.model_copy(deep=True)
+            candidate.tokens[digest] = token.model_copy(deep=True)
+            self._persist(candidate)
+            self._state = candidate
 
     def get_request(self, assignment_id: str, request_id: str) -> RequestRecord | None:
         with self._mutex:

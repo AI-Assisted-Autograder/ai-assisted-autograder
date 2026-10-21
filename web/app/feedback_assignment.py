@@ -63,6 +63,8 @@ def read_assignment_config(repository, assignment_id: str) -> AssignmentConfig:
                 identifier=target.identifier,
                 kind=target.kind,
                 source_path=target.identifier if target.kind == "FILE" else "submitted-source",
+                analysis=target.analysis_config,
+                max_score=float(target.max_score) if target.max_score is not None else None,
                 rubric=RubricConfig(
                     id=str(rubric.id), version=rubric.version,
                     criteria_text=rubric.criteria_text,

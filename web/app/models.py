@@ -27,6 +27,7 @@ from sqlalchemy import (
     true,
 )
 from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column
+from sqlalchemy.dialects.postgresql import JSONB
 
 # Deterministic constraint names, so Alembic migrations can refer to them.
 NAMING_CONVENTION = {
@@ -113,6 +114,7 @@ class GradingTarget(Base):
     kind: Mapped[str] = mapped_column(Text)
     max_score: Mapped[Decimal | None] = mapped_column(Numeric)
     display_order: Mapped[int | None] = mapped_column(Integer)
+    analysis_config: Mapped[dict] = mapped_column(JSONB, default=dict, server_default=text("'{}'::jsonb"))
 
 
 class Rubric(Base):

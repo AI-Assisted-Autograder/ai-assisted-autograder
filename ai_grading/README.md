@@ -5,11 +5,11 @@ client. The Web backend selects an engine and model from database configuration.
 
 ## Current flow
 
-1. The Gradescope connector sends source code, a DB target UUID and visible
-   functional-test diagnostics to `POST /v1/feedback`, using an assignment token.
+1. The Gradescope connector sends source files, a DB target UUID and selected
+   runtime/coverage evidence to `POST /v1/feedback`, using an assignment token.
 2. The Web backend authenticates the token, reads assignment/target/rubric/model
    configuration from PostgreSQL, checks limits and calls the selected engine.
-3. Feedback is appended to Gradescope `results.json` as a `0/0` row. This path
+3. Gradescope receives feedback rows and, when configured in DB, bounded AI scores. This path
    does not write submissions, test results or feedback to DB. Backend JSON keeps
    token hashes, call quota and replay responses.
 
@@ -45,12 +45,50 @@ python3 -I -S ai_grading/local_client.py \
   --target-id YOUR_TARGET_UUID --json
 ```
 
-`--code-file` is required; `--target-id` is the DB target UUID. Public backend
+Supply `--code-file` or `--files-json` (an array of `{path, content}`), with optional
+`--evidence-json`; `--target-id` is the DB target UUID. Public backend
 URLs must use HTTPS. For Gradescope, map `targets[].source` to the submitted file
 and `targets[].target_id` to that UUID, then follow the
 [packaging steps](../web/README.md#package-and-run-in-gradescope).
 The build copies the canonical `local_client.py` into the ZIP; keep tokens and
 generated ZIPs out of Git.
+
+## RentACat assignment packages
+
+- `autograder-rentacat-playwright/`: testplan analysis of 11 tests, 5 AI points per
+  test, alongside the unchanged functional grader. The backend derives scores
+  from verdicts; an insufficient-evidence verdict remains unscored.
+- `autograder-rentacat-java/`: feedback for unit, integration, implementation and
+  system-test targets, using runtime diagnostics and aggregate JaCoCo coverage.
+  Its AI feedback is unscored; existing functional and coverage scores remain intact.
+
+Each package's `assignment.json` is an assignment-create template. Replace course
+and platform IDs before posting it to the existing configuration API. Migration
+`0004` stores target analysis settings; rubric, trusted testplan, scoring and model
+selection remain backend-owned. Export `GET /internal/assignments/{id}/config`,
+then build either package with its own assignment token:
+
+```bash
+python3 ai_grading/build_autograder.py \
+  --package-dir ai_grading/autograder-rentacat-playwright \
+  --assignment-config ai_grading/.local-feedback/playwright.config.json \
+  --backend-url https://YOUR-SERVER \
+  --token-file ai_grading/.local-feedback/playwright.token \
+  --output ai_grading/.local-feedback/playwright.zip \
+  --request-namespace trial-001
+```
+
+The builder writes a private ZIP and matching runtime directory. The shared hook
+collects configured artifacts after functional grading, including error paths,
+and preserves functional scores when AI is unavailable. Instructor evidence is
+kept in `results/ai_evidence.json` and the autograder log, outside student rows.
+Playwright requires one matching primary source; ambiguous copies receive no AI
+score. The AI phase has a 300-second total budget (`--total-timeout`), with each
+request limited by the remaining time.
+Set Gradescope's Outline maximum explicitly; adding AI rows does not change it.
+Use a new request namespace for an independent run or after configuration changes.
+New configurations should allow 64,000 source characters, 262,144 body bytes,
+8,192 output tokens and 120 seconds; the client defaults to 150 seconds.
 
 The response identifies `engine`, vendor `provider`, `requested_model`, returned
 `model_name`, feedback and available usage. For each independent repeat or model
@@ -65,6 +103,7 @@ Pitt requests force a fresh gateway call with `x-portkey-cache-force-refresh: tr
 | Location | Responsibility |
 | --- | --- |
 | [local_client.py](local_client.py) | Assignment-token HTTP client and CLI |
+| [gradescope_feedback.py](gradescope_feedback.py), [build_autograder.py](build_autograder.py) | Shared evidence collection, result rendering and package build |
 | [autograder-vertex-feedback/](autograder-vertex-feedback/) | Gradescope connector, functional-grader package and ZIP builder |
 | [models.py](models.py) | Typed source, target, rubric, request and response contracts |
 | [FileResolver.py](FileResolver.py) | Resolve a target to one source file without executing student code |
@@ -86,14 +125,16 @@ The Web route selects a backend provider using the configured engine and model;
 `VertexProvider` owns the IAM client and delegates to `GeminiProvider`; Gemini API
 uses `GeminiProvider` directly, while Pitt uses `PittProvider`. All adapters live
 in `ILLMProvider/` and receive explicit settings without depending on Web types.
-`AIGradingComponent` is available for other integrations; its optional scores and
-comparison fields are not exposed by the current Gradescope feedback flow.
+`AIGradingComponent` is available for other integrations. Optional target scores
+and configured per-test scores reach the HTTP client; comparison fields remain
+outside this flow. Structured responses separate student feedback and teacher evidence.
 
 ## Current limits
 
-- The supplied ZIP uses the SortedCollection/Java grader. Other assignments need
-  an instructor-provided functional grader and invocation hook.
-- AI failure preserves functional scores; compilation failure currently skips AI.
+- The legacy Vertex ZIP uses SortedCollection. The two RentACat packages use the
+  shared connector; other assignments still supply their own functional grader and hook.
+- AI failure preserves functional scores. Only the legacy SortedCollection package
+  skips AI on compilation failure.
 - A local-backend Gradescope-to-Vertex run was verified. Deployment and the full
   server DB-to-Vertex-to-Gradescope flow still need verification.
 - Local Docker feedback through all three engines has been verified with live

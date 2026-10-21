@@ -1,7 +1,7 @@
 """Issue a private token and initialize runtime state for an existing DB assignment.
 
-No overwrite/reset mode exists. This tool never prints a token or loads Google
-credentials. Initialize once before enabling the feedback router.
+No overwrite/reset mode exists. Stop Web before adding an assignment to existing
+state. This tool never prints a token or loads provider credentials.
 """
 
 import argparse
@@ -17,7 +17,7 @@ from ai_grading.local_client import validate_backend_url
 from .feedback_config import (
     AssignmentAccess, BackendConfig, State, TokenRecord,
 )
-from .feedback_store import atomic_write, token_hash, utc_now
+from .feedback_store import JsonStore, StoreError, atomic_write, token_hash, utc_now
 
 
 DEFAULT_MODEL = "gemini-3.5-flash-lite"
@@ -43,48 +43,76 @@ def initialize(
     service_account: str = DEFAULT_SERVICE_ACCOUNT,
     allowed_models: list[str] | None = None,
     engine_models: dict[str, list[str]] | None = None,
+    add_assignment: bool = False,
+    max_code_chars: int | None = None,
+    max_output_tokens: int | None = None,
+    max_body_bytes: int | None = None,
+    timeout_seconds: float | None = None,
 ) -> None:
-    """Create config/state and issue a random token; refuse every existing output."""
+    """Issue private client files and initialize or append assignment access."""
     assignment_id = str(UUID(assignment_id))
     backend_url = validate_backend_url(backend_url)
     if not math.isfinite(expires_in_hours) or not 0 < expires_in_hours <= 24 * 365:
         raise ValueError("expiration must be between zero and one year")
     paths = tuple(Path(path).expanduser().absolute()
                   for path in (state_path, token_path, client_config_path))
-    if len(set(paths)) != 3 or any(path.exists() or path.is_symlink() for path in paths):
-        raise FileExistsError("initialization outputs must be distinct new files")
+    outputs = paths[1:] if add_assignment else paths
+    if (len(set(paths)) != 3 or paths[0].is_symlink()
+            or any(path.exists() or path.is_symlink() for path in outputs)):
+        raise FileExistsError("outputs must be distinct new files")
+    policy = {key: value for key, value in {
+        "max_code_chars": max_code_chars, "max_output_tokens": max_output_tokens,
+        "max_body_bytes": max_body_bytes, "timeout_seconds": timeout_seconds,
+    }.items() if value is not None}
+    if add_assignment and (engine_models or allowed_models or policy):
+        raise ValueError("adding an assignment cannot replace backend policy")
     raw_token = secrets.token_urlsafe(32)
+    access = AssignmentAccess(max_calls=max_calls)
+    token = TokenRecord(assignment_id=assignment_id,
+                        expires_at=utc_now() + timedelta(hours=expires_in_hours))
     models = {key: list(value) for key, value in (engine_models or {}).items()}
     if allowed_models:
         models.setdefault("vertex", []).extend(allowed_models)
     if not models:
         models = {"vertex": [DEFAULT_MODEL]}
     vertex = "vertex" in models
-    state = State(
-        config=BackendConfig(project=project if vertex else None,
-                             location=location if vertex else None,
-                             service_account=service_account if vertex else None,
-                             allowed_models=models),
-        assignments={assignment_id: AssignmentAccess(max_calls=max_calls)},
-        tokens={token_hash(raw_token): TokenRecord(
-            assignment_id=assignment_id, expires_at=utc_now() + timedelta(hours=expires_in_hours),
-        )},
-    )
-    payloads = (
-        state.model_dump_json(indent=2).encode("utf-8") + b"\n",
+    client_payloads = (
         (raw_token + "\n").encode("utf-8"),
         (json.dumps({"backend_url": backend_url.rstrip("/")}, indent=2) + "\n").encode("utf-8"),
     )
+    store = None
+    if add_assignment:
+        store = JsonStore(paths[0])
+        payloads = client_payloads
+    else:
+        state = State(
+            config=BackendConfig(project=project if vertex else None,
+                                 location=location if vertex else None,
+                                 service_account=service_account if vertex else None,
+                                 allowed_models=models, **policy),
+            assignments={assignment_id: access},
+            tokens={token_hash(raw_token): token},
+        )
+        payloads = (state.model_dump_json(indent=2).encode("utf-8") + b"\n", *client_payloads)
     created: list[Path] = []
     try:
-        for path, payload in zip(paths, payloads):
+        for path, payload in zip(outputs, payloads):
             atomic_write(path, payload, overwrite=False)
             created.append(path)
-    except Exception:
+        if store is not None:
+            store.add_assignment(assignment_id, access, token_hash(raw_token), token)
+    except Exception as exc:
+        if store is not None and isinstance(exc, StoreError):
+            # State replacement may have committed before its directory fsync failed.
+            # Retain the only copy of the new raw token until the state is checked.
+            raise
         # Only roll back files created by this invocation, never preexisting files.
         for path in created:
             path.unlink(missing_ok=True)
         raise
+    finally:
+        if store is not None:
+            store.close()
 
 
 def main() -> int:
@@ -94,6 +122,8 @@ def main() -> int:
     parser.add_argument("--client-config", default="ai_grading/.local-vertex/client/config.json")
     parser.add_argument("--assignment-id", required=True, type=UUID,
                         help="Existing database assignment UUID; does not create database rows")
+    parser.add_argument("--add-assignment", action="store_true",
+                        help="Append to existing state; stop Web first and use new client file paths")
     parser.add_argument("--max-calls", type=int, default=5)
     parser.add_argument("--expires-in-hours", type=float, default=24.0)
     parser.add_argument("--backend-url", default=DEFAULT_BACKEND_URL)
@@ -104,6 +134,10 @@ def main() -> int:
                         help="Allowed Vertex model (legacy option); repeat for multiple models")
     parser.add_argument("--allow-model", action="append", default=[], metavar="ENGINE:MODEL",
                         help="Allow an engine/model pair; repeat for multiple models or engines")
+    parser.add_argument("--max-code-chars", type=int, help="Initial state: total source/context characters")
+    parser.add_argument("--max-output-tokens", type=int, help="Initial state: provider output token limit")
+    parser.add_argument("--max-body-bytes", type=int, help="Initial state: HTTP request size limit")
+    parser.add_argument("--timeout-seconds", type=float, help="Initial state: provider request timeout")
     args = parser.parse_args()
     engine_models = {}
     for item in args.allow_model:
@@ -117,12 +151,20 @@ def main() -> int:
                    max_calls=args.max_calls, expires_in_hours=args.expires_in_hours,
                    backend_url=args.backend_url, project=args.project, location=args.location,
                    service_account=args.service_account, allowed_models=args.allowed_models,
-                   engine_models=engine_models)
+                   engine_models=engine_models, add_assignment=args.add_assignment,
+                   max_code_chars=args.max_code_chars, max_output_tokens=args.max_output_tokens,
+                   max_body_bytes=args.max_body_bytes, timeout_seconds=args.timeout_seconds)
     except FileExistsError:
         parser.exit(2, "Initialization refused: an output already exists or paths overlap.\n")
+    except StoreError as error:
+        message = ("Stop Web before adding an assignment." if error.code == "worker_already_running"
+                   else "Existing state is unavailable; check its path and schema. "
+                        "Any new client files were retained; confirm assignment access before retrying.")
+        parser.exit(2, message + "\n")
     except Exception:
         parser.exit(2, "Initialization failed: check paths and non-sensitive settings.\n")
-    print(f"Initialized runtime state for assignment {args.assignment_id}; private token written to the token file.")
+    action = "Added" if args.add_assignment else "Initialized"
+    print(f"{action} runtime access for assignment {args.assignment_id}; private token written to the token file.")
     print("No token or Google credentials are included in this output.")
     return 0
 

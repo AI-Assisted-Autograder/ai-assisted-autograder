@@ -231,6 +231,7 @@ __marimo__/
 
 # Local feedback tokens and JSON runtime state.
 .local-vertex/
+ai_grading/.local-feedback/
 application_default_credentials.json
 *service-account*.json
 # Generated Gradescope upload files (including its private assignment token).
