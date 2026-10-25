@@ -124,3 +124,143 @@ def test_unknown_ids_are_404(client, path):
     response = client.get(path.format(uuid.uuid4()))
     assert response.status_code == 404
     assert "does not exist" in response.text
+
+
+# ---------------------------------------------------------------------
+# Instructor configuration forms
+# ---------------------------------------------------------------------
+ASSIGNMENT_FORM = {
+    "course_name": "CS 0401",
+    "term": "Fall 2026",
+    "platform_assignment_id": "12345",
+    "name": "Project 1: Calculator",
+    "grading_mode": "IMMEDIATE",
+    "language": "PYTHON",
+}
+
+
+def test_new_assignment_form_renders(client):
+    response = client.get("/assignments/new")
+    assert response.status_code == 200
+    assert 'action="/assignments"' in response.text
+    assert 'value="NIGHTLY"' in response.text and 'value="JAVA"' in response.text
+
+
+def test_create_assignment_redirects_to_it(client, repo):
+    response = client.post("/assignments", data=ASSIGNMENT_FORM, follow_redirects=False)
+
+    assert response.status_code == 303
+    (aid,) = repo.assignments
+    assert response.headers["location"] == f"/assignments/{aid}"
+    assert client.get(response.headers["location"]).status_code == 200
+
+
+def test_create_assignment_error_keeps_what_was_typed(client, repo):
+    client.post("/assignments", data=ASSIGNMENT_FORM)
+
+    response = client.post("/assignments", data={**ASSIGNMENT_FORM, "name": "Typed <again>"})
+
+    assert response.status_code == 409
+    assert "already registered" in response.text
+    assert 'value="Typed &lt;again&gt;"' in response.text
+    assert len(repo.assignments) == 1
+
+
+def test_create_assignment_missing_field_is_400(client, repo):
+    response = client.post("/assignments", data={**ASSIGNMENT_FORM, "course_name": ""})
+    assert response.status_code == 400
+    assert "Course is required" in response.text
+    assert repo.assignments == {}
+
+
+def test_add_target_redirects_back(client, repo):
+    aid = repo.add_assignment("IMMEDIATE", name="Calc")
+
+    response = client.post(
+        f"/assignments/{aid}/targets",
+        data={"identifier": "add", "kind": "METHOD", "max_score": "5"},
+        follow_redirects=False,
+    )
+
+    assert response.status_code == 303
+    assert response.headers["location"] == f"/assignments/{aid}#targets"
+    (target,) = repo.get_assignment_config(aid).targets
+    assert (target.identifier, target.kind, target.max_score) == ("add", "METHOD", Decimal("5"))
+
+
+@pytest.mark.parametrize(
+    "data, status, message",
+    [
+        ({"identifier": "add", "kind": "METHOD", "max_score": "five"}, 400, "Max score must be a number"),
+        ({"identifier": "add", "kind": "METHOD", "max_score": "NaN"}, 400, "Max score must be a number"),
+        ({"identifier": "existing", "kind": "METHOD", "max_score": ""}, 409, "already registered"),
+    ],
+)
+def test_add_target_errors_reshow_the_page(client, repo, data, status, message):
+    aid = repo.add_assignment("IMMEDIATE", name="Calc")
+    repo.add_grading_target(aid, "existing", 1)
+
+    response = client.post(f"/assignments/{aid}/targets", data=data)
+
+    assert response.status_code == status
+    assert message in response.text
+    assert f'value="{data["identifier"]}"' in response.text
+    assert len(repo.get_assignment_config(aid).targets) == 1
+
+
+def test_add_target_unknown_assignment(client):
+    response = client.post(f"/assignments/{uuid.uuid4()}/targets", data={"identifier": "add", "kind": "METHOD"})
+    assert response.status_code == 404
+
+
+def test_rubric_form_prefills_current_rubric(client, repo):
+    aid = repo.add_assignment("IMMEDIATE", name="Calc")
+    tid = repo.add_grading_target(aid, "add", 1)
+    repo.add_rubric(tid, version=2, criteria_text="Returns the sum.", feedback_guidance="Be brief.")
+
+    response = client.get(f"/assignments/{aid}/targets/{tid}/rubric")
+
+    assert response.status_code == 200
+    assert "Returns the sum.</textarea>" in response.text
+    assert "Be brief.</textarea>" in response.text
+    assert "creates version 3" in response.text
+
+
+def test_save_rubric_creates_a_version(client, repo):
+    aid = repo.add_assignment("IMMEDIATE", name="Calc")
+    tid = repo.add_grading_target(aid, "add", 1)
+
+    response = client.post(
+        f"/assignments/{aid}/targets/{tid}/rubric",
+        data={"criteria_text": "Returns the sum.", "feedback_guidance": ""},
+        follow_redirects=False,
+    )
+
+    assert response.status_code == 303
+    rubric = repo.get_assignment_config(aid).targets[0].rubric
+    assert (rubric.version, rubric.criteria_text, rubric.feedback_guidance) == (1, "Returns the sum.", None)
+
+
+def test_save_rubric_without_criteria_is_400(client, repo):
+    aid = repo.add_assignment("IMMEDIATE", name="Calc")
+    tid = repo.add_grading_target(aid, "add", 1)
+
+    response = client.post(
+        f"/assignments/{aid}/targets/{tid}/rubric", data={"criteria_text": " ", "feedback_guidance": "Kept"}
+    )
+
+    assert response.status_code == 400
+    assert "Criteria is required" in response.text
+    assert "Kept</textarea>" in response.text
+    assert repo.get_assignment_config(aid).targets[0].rubric is None
+
+
+def test_rubric_target_must_belong_to_the_assignment(client, repo):
+    aid = repo.add_assignment("IMMEDIATE", name="Calc")
+    other = repo.add_assignment("IMMEDIATE", name="Other")
+    tid = repo.add_grading_target(other, "add", 1)
+
+    assert client.get(f"/assignments/{aid}/targets/{tid}/rubric").status_code == 404
+    response = client.post(f"/assignments/{aid}/targets/{tid}/rubric", data={"criteria_text": "x"})
+    assert response.status_code == 404
+    assert repo.get_assignment_config(other).targets[0].rubric is None

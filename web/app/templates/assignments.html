@@ -1,7 +1,10 @@
 {% extends "base.html" %}
 
 {% block content %}
-<h1>Assignments</h1>
+<div class="title-row">
+    <h1>Assignments</h1>
+    <a class="button" href="/assignments/new">New assignment</a>
+</div>
 
 {% if assignments %}
 <div class="table-wrap">
@@ -34,7 +37,7 @@
 </div>
 {% else %}
 <p class="empty">
-    No assignments yet. To load sample data, run
+    No assignments yet. <a href="/assignments/new">Create one</a>, or load sample data with
     <code>docker compose exec web python -m app.seed</code>.
 </p>
 {% endif %}

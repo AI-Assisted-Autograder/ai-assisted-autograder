@@ -14,6 +14,7 @@ from app.repository.base import (
     ActionResult,
     AssignmentConfig,
     AssignmentSummary,
+    ConflictError,
     FeedbackDetail,
     FeedbackPackage,
     FeedbackResult,
@@ -33,14 +34,25 @@ from app.repository.base import (
     TestResultRecord,
     UnknownTargetError,
     assignment_sort_key,
+    check_assignment_fields,
     check_gradable,
+    check_target_fields,
+    clean,
     derive_action,
     feedback_sort_key,
+    required,
     sort_key,
     summarize,
     target_status,
     to_decimal,
 )
+
+
+@dataclass
+class _Course:
+    id: uuid.UUID
+    name: str
+    term: str | None
 
 
 @dataclass
@@ -52,6 +64,7 @@ class _Assignment:
     language: str
     name: str | None
     is_active: bool = True
+    course_id: uuid.UUID | None = None
 
 
 @dataclass
@@ -138,6 +151,7 @@ def _now() -> datetime:
 
 class InMemoryRepository(IGradingRepository):
     def __init__(self):
+        self.courses: dict[uuid.UUID, _Course] = {}
         self.assignments: dict[uuid.UUID, _Assignment] = {}
         self.grading_targets: dict[uuid.UUID, _GradingTarget] = {}
         self.rubrics: dict[uuid.UUID, _Rubric] = {}
@@ -485,6 +499,73 @@ class InMemoryRepository(IGradingRepository):
             derive_action(a.grading_mode, sub.submitted_at, sub.ai_authorized_at, sub.ai_graded_submitted_at),
             tuple(targets),
         )
+
+    def create_assignment(
+        self,
+        *,
+        course_name: str,
+        term: str | None,
+        platform_assignment_id: str,
+        name: str | None,
+        grading_mode: str,
+        language: str,
+    ) -> uuid.UUID:
+        course_name = required(course_name, "Course")
+        term = clean(term)
+        platform_assignment_id = required(platform_assignment_id, "Gradescope assignment id")
+        grading_mode, language = check_assignment_fields(grading_mode, language)
+        if any(a.platform_assignment_id == platform_assignment_id for a in self.assignments.values()):
+            raise ConflictError(f"Gradescope assignment {platform_assignment_id!r} is already registered")
+        course = next((c for c in self.courses.values() if (c.name, c.term) == (course_name, term)), None)
+        if course is None:
+            course = _Course(uuid.uuid4(), course_name, term)
+            self.courses[course.id] = course
+        a = _Assignment(
+            uuid.uuid4(), grading_mode, "GRADESCOPE", platform_assignment_id, language, clean(name),
+            course_id=course.id,
+        )
+        self.assignments[a.id] = a
+        return a.id
+
+    def create_target(
+        self,
+        assignment_id: uuid.UUID,
+        *,
+        identifier: str,
+        kind: str,
+        max_score: Decimal | None,
+    ) -> uuid.UUID:
+        identifier = check_target_fields(identifier, kind, max_score)
+        if assignment_id not in self.assignments:
+            raise NotFoundError(f"Assignment {assignment_id} not found")
+        registered = self._registered(assignment_id)
+        if any(gt.identifier == identifier for gt in registered):
+            raise ConflictError(f"Target {identifier!r} is already registered on this assignment")
+        last = max((gt.display_order or 0 for gt in registered), default=0)
+        return self.add_grading_target(assignment_id, identifier, last + 1, kind=kind, max_score=max_score)
+
+    def upsert_rubric(
+        self,
+        grading_target_id: uuid.UUID,
+        *,
+        criteria_text: str,
+        feedback_guidance: str | None,
+    ) -> RubricConfig:
+        criteria_text = required(criteria_text, "Criteria")
+        feedback_guidance = clean(feedback_guidance)
+        if grading_target_id not in self.grading_targets:
+            raise NotFoundError(f"Grading target {grading_target_id} not found")
+        current = self._current_rubric(grading_target_id)
+        if current is not None and (current.criteria_text, current.feedback_guidance) == (
+            criteria_text,
+            feedback_guidance,
+        ):
+            return current
+        last = max((r.version for r in self.rubrics.values() if r.grading_target_id == grading_target_id), default=0)
+        self.add_rubric(
+            grading_target_id, version=last + 1, criteria_text=criteria_text, feedback_guidance=feedback_guidance
+        )
+        return self._current_rubric(grading_target_id)
 
     def _current_rubric(self, grading_target_id: uuid.UUID) -> RubricConfig | None:
         for r in self.rubrics.values():
