@@ -31,6 +31,9 @@ from app.repository.base import (
     TargetConfig,
     TargetDetail,
     TargetFeedback,
+    TargetSubmission,
+    TargetSubmissions,
+    TargetSummary,
     TestResultRecord,
     UnknownTargetError,
     assignment_sort_key,
@@ -42,7 +45,9 @@ from app.repository.base import (
     feedback_sort_key,
     required,
     sort_key,
+    student_sort_key,
     summarize,
+    summarize_target,
     target_status,
     to_decimal,
 )
@@ -498,6 +503,68 @@ class InMemoryRepository(IGradingRepository):
             sub.is_active_attempt,
             derive_action(a.grading_mode, sub.submitted_at, sub.ai_authorized_at, sub.ai_graded_submitted_at),
             tuple(targets),
+        )
+
+    def _latest_test(self, submission_target_id: uuid.UUID) -> TestResultRecord | None:
+        r = max(
+            (r for r in self.test_results if r.submission_target_id == submission_target_id),
+            key=lambda r: r.recorded_at,
+            default=None,
+        )
+        return None if r is None else TestResultRecord(r.status, r.functional_test_feedback, r.recorded_at)
+
+    def _active_tested(self, gt: _GradingTarget) -> list[tuple[_SubmissionTarget, _Submission, TestResultRecord]]:
+        found = []
+        for st in self.submission_targets.values():
+            sub = self.submissions[st.submission_id]
+            latest = self._latest_test(st.id)
+            if st.grading_target_id == gt.id and sub.is_active_attempt and latest is not None:
+                found.append((st, sub, latest))
+        return found
+
+    def list_target_summaries(self, assignment_id: uuid.UUID) -> list[TargetSummary]:
+        if assignment_id not in self.assignments:
+            raise NotFoundError(f"Assignment {assignment_id} not found")
+        return [
+            summarize_target(
+                gt.id,
+                gt.identifier,
+                gt.kind,
+                gt.max_score,
+                [target_status(st.ai_needed, st.completed_at, st.last_error) for st, _, _ in self._active_tested(gt)],
+            )
+            for gt in sorted(self._registered(assignment_id), key=lambda gt: sort_key(gt.display_order, gt.identifier))
+        ]
+
+    def get_target_submissions(self, assignment_id: uuid.UUID, target_id: uuid.UUID) -> TargetSubmissions:
+        a = self.assignments.get(assignment_id)
+        gt = self.grading_targets.get(target_id)
+        if a is None or gt is None or gt.assignment_id != a.id:
+            raise NotFoundError(f"Target {target_id} not found on assignment {assignment_id}")
+        submissions = [
+            TargetSubmission(
+                sub.id,
+                sub.platform_submission_id,
+                sub.student_identifier,
+                sub.submitted_at,
+                target_status(st.ai_needed, st.completed_at, st.last_error),
+                latest,
+                next(
+                    (f.suggested_score for f in self.ai_feedback if f.submission_target_id == st.id and f.is_selected),
+                    None,
+                ),
+            )
+            for st, sub, latest in self._active_tested(gt)
+        ]
+        return TargetSubmissions(
+            a.id,
+            a.name,
+            a.grading_mode,
+            gt.id,
+            gt.identifier,
+            gt.kind,
+            gt.max_score,
+            tuple(sorted(submissions, key=student_sort_key)),
         )
 
     def create_assignment(

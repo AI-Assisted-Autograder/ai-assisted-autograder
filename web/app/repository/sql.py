@@ -40,6 +40,9 @@ from app.repository.base import (
     TargetConfig,
     TargetDetail,
     TargetFeedback,
+    TargetSubmission,
+    TargetSubmissions,
+    TargetSummary,
     TestResultRecord,
     UnknownTargetError,
     assignment_sort_key,
@@ -51,7 +54,9 @@ from app.repository.base import (
     feedback_sort_key,
     required,
     sort_key,
+    student_sort_key,
     summarize,
+    summarize_target,
     target_status,
     to_decimal,
 )
@@ -449,6 +454,75 @@ class SqlGradingRepository(IGradingRepository):
                     )
                     for st, gt in rows
                 ),
+            )
+
+    def list_target_summaries(self, assignment_id: uuid.UUID) -> list[TargetSummary]:
+        with self._sessions.begin() as s:
+            if s.get(Assignment, assignment_id) is None:
+                raise NotFoundError(f"Assignment {assignment_id} not found")
+            targets = sorted(
+                s.scalars(select(GradingTarget).where(GradingTarget.assignment_id == assignment_id)),
+                key=lambda gt: sort_key(gt.display_order, gt.identifier),
+            )
+            statuses: dict[uuid.UUID, list] = {gt.id: [] for gt in targets}
+            tested = exists().where(TestResult.submission_target_id == SubmissionTarget.id)
+            for st in s.scalars(
+                select(SubmissionTarget)
+                .join(Submission, SubmissionTarget.submission_id == Submission.id)
+                .where(Submission.assignment_id == assignment_id, Submission.is_active_attempt, tested)
+            ):
+                statuses[st.grading_target_id].append(target_status(st.ai_needed, st.completed_at, st.last_error))
+            return [
+                summarize_target(gt.id, gt.identifier, gt.kind, gt.max_score, statuses[gt.id])
+                for gt in targets
+            ]
+
+    def get_target_submissions(self, assignment_id: uuid.UUID, target_id: uuid.UUID) -> TargetSubmissions:
+        with self._sessions.begin() as s:
+            a = s.get(Assignment, assignment_id)
+            gt = s.get(GradingTarget, target_id)
+            if a is None or gt is None or gt.assignment_id != a.id:
+                raise NotFoundError(f"Target {target_id} not found on assignment {assignment_id}")
+            rows = s.execute(
+                select(SubmissionTarget, Submission)
+                .join(Submission, SubmissionTarget.submission_id == Submission.id)
+                .where(SubmissionTarget.grading_target_id == target_id, Submission.is_active_attempt)
+            ).all()
+            st_ids = [st.id for st, _ in rows]
+            # In recorded order, so each target ends up with its latest.
+            latest: dict[uuid.UUID, TestResultRecord] = {}
+            for r in s.scalars(
+                select(TestResult)
+                .where(TestResult.submission_target_id.in_(st_ids))
+                .order_by(TestResult.recorded_at)
+            ):
+                latest[r.submission_target_id] = TestResultRecord(r.status, r.functional_test_feedback, r.recorded_at)
+            scores = dict(s.execute(
+                select(AiFeedback.submission_target_id, AiFeedback.suggested_score)
+                .where(AiFeedback.submission_target_id.in_(st_ids), AiFeedback.is_selected)
+            ).all())
+            submissions = [
+                TargetSubmission(
+                    sub.id,
+                    sub.platform_submission_id,
+                    sub.student_identifier,
+                    sub.submitted_at,
+                    target_status(st.ai_needed, st.completed_at, st.last_error),
+                    latest[st.id],
+                    scores.get(st.id),
+                )
+                for st, sub in rows
+                if st.id in latest
+            ]
+            return TargetSubmissions(
+                a.id,
+                a.name,
+                a.grading_mode,
+                gt.id,
+                gt.identifier,
+                gt.kind,
+                gt.max_score,
+                tuple(sorted(submissions, key=student_sort_key)),
             )
 
     def create_assignment(

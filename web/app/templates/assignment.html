@@ -15,8 +15,48 @@
     <div><dt>{{ assignment.platform | title }} id</dt><dd><code>{{ assignment.platform_assignment_id }}</code></dd></div>
 </dl>
 
-<h2>Submissions</h2>
-{% if submissions %}
+<div class="title-row">
+    <h2>Submissions</h2>
+    <nav class="tabs" aria-label="View submissions">
+        <a href="/assignments/{{ assignment.id }}"{% if not by_target %} aria-current="page"{% endif %}>By student</a>
+        <a href="/assignments/{{ assignment.id }}?view=targets"{% if by_target %} aria-current="page"{% endif %}>By target</a>
+    </nav>
+</div>
+{% if by_target %}
+<p class="hint">Each student's active attempt, counted under a target once the autograder has recorded a test result for it.</p>
+{% if target_summaries %}
+<div class="table-wrap">
+<table>
+    <thead>
+        <tr>
+            <th>Target</th>
+            <th class="num">Students</th>
+            <th>AI feedback</th>
+        </tr>
+    </thead>
+    <tbody>
+        {% for t in target_summaries %}
+        <tr>
+            <td>
+                <a href="/assignments/{{ assignment.id }}/targets/{{ t.id }}"><code class="target">{{ t.identifier }}</code></a>
+                <span class="badge muted">{{ t.kind | title }}</span>
+            </td>
+            <td class="num">{{ t.submission_count }}</td>
+            <td><div class="counts">
+                {% if t.done %}<span class="count done">{{ t.done }} feedback</span>{% endif %}
+                {% if t.failed %}<span class="count failed">{{ t.failed }} failed</span>{% endif %}
+                {% if t.waiting %}<span class="count waiting">{{ t.waiting }} waiting</span>{% endif %}
+                {% if t.opted_out %}<span class="count muted">{{ t.opted_out }} opted out</span>{% endif %}
+            </div></td>
+        </tr>
+        {% endfor %}
+    </tbody>
+</table>
+</div>
+{% else %}
+<p class="empty">No targets registered.</p>
+{% endif %}
+{% elif submissions %}
 <div class="table-wrap">
 <table>
     <thead>

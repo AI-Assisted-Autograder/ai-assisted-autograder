@@ -151,10 +151,15 @@ def assignment_page(
     target_form: dict | None = None,
     target_error: str | None = None,
     status_code: int = 200,
+    view: str = "students",
 ):
+    by_target = view == "targets"
     try:
         config = repo.get_assignment_config(assignment_id)
-        submissions = repo.list_submissions(assignment_id)
+        if by_target:
+            submissions, target_summaries = [], repo.list_target_summaries(assignment_id)
+        else:
+            submissions, target_summaries = repo.list_submissions(assignment_id), []
     except NotFoundError:
         return not_found(request, "That assignment does not exist.")
     return templates.TemplateResponse(
@@ -162,7 +167,9 @@ def assignment_page(
         "assignment.html",
         {
             "assignment": config,
+            "by_target": by_target,
             "submissions": submissions,
+            "target_summaries": target_summaries,
             "target_form": target_form or {},
             "target_error": target_error,
         },
@@ -172,9 +179,13 @@ def assignment_page(
 
 @router.get("/assignments/{assignment_id}")
 def assignment(
-    request: Request, assignment_id: uuid.UUID, repo: IGradingRepository = Depends(get_repository)
+    request: Request,
+    assignment_id: uuid.UUID,
+    view: str = "students",
+    repo: IGradingRepository = Depends(get_repository),
 ):
-    return assignment_page(request, repo, assignment_id)
+    """view=targets lists submissions by grading target instead of by student."""
+    return assignment_page(request, repo, assignment_id, view=view)
 
 
 @router.post("/assignments/{assignment_id}/targets")
@@ -225,6 +236,20 @@ def rubric_page(
         {"assignment": config, "target": target, "form": form, "error": error},
         status_code=status_code,
     )
+
+
+@router.get("/assignments/{assignment_id}/targets/{target_id}")
+def target(
+    request: Request,
+    assignment_id: uuid.UUID,
+    target_id: uuid.UUID,
+    repo: IGradingRepository = Depends(get_repository),
+):
+    try:
+        detail = repo.get_target_submissions(assignment_id, target_id)
+    except NotFoundError:
+        return not_found(request, "That grading target does not exist.")
+    return templates.TemplateResponse(request, "target.html", {"target": detail})
 
 
 @router.get("/assignments/{assignment_id}/targets/{target_id}/rubric")

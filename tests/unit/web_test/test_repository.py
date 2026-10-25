@@ -841,6 +841,80 @@ def test_submission_detail_unknown(backend):
         backend.repo.get_submission_detail(uuid.uuid4())
 
 
+def by_target(backend):
+    """add tested for three students, one of them superseded; sub tested for one."""
+    aid = backend.add_assignment("IMMEDIATE", (("sub", 2), ("add", 1), ("mul", 3)))
+
+    def submit(platform_id, student, hours=0):
+        sid = backend.repo.upsert_submission(
+            SubmissionRef(aid, platform_id, SUBMITTED + timedelta(hours=hours), student)
+        )
+        backend.repo.create_targets_default_needed(sid)
+        return sid
+
+    bob = submit("bob-1", "bob@example.edu")
+    backend.repo.add_test_result(bob, "add", "FAIL", "first")
+    backend.repo.add_test_result(bob, "add", "PASS", "second")
+    backend.repo.save_feedback(bob, "add", result_for(backend.add_rubric(aid, "add")))
+    backend.repo.add_test_result(bob, "sub", "ERROR", None)
+    backend.repo.mark_target_failed(bob, "sub", "boom")
+    alice = submit("alice-1", "alice@example.edu")
+    backend.repo.add_test_result(alice, "add", "FAIL", None)
+    old = submit("alice-0", "alice@example.edu", hours=-1)
+    backend.set_submission(old, is_active_attempt=False)
+    backend.repo.add_test_result(old, "add", "PASS", None)
+    nobody = submit("anon-1", None)
+    backend.repo.add_test_result(nobody, "add", "SKIP", None)
+    backend.repo.set_ai_not_needed(nobody, "add")
+    targets = {t.identifier: t.id for t in backend.repo.get_assignment_config(aid).targets}
+    return aid, targets, bob, alice
+
+
+def test_target_summaries_count_active_tested_attempts(backend):
+    aid, targets, _, _ = by_target(backend)
+
+    found = backend.repo.list_target_summaries(aid)
+
+    assert [t.identifier for t in found] == ["add", "sub", "mul"]
+    add, sub, mul = found
+    assert add.id == targets["add"]
+    # The superseded attempt is left out; each untested target row is too.
+    assert (add.done, add.failed, add.waiting, add.opted_out, add.submission_count) == (1, 0, 1, 1, 3)
+    assert (sub.done, sub.failed, sub.waiting, sub.opted_out) == (0, 1, 0, 0)
+    assert mul.submission_count == 0
+
+
+def test_target_summaries_unknown_assignment(backend):
+    with pytest.raises(NotFoundError):
+        backend.repo.list_target_summaries(uuid.uuid4())
+
+
+def test_target_submissions_by_student_with_latest_test(backend):
+    aid, targets, bob, alice = by_target(backend)
+
+    found = backend.repo.get_target_submissions(aid, targets["add"])
+
+    assert (found.assignment_id, found.id, found.identifier, found.kind) == (aid, targets["add"], "add", "METHOD")
+    assert [s.platform_submission_id for s in found.submissions] == ["alice-1", "bob-1", "anon-1"]
+    a, b, anon = found.submissions
+    assert (a.submission_id, a.status, a.latest_test.status, a.suggested_score) == (
+        alice, TargetStatus.WAITING, "FAIL", None,
+    )
+    # bob's later test result wins, and the selected response's score is shown.
+    assert (b.submission_id, b.status, b.latest_test.functional_test_feedback) == (bob, TargetStatus.DONE, "second")
+    assert b.suggested_score == Decimal("0.3")
+    assert (anon.student_identifier, anon.status) == (None, TargetStatus.OPTED_OUT)
+    assert backend.repo.get_target_submissions(aid, targets["mul"]).submissions == ()
+
+
+def test_target_submissions_target_must_belong_to_the_assignment(backend):
+    aid, targets, _, _ = by_target(backend)
+    other = backend.add_assignment("IMMEDIATE", (("add", 1),))
+    for assignment_id, target_id in ((other, targets["add"]), (aid, uuid.uuid4()), (uuid.uuid4(), targets["add"])):
+        with pytest.raises(NotFoundError):
+            backend.repo.get_target_submissions(assignment_id, target_id)
+
+
 # ---------------------------------------------------------------------
 # Group 4: instructor configuration writes
 # ---------------------------------------------------------------------

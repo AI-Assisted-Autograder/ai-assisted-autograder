@@ -119,6 +119,50 @@ def test_nightly_submission_waiting_for_its_run(client, repo):
     assert "The next nightly run will grade it." in response.text
 
 
+def test_assignment_by_target_view_links_each_target(client, repo):
+    aid, _ = graded_submission(repo)
+    targets = {t.identifier: t.id for t in repo.get_assignment_config(aid).targets}
+
+    by_student = client.get(f"/assignments/{aid}").text
+    response = client.get(f"/assignments/{aid}?view=targets")
+
+    assert 'href="/assignments/{}/targets/{}"'.format(aid, targets["add"]) not in by_student
+    assert response.status_code == 200
+    text = response.text
+    for target_id in targets.values():
+        assert f'href="/assignments/{aid}/targets/{target_id}"' in text
+    # Only add has a test result, so only it counts alice.
+    assert text.count("1 feedback") == 1
+    assert "alice@example.edu" not in text
+
+
+def test_target_page_lists_students_with_test_results(client, repo):
+    aid, sid = graded_submission(repo)
+    targets = {t.identifier: t.id for t in repo.get_assignment_config(aid).targets}
+
+    response = client.get(f"/assignments/{aid}/targets/{targets['add']}")
+
+    assert response.status_code == 200
+    text = response.text
+    assert f'href="/submissions/{sid}"' in text and "alice@example.edu" in text
+    assert "FAIL" in text and "Feedback given" in text
+    assert "3 / 5" in text
+    assert f'href="/assignments/{aid}?view=targets"' in text
+
+    untested = client.get(f"/assignments/{aid}/targets/{targets['divide']}").text
+    assert "alice@example.edu" not in untested
+    assert "No test results recorded" in untested
+
+
+def test_target_page_target_must_belong_to_the_assignment(client, repo):
+    aid, _ = graded_submission(repo)
+    other = repo.add_assignment("IMMEDIATE", platform_assignment_id="other")
+    target_id = repo.get_assignment_config(aid).targets[0].id
+
+    assert client.get(f"/assignments/{other}/targets/{target_id}").status_code == 404
+    assert client.get(f"/assignments/{aid}/targets/{uuid.uuid4()}").status_code == 404
+
+
 @pytest.mark.parametrize("path", ["/assignments/{}", "/submissions/{}"])
 def test_unknown_ids_are_404(client, path):
     response = client.get(path.format(uuid.uuid4()))

@@ -273,6 +273,57 @@ class SubmissionDetail:
     targets: tuple[TargetDetail, ...]
 
 
+@dataclass(frozen=True)
+class TargetSummary:
+    """One row of an assignment's by-target view.
+
+    Counts only active attempts the autograder recorded a test result for.
+    """
+
+    id: uuid.UUID
+    identifier: str
+    kind: str
+    max_score: Decimal | None
+    done: int
+    failed: int
+    waiting: int
+    opted_out: int
+
+    @property
+    def submission_count(self) -> int:
+        return self.done + self.failed + self.waiting + self.opted_out
+
+
+@dataclass(frozen=True)
+class TargetSubmission:
+    """One student's active attempt at a target."""
+
+    submission_id: uuid.UUID
+    platform_submission_id: str
+    student_identifier: str | None
+    submitted_at: datetime
+    status: TargetStatus
+    # The most recently recorded one.
+    latest_test: TestResultRecord
+    # The selected provider's, once feedback is given.
+    suggested_score: Decimal | None
+
+
+@dataclass(frozen=True)
+class TargetSubmissions:
+    """Everything the instructor's target page shows."""
+
+    assignment_id: uuid.UUID
+    assignment_name: str | None
+    grading_mode: str
+    id: uuid.UUID
+    identifier: str
+    kind: str
+    max_score: Decimal | None
+    # By student, unknown students last.
+    submissions: tuple[TargetSubmission, ...]
+
+
 class RepositoryError(Exception):
     pass
 
@@ -371,6 +422,30 @@ def summarize(
         statuses.count(TargetStatus.WAITING),
         statuses.count(TargetStatus.OPTED_OUT),
     )
+
+
+def summarize_target(
+    target_id: uuid.UUID,
+    identifier: str,
+    kind: str,
+    max_score: Decimal | None,
+    statuses: list[TargetStatus],
+) -> TargetSummary:
+    return TargetSummary(
+        target_id,
+        identifier,
+        kind,
+        max_score,
+        statuses.count(TargetStatus.DONE),
+        statuses.count(TargetStatus.FAILED),
+        statuses.count(TargetStatus.WAITING),
+        statuses.count(TargetStatus.OPTED_OUT),
+    )
+
+
+def student_sort_key(s: TargetSubmission) -> tuple:
+    """By student, unknown students last, then by platform id so ties are stable."""
+    return (s.student_identifier is None, s.student_identifier or "", s.platform_submission_id)
 
 
 def feedback_sort_key(f: FeedbackDetail) -> tuple:
@@ -522,6 +597,22 @@ class IGradingRepository(ABC):
     @abstractmethod
     def get_submission_detail(self, submission_id: uuid.UUID) -> SubmissionDetail:
         """A submission's targets with their test results and every provider's feedback."""
+
+    @abstractmethod
+    def list_target_summaries(self, assignment_id: uuid.UUID) -> list[TargetSummary]:
+        """Every target of an assignment in display order, with its submissions counted by status.
+
+        Counts each student's active attempt (AD-14) once, and only where the
+        autograder recorded a test result for the target.
+        """
+
+    @abstractmethod
+    def get_target_submissions(self, assignment_id: uuid.UUID, target_id: uuid.UUID) -> TargetSubmissions:
+        """A target's active attempts that have a test result, by student.
+
+        Raises NotFoundError if the target is not registered on this
+        assignment, so it cannot be read under another assignment's URL.
+        """
 
     # Instructor configuration writes (05-sequence-instructor).
 
