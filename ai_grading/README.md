@@ -84,7 +84,9 @@ and preserves functional scores when AI is unavailable. Instructor evidence is
 kept in `results/ai_evidence.json` and the autograder log, outside student rows.
 Playwright requires one matching primary source; ambiguous copies receive no AI
 score. The AI phase has a 300-second total budget (`--total-timeout`), with each
-request limited by the remaining time.
+request limited by the remaining time. Java's five sequential requests share that
+budget; use `--total-timeout 600` for slower models when testing all five targets,
+and allow enough Gradescope execution time for functional grading plus AI.
 Set Gradescope's Outline maximum explicitly; adding AI rows does not change it.
 Use a new request namespace for an independent run or after configuration changes.
 New configurations should allow 64,000 source characters, 262,144 body bytes,

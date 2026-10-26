@@ -155,9 +155,9 @@ separately from assignment creation.
 
 ### Deploy the combined Web and AI backend
 
-The team must provide public HTTPS to Web port 8000, with proxy timeouts covering
-AI requests (30 seconds by default). The combined service reads SQL directly;
-`ASSIGNMENT_API_URL` is only needed for a separate AI process.
+The team must provide public HTTPS to Web port 8000, with proxy timeouts longer
+than the backend request timeout (120 seconds in the example below). The combined
+service reads SQL directly; `ASSIGNMENT_API_URL` is only needed for a separate AI process.
 
 1. From the existing `web/` directory, preserve the Compose project name and `.env`.
    Retain the private `INTEGRATION_API_TOKEN` shared with nightly automation; replace
@@ -184,7 +184,9 @@ AI requests (30 seconds by default). The combined service reads SQL directly;
 
    Substitute a model authorized for the Pitt project. For an existing primary row,
    use the update below. Do not run `app.seed` on the shared DB. Create and read the
-   assignment using the endpoints above.
+   assignment using the endpoints above. For RentACat, use the supplied
+   [assignment JSON templates](../ai_grading/README.md#rentacat-assignment-packages);
+   the instructor forms do not configure their testplans or evidence mapping.
 4. Initialize the persistent state once, using the returned assignment UUID and the
    same engine/model as the DB. Choose the call allowance and expiry for the planned test:
 
@@ -196,6 +198,8 @@ AI requests (30 seconds by default). The combined service reads SQL directly;
      --client-config /var/lib/ai-feedback/client/config.json \
      --backend-url https://YOUR-SERVER \
      --allow-model pitt:@pitt-ai-connect-azure-foundry/gpt-5.1 \
+     --max-code-chars 64000 --max-body-bytes 262144 \
+     --max-output-tokens 8192 --timeout-seconds 120 \
      --max-calls 10 --expires-in-hours 168
    ```
 
@@ -203,6 +207,11 @@ AI requests (30 seconds by default). The combined service reads SQL directly;
    For Gemini API, use `--allow-model gemini_api:YOUR_GEMINI_MODEL`. For Vertex,
    use `--allow-model vertex:YOUR_GEMINI_MODEL` and specify `--project`, `--location`
    and `--service-account`. The legacy `--allowed-model` flag means Vertex only.
+   These limits cover the RentACat packages. A fresh Java submission can consume
+   five calls; Playwright consumes one. Allow for failed calls and independent trials.
+   Bind each assignment's UUID to its own token; use `--add-assignment` with the
+   existing state and new client output paths for the second assignment, as described below.
+   Additions inherit policy, so omit model and limit flags when adding an assignment.
 
 5. Export the assignment token and securely transfer it to the packaging workstation
    at the same repository-relative path, owned by that user with mode `600`:
