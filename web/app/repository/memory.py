@@ -14,6 +14,7 @@ from app.repository.base import (
     ActionResult,
     AssignmentConfig,
     AssignmentSummary,
+    ConflictError,
     FeedbackDetail,
     FeedbackPackage,
     FeedbackResult,
@@ -30,17 +31,33 @@ from app.repository.base import (
     TargetConfig,
     TargetDetail,
     TargetFeedback,
+    TargetSubmission,
+    TargetSubmissions,
+    TargetSummary,
     TestResultRecord,
     UnknownTargetError,
     assignment_sort_key,
+    check_assignment_fields,
     check_gradable,
+    check_target_fields,
+    clean,
     derive_action,
     feedback_sort_key,
+    required,
     sort_key,
+    student_sort_key,
     summarize,
+    summarize_target,
     target_status,
     to_decimal,
 )
+
+
+@dataclass
+class _Course:
+    id: uuid.UUID
+    name: str
+    term: str | None
 
 
 @dataclass
@@ -52,6 +69,7 @@ class _Assignment:
     language: str
     name: str | None
     is_active: bool = True
+    course_id: uuid.UUID | None = None
 
 
 @dataclass
@@ -140,6 +158,7 @@ def _now() -> datetime:
 
 class InMemoryRepository(IGradingRepository):
     def __init__(self):
+        self.courses: dict[uuid.UUID, _Course] = {}
         self.assignments: dict[uuid.UUID, _Assignment] = {}
         self.grading_targets: dict[uuid.UUID, _GradingTarget] = {}
         self.rubrics: dict[uuid.UUID, _Rubric] = {}
@@ -491,6 +510,135 @@ class InMemoryRepository(IGradingRepository):
             derive_action(a.grading_mode, sub.submitted_at, sub.ai_authorized_at, sub.ai_graded_submitted_at),
             tuple(targets),
         )
+
+    def _latest_test(self, submission_target_id: uuid.UUID) -> TestResultRecord | None:
+        r = max(
+            (r for r in self.test_results if r.submission_target_id == submission_target_id),
+            key=lambda r: r.recorded_at,
+            default=None,
+        )
+        return None if r is None else TestResultRecord(r.status, r.functional_test_feedback, r.recorded_at)
+
+    def _active_tested(self, gt: _GradingTarget) -> list[tuple[_SubmissionTarget, _Submission, TestResultRecord]]:
+        found = []
+        for st in self.submission_targets.values():
+            sub = self.submissions[st.submission_id]
+            latest = self._latest_test(st.id)
+            if st.grading_target_id == gt.id and sub.is_active_attempt and latest is not None:
+                found.append((st, sub, latest))
+        return found
+
+    def list_target_summaries(self, assignment_id: uuid.UUID) -> list[TargetSummary]:
+        if assignment_id not in self.assignments:
+            raise NotFoundError(f"Assignment {assignment_id} not found")
+        return [
+            summarize_target(
+                gt.id,
+                gt.identifier,
+                gt.kind,
+                gt.max_score,
+                [target_status(st.ai_needed, st.completed_at, st.last_error) for st, _, _ in self._active_tested(gt)],
+            )
+            for gt in sorted(self._registered(assignment_id), key=lambda gt: sort_key(gt.display_order, gt.identifier))
+        ]
+
+    def get_target_submissions(self, assignment_id: uuid.UUID, target_id: uuid.UUID) -> TargetSubmissions:
+        a = self.assignments.get(assignment_id)
+        gt = self.grading_targets.get(target_id)
+        if a is None or gt is None or gt.assignment_id != a.id:
+            raise NotFoundError(f"Target {target_id} not found on assignment {assignment_id}")
+        submissions = [
+            TargetSubmission(
+                sub.id,
+                sub.platform_submission_id,
+                sub.student_identifier,
+                sub.submitted_at,
+                target_status(st.ai_needed, st.completed_at, st.last_error),
+                latest,
+                next(
+                    (f.suggested_score for f in self.ai_feedback if f.submission_target_id == st.id and f.is_selected),
+                    None,
+                ),
+            )
+            for st, sub, latest in self._active_tested(gt)
+        ]
+        return TargetSubmissions(
+            a.id,
+            a.name,
+            a.grading_mode,
+            gt.id,
+            gt.identifier,
+            gt.kind,
+            gt.max_score,
+            tuple(sorted(submissions, key=student_sort_key)),
+        )
+
+    def create_assignment(
+        self,
+        *,
+        course_name: str,
+        term: str | None,
+        platform_assignment_id: str,
+        name: str | None,
+        grading_mode: str,
+        language: str,
+    ) -> uuid.UUID:
+        course_name = required(course_name, "Course")
+        term = clean(term)
+        platform_assignment_id = required(platform_assignment_id, "Gradescope assignment id")
+        grading_mode, language = check_assignment_fields(grading_mode, language)
+        if any(a.platform_assignment_id == platform_assignment_id for a in self.assignments.values()):
+            raise ConflictError(f"Gradescope assignment {platform_assignment_id!r} is already registered")
+        course = next((c for c in self.courses.values() if (c.name, c.term) == (course_name, term)), None)
+        if course is None:
+            course = _Course(uuid.uuid4(), course_name, term)
+            self.courses[course.id] = course
+        a = _Assignment(
+            uuid.uuid4(), grading_mode, "GRADESCOPE", platform_assignment_id, language, clean(name),
+            course_id=course.id,
+        )
+        self.assignments[a.id] = a
+        return a.id
+
+    def create_target(
+        self,
+        assignment_id: uuid.UUID,
+        *,
+        identifier: str,
+        kind: str,
+        max_score: Decimal | None,
+    ) -> uuid.UUID:
+        identifier = check_target_fields(identifier, kind, max_score)
+        if assignment_id not in self.assignments:
+            raise NotFoundError(f"Assignment {assignment_id} not found")
+        registered = self._registered(assignment_id)
+        if any(gt.identifier == identifier for gt in registered):
+            raise ConflictError(f"Target {identifier!r} is already registered on this assignment")
+        last = max((gt.display_order or 0 for gt in registered), default=0)
+        return self.add_grading_target(assignment_id, identifier, last + 1, kind=kind, max_score=max_score)
+
+    def upsert_rubric(
+        self,
+        grading_target_id: uuid.UUID,
+        *,
+        criteria_text: str,
+        feedback_guidance: str | None,
+    ) -> RubricConfig:
+        criteria_text = required(criteria_text, "Criteria")
+        feedback_guidance = clean(feedback_guidance)
+        if grading_target_id not in self.grading_targets:
+            raise NotFoundError(f"Grading target {grading_target_id} not found")
+        current = self._current_rubric(grading_target_id)
+        if current is not None and (current.criteria_text, current.feedback_guidance) == (
+            criteria_text,
+            feedback_guidance,
+        ):
+            return current
+        last = max((r.version for r in self.rubrics.values() if r.grading_target_id == grading_target_id), default=0)
+        self.add_rubric(
+            grading_target_id, version=last + 1, criteria_text=criteria_text, feedback_guidance=feedback_guidance
+        )
+        return self._current_rubric(grading_target_id)
 
     def _current_rubric(self, grading_target_id: uuid.UUID) -> RubricConfig | None:
         for r in self.rubrics.values():

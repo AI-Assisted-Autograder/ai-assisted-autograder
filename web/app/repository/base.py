@@ -16,6 +16,8 @@ from datetime import datetime
 from decimal import Decimal
 from enum import Enum
 
+from app.models import GRADING_MODES, TARGET_KINDS
+
 
 class Action(str, Enum):
     GRADE = "GRADE"
@@ -273,6 +275,57 @@ class SubmissionDetail:
     targets: tuple[TargetDetail, ...]
 
 
+@dataclass(frozen=True)
+class TargetSummary:
+    """One row of an assignment's by-target view.
+
+    Counts only active attempts the autograder recorded a test result for.
+    """
+
+    id: uuid.UUID
+    identifier: str
+    kind: str
+    max_score: Decimal | None
+    done: int
+    failed: int
+    waiting: int
+    opted_out: int
+
+    @property
+    def submission_count(self) -> int:
+        return self.done + self.failed + self.waiting + self.opted_out
+
+
+@dataclass(frozen=True)
+class TargetSubmission:
+    """One student's active attempt at a target."""
+
+    submission_id: uuid.UUID
+    platform_submission_id: str
+    student_identifier: str | None
+    submitted_at: datetime
+    status: TargetStatus
+    # The most recently recorded one.
+    latest_test: TestResultRecord
+    # The selected provider's, once feedback is given.
+    suggested_score: Decimal | None
+
+
+@dataclass(frozen=True)
+class TargetSubmissions:
+    """Everything the instructor's target page shows."""
+
+    assignment_id: uuid.UUID
+    assignment_name: str | None
+    grading_mode: str
+    id: uuid.UUID
+    identifier: str
+    kind: str
+    max_score: Decimal | None
+    # By student, unknown students last.
+    submissions: tuple[TargetSubmission, ...]
+
+
 class RepositoryError(Exception):
     pass
 
@@ -373,8 +426,60 @@ def summarize(
     )
 
 
+def summarize_target(
+    target_id: uuid.UUID,
+    identifier: str,
+    kind: str,
+    max_score: Decimal | None,
+    statuses: list[TargetStatus],
+) -> TargetSummary:
+    return TargetSummary(
+        target_id,
+        identifier,
+        kind,
+        max_score,
+        statuses.count(TargetStatus.DONE),
+        statuses.count(TargetStatus.FAILED),
+        statuses.count(TargetStatus.WAITING),
+        statuses.count(TargetStatus.OPTED_OUT),
+    )
+
+
+def student_sort_key(s: TargetSubmission) -> tuple:
+    """By student, unknown students last, then by platform id so ties are stable."""
+    return (s.student_identifier is None, s.student_identifier or "", s.platform_submission_id)
+
+
 def feedback_sort_key(f: FeedbackDetail) -> tuple:
     return (not f.is_selected, f.provider, f.model_name)
+
+
+def clean(value: str | None) -> str | None:
+    """Strip a form value, treating blank as absent."""
+    if value is None:
+        return None
+    return value.strip() or None
+
+
+def required(value: str | None, label: str) -> str:
+    cleaned = clean(value)
+    if cleaned is None:
+        raise ValueError(f"{label} is required")
+    return cleaned
+
+
+def check_assignment_fields(grading_mode: str, language: str) -> tuple[str, str]:
+    if grading_mode not in GRADING_MODES:
+        raise ValueError(f"grading mode must be one of {', '.join(GRADING_MODES)}, not {grading_mode!r}")
+    return grading_mode, required(language, "Language").upper()
+
+
+def check_target_fields(identifier: str, kind: str, max_score: Decimal | None) -> str:
+    if kind not in TARGET_KINDS:
+        raise ValueError(f"kind must be one of {', '.join(TARGET_KINDS)}, not {kind!r}")
+    if max_score is not None and max_score < 0:
+        raise ValueError("max score cannot be negative")
+    return required(identifier, "Identifier")
 
 
 class IGradingRepository(ABC):
@@ -494,3 +599,72 @@ class IGradingRepository(ABC):
     @abstractmethod
     def get_submission_detail(self, submission_id: uuid.UUID) -> SubmissionDetail:
         """A submission's targets with their test results and every provider's feedback."""
+
+    @abstractmethod
+    def list_target_summaries(self, assignment_id: uuid.UUID) -> list[TargetSummary]:
+        """Every target of an assignment in display order, with its submissions counted by status.
+
+        Counts each student's active attempt (AD-14) once, and only where the
+        autograder recorded a test result for the target.
+        """
+
+    @abstractmethod
+    def get_target_submissions(self, assignment_id: uuid.UUID, target_id: uuid.UUID) -> TargetSubmissions:
+        """A target's active attempts that have a test result, by student.
+
+        Raises NotFoundError if the target is not registered on this
+        assignment, so it cannot be read under another assignment's URL.
+        """
+
+    # Instructor configuration writes (05-sequence-instructor).
+
+    @abstractmethod
+    def create_assignment(
+        self,
+        *,
+        course_name: str,
+        term: str | None,
+        platform_assignment_id: str,
+        name: str | None,
+        grading_mode: str,
+        language: str,
+    ) -> uuid.UUID:
+        """Create an assignment, in the course with this name and term.
+
+        The course is created if it does not exist yet. Raises ValueError
+        for a blank required field or an unknown grading mode, and
+        ConflictError if the platform assignment id is already registered.
+        """
+
+    @abstractmethod
+    def create_target(
+        self,
+        assignment_id: uuid.UUID,
+        *,
+        identifier: str,
+        kind: str,
+        max_score: Decimal | None,
+    ) -> uuid.UUID:
+        """Register a target, after the assignment's existing ones in display order.
+
+        Raises ConflictError if the identifier is already registered on the
+        assignment (AD-3), and ValueError for a blank identifier, an
+        unknown kind, or a negative max score.
+        """
+
+    @abstractmethod
+    def upsert_rubric(
+        self,
+        grading_target_id: uuid.UUID,
+        *,
+        criteria_text: str,
+        feedback_guidance: str | None,
+    ) -> RubricConfig:
+        """Make this the target's current rubric, as version n+1.
+
+        Rubrics are versioned, not overwritten, so feedback keeps pointing
+        at the rubric it was generated from. Saving text identical to the
+        current rubric returns it unchanged rather than adding a version.
+        Raises ValueError for blank criteria.
+        """
+

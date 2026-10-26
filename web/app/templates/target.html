@@ -1,0 +1,57 @@
+{% extends "base.html" %}
+
+{% block title %}{{ target.identifier }}{% endblock %}
+
+{% block content %}
+<p class="crumbs">
+    <a href="/">Assignments</a> /
+    <a href="/assignments/{{ target.assignment_id }}?view=targets">{{ target.assignment_name or "Assignment" }}</a> /
+</p>
+<h1>
+    <code class="target">{{ target.identifier }}</code>
+    <span class="badge muted">{{ target.kind | title }}</span>
+</h1>
+<dl class="meta">
+    {% if target.max_score is not none %}
+    <div><dt>Max score</dt><dd>{{ target.max_score | number }}</dd></div>
+    {% endif %}
+    <div><dt>Mode</dt><dd><span class="badge mode">{{ target.grading_mode | title }}</span></dd></div>
+</dl>
+
+<h2>Submissions</h2>
+<p class="hint">Each student's active attempt that the autograder recorded a test result for.</p>
+{% if target.submissions %}
+<div class="table-wrap">
+<table>
+    <thead>
+        <tr>
+            <th>Student</th>
+            <th>Submitted</th>
+            <th>Latest test</th>
+            <th>AI feedback</th>
+            <th class="num">Suggested score</th>
+        </tr>
+    </thead>
+    <tbody>
+        {% for s in target.submissions %}
+        {% set label, style = TARGET_STATES[s.status] %}
+        <tr>
+            <td>
+                <a href="/submissions/{{ s.submission_id }}">{{ s.student_identifier or "(unknown student)" }}</a>
+                <div class="sub">{{ s.platform_submission_id }}</div>
+            </td>
+            <td class="nowrap">{{ s.submitted_at | when }}</td>
+            <td><span class="test {{ s.latest_test.status | lower }}">{{ s.latest_test.status }}</span></td>
+            <td><span class="badge {{ style }}">{{ label }}</span></td>
+            <td class="num">
+                {% if s.suggested_score is not none %}{{ s.suggested_score | number }}{% if target.max_score is not none %} / {{ target.max_score | number }}{% endif %}{% endif %}
+            </td>
+        </tr>
+        {% endfor %}
+    </tbody>
+</table>
+</div>
+{% else %}
+<p class="empty">No test results recorded for this target yet.</p>
+{% endif %}
+{% endblock %}

@@ -1,0 +1,44 @@
+{% extends "base.html" %}
+
+{% set assignment_title = assignment.name or assignment.platform_assignment_id %}
+{% block title %}Rubric for {{ target.identifier }}{% endblock %}
+
+{% block content %}
+<p class="crumbs">
+    <a href="/">Assignments</a> /
+    <a href="/assignments/{{ assignment.id }}">{{ assignment_title }}</a> /
+</p>
+<h1>
+    Rubric for <code class="target">{{ target.identifier }}</code>
+    <span class="badge muted">{{ target.kind | title }}</span>
+</h1>
+<p class="hint">
+    {% if target.rubric %}
+    Currently version {{ target.rubric.version }}. Saving changes creates version {{ target.rubric.version + 1 }};
+    earlier versions are kept, so feedback already generated still shows which rubric it was graded against.
+    {% else %}
+    This target has no rubric yet, so it cannot be graded until you save one.
+    {% endif %}
+</p>
+
+{% if error %}<p class="form-error" role="alert">{{ error }}</p>{% endif %}
+
+<form class="card form" method="post" action="/assignments/{{ assignment.id }}/targets/{{ target.id }}/rubric">
+    <label>
+        Criteria
+        <textarea name="criteria_text" rows="8" required>{{ form.criteria_text }}</textarea>
+    </label>
+    <p class="hint">What a correct, well-written {{ target.kind | lower }} does. The model grades against this.</p>
+
+    <label>
+        Feedback guidance <span class="sub">optional</span>
+        <textarea name="feedback_guidance" rows="4">{{ form.feedback_guidance }}</textarea>
+    </label>
+    <p class="hint">How to talk to the student: tone, length, what not to give away.</p>
+
+    <div class="actions">
+        <button type="submit">Save rubric</button>
+        <a href="/assignments/{{ assignment.id }}#targets">Cancel</a>
+    </div>
+</form>
+{% endblock %}

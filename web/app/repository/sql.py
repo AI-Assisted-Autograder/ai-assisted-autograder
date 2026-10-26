@@ -1,4 +1,5 @@
 import uuid
+from decimal import Decimal
 
 from sqlalchemy import Uuid, and_, exists, func, literal, select, update
 from sqlalchemy.dialects.postgresql import insert
@@ -9,6 +10,7 @@ from app.models import (
     TEST_STATUSES,
     AiFeedback,
     Assignment,
+    Course,
     GradingTarget,
     LlmProviderConfig,
     Rubric,
@@ -21,6 +23,7 @@ from app.repository.base import (
     ActionResult,
     AssignmentConfig,
     AssignmentSummary,
+    ConflictError,
     FeedbackDetail,
     FeedbackPackage,
     FeedbackResult,
@@ -37,14 +40,23 @@ from app.repository.base import (
     TargetConfig,
     TargetDetail,
     TargetFeedback,
+    TargetSubmission,
+    TargetSubmissions,
+    TargetSummary,
     TestResultRecord,
     UnknownTargetError,
     assignment_sort_key,
+    check_assignment_fields,
     check_gradable,
+    check_target_fields,
+    clean,
     derive_action,
     feedback_sort_key,
+    required,
     sort_key,
+    student_sort_key,
     summarize,
+    summarize_target,
     target_status,
     to_decimal,
 )
@@ -240,7 +252,7 @@ class SqlGradingRepository(IGradingRepository):
                     gt.identifier,
                     gt.kind,
                     gt.max_score,
-                    None if r is None else RubricConfig(r.id, r.version, r.criteria_text, r.feedback_guidance),
+                    None if r is None else _rubric_config(r),
                     gt.analysis_config,
                 )
                 for gt, r in rows
@@ -445,6 +457,186 @@ class SqlGradingRepository(IGradingRepository):
                 ),
             )
 
+    def list_target_summaries(self, assignment_id: uuid.UUID) -> list[TargetSummary]:
+        with self._sessions.begin() as s:
+            if s.get(Assignment, assignment_id) is None:
+                raise NotFoundError(f"Assignment {assignment_id} not found")
+            targets = sorted(
+                s.scalars(select(GradingTarget).where(GradingTarget.assignment_id == assignment_id)),
+                key=lambda gt: sort_key(gt.display_order, gt.identifier),
+            )
+            statuses: dict[uuid.UUID, list] = {gt.id: [] for gt in targets}
+            tested = exists().where(TestResult.submission_target_id == SubmissionTarget.id)
+            for st in s.scalars(
+                select(SubmissionTarget)
+                .join(Submission, SubmissionTarget.submission_id == Submission.id)
+                .where(Submission.assignment_id == assignment_id, Submission.is_active_attempt, tested)
+            ):
+                statuses[st.grading_target_id].append(target_status(st.ai_needed, st.completed_at, st.last_error))
+            return [
+                summarize_target(gt.id, gt.identifier, gt.kind, gt.max_score, statuses[gt.id])
+                for gt in targets
+            ]
+
+    def get_target_submissions(self, assignment_id: uuid.UUID, target_id: uuid.UUID) -> TargetSubmissions:
+        with self._sessions.begin() as s:
+            a = s.get(Assignment, assignment_id)
+            gt = s.get(GradingTarget, target_id)
+            if a is None or gt is None or gt.assignment_id != a.id:
+                raise NotFoundError(f"Target {target_id} not found on assignment {assignment_id}")
+            rows = s.execute(
+                select(SubmissionTarget, Submission)
+                .join(Submission, SubmissionTarget.submission_id == Submission.id)
+                .where(SubmissionTarget.grading_target_id == target_id, Submission.is_active_attempt)
+            ).all()
+            st_ids = [st.id for st, _ in rows]
+            # In recorded order, so each target ends up with its latest.
+            latest: dict[uuid.UUID, TestResultRecord] = {}
+            for r in s.scalars(
+                select(TestResult)
+                .where(TestResult.submission_target_id.in_(st_ids))
+                .order_by(TestResult.recorded_at)
+            ):
+                latest[r.submission_target_id] = TestResultRecord(r.status, r.functional_test_feedback, r.recorded_at)
+            scores = dict(s.execute(
+                select(AiFeedback.submission_target_id, AiFeedback.suggested_score)
+                .where(AiFeedback.submission_target_id.in_(st_ids), AiFeedback.is_selected)
+            ).all())
+            submissions = [
+                TargetSubmission(
+                    sub.id,
+                    sub.platform_submission_id,
+                    sub.student_identifier,
+                    sub.submitted_at,
+                    target_status(st.ai_needed, st.completed_at, st.last_error),
+                    latest[st.id],
+                    scores.get(st.id),
+                )
+                for st, sub in rows
+                if st.id in latest
+            ]
+            return TargetSubmissions(
+                a.id,
+                a.name,
+                a.grading_mode,
+                gt.id,
+                gt.identifier,
+                gt.kind,
+                gt.max_score,
+                tuple(sorted(submissions, key=student_sort_key)),
+            )
+
+    def create_assignment(
+        self,
+        *,
+        course_name: str,
+        term: str | None,
+        platform_assignment_id: str,
+        name: str | None,
+        grading_mode: str,
+        language: str,
+    ) -> uuid.UUID:
+        course_name = required(course_name, "Course")
+        term = clean(term)
+        platform_assignment_id = required(platform_assignment_id, "Gradescope assignment id")
+        grading_mode, language = check_assignment_fields(grading_mode, language)
+        with self._sessions.begin() as s:
+            course_id = s.scalar(
+                select(Course.id)
+                .where(Course.name == course_name, Course.term.is_not_distinct_from(term))
+                .limit(1)
+            )
+            if course_id is None:
+                course = Course(name=course_name, term=term)
+                s.add(course)
+                s.flush()
+                course_id = course.id
+            inserted = s.scalar(
+                insert(Assignment)
+                .values(
+                    course_id=course_id,
+                    platform="GRADESCOPE",
+                    platform_assignment_id=platform_assignment_id,
+                    name=clean(name),
+                    grading_mode=grading_mode,
+                    language=language,
+                )
+                .on_conflict_do_nothing(index_elements=["platform", "platform_assignment_id"])
+                .returning(Assignment.id)
+            )
+            if inserted is None:
+                raise ConflictError(f"Gradescope assignment {platform_assignment_id!r} is already registered")
+            return inserted
+
+    def create_target(
+        self,
+        assignment_id: uuid.UUID,
+        *,
+        identifier: str,
+        kind: str,
+        max_score: Decimal | None,
+    ) -> uuid.UUID:
+        identifier = check_target_fields(identifier, kind, max_score)
+        with self._sessions.begin() as s:
+            # Locked so two targets added at once cannot take the same display_order.
+            if s.get(Assignment, assignment_id, with_for_update=True) is None:
+                raise NotFoundError(f"Assignment {assignment_id} not found")
+            last = s.scalar(
+                select(func.max(GradingTarget.display_order)).where(GradingTarget.assignment_id == assignment_id)
+            )
+            inserted = s.scalar(
+                insert(GradingTarget)
+                .values(
+                    assignment_id=assignment_id,
+                    identifier=identifier,
+                    kind=kind,
+                    max_score=max_score,
+                    display_order=(last or 0) + 1,
+                )
+                .on_conflict_do_nothing(index_elements=["assignment_id", "identifier"])
+                .returning(GradingTarget.id)
+            )
+            if inserted is None:
+                raise ConflictError(f"Target {identifier!r} is already registered on this assignment")
+            return inserted
+
+    def upsert_rubric(
+        self,
+        grading_target_id: uuid.UUID,
+        *,
+        criteria_text: str,
+        feedback_guidance: str | None,
+    ) -> RubricConfig:
+        criteria_text = required(criteria_text, "Criteria")
+        feedback_guidance = clean(feedback_guidance)
+        with self._sessions.begin() as s:
+            # Locked so two saves at once cannot both take version n+1.
+            if s.get(GradingTarget, grading_target_id, with_for_update=True) is None:
+                raise NotFoundError(f"Grading target {grading_target_id} not found")
+            current = s.scalar(
+                select(Rubric).where(Rubric.grading_target_id == grading_target_id, Rubric.is_current)
+            )
+            if current is not None and (current.criteria_text, current.feedback_guidance) == (
+                criteria_text,
+                feedback_guidance,
+            ):
+                return _rubric_config(current)
+            last = s.scalar(select(func.max(Rubric.version)).where(Rubric.grading_target_id == grading_target_id))
+            # Demoted first: the partial unique index allows one current rubric.
+            s.execute(
+                update(Rubric).where(Rubric.grading_target_id == grading_target_id).values(is_current=False)
+            )
+            rubric = Rubric(
+                grading_target_id=grading_target_id,
+                version=(last or 0) + 1,
+                criteria_text=criteria_text,
+                feedback_guidance=feedback_guidance,
+                is_current=True,
+            )
+            s.add(rubric)
+            s.flush()
+            return _rubric_config(rubric)
+
     @staticmethod
     def _submission(s: Session, submission_id: uuid.UUID) -> Submission:
         sub = s.get(Submission, submission_id)
@@ -486,3 +678,7 @@ class SqlGradingRepository(IGradingRepository):
 
 def _ref(st: SubmissionTarget, gt: GradingTarget) -> SubmissionTargetRef:
     return SubmissionTargetRef(st.id, gt.identifier, st.ai_needed, st.completed_at)
+
+
+def _rubric_config(r: Rubric) -> RubricConfig:
+    return RubricConfig(r.id, r.version, r.criteria_text, r.feedback_guidance)
