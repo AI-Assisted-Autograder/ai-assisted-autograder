@@ -24,6 +24,7 @@ class PreparedPrompt:
 class PromptBuilder:
     version = "feedback-v4"
     extended_version = "feedback-v5"
+    per_test_version = "feedback-v6"
 
     instructions = (
         "You provide educational code feedback for one grading target.\n"
@@ -77,7 +78,7 @@ class PromptBuilder:
         "tests, source locations, evidence IDs, results, scores or confidence.\n"
     )
 
-    structured_instructions = (
+    structured_scoring_instructions = (
         "Return only a JSON object with two required fields: feedback_text (a "
         "nonempty student-facing summary) and items (a nonempty array). The only "
         "optional field is suggested_score. When target.max_score is configured "
@@ -89,6 +90,19 @@ class PromptBuilder:
         "use null: application code awards the configured points for pass, zero "
         "for fail, and leaves insufficient_evidence unscored. Application code "
         "computes the total only when every expected verdict is determinate. "
+    )
+
+    per_test_scoring_instructions = (
+        "Return only a JSON object with exactly two fields: feedback_text (a "
+        "nonempty student-facing summary) and items (a nonempty array). "
+        "Do not include suggested_score, max_score, total scores, or item scores. "
+        "Application code alone awards analysis.points_per_test for pass, zero "
+        "for fail, and leaves insufficient_evidence unscored. It computes the "
+        "total only when every expected verdict is determinate. "
+        "Do not include a SCORE line, Markdown fences, or any other fields. "
+    )
+
+    structured_instructions = (
         "Each item has exactly test_id, verdict, feedback, evidence. verdict is "
         "pass, fail, or insufficient_evidence. feedback is student-facing plain "
         "English and is required for fail and insufficient_evidence; it may be "
@@ -188,12 +202,14 @@ class PromptBuilder:
             context["evidence"] = [asdict(item) for item in evidence]
             instructions = self.evidence_instructions + (
                 self.extended_text_instructions if analysis.mode == "code_feedback"
-                else self.structured_instructions
+                else (self.per_test_scoring_instructions if analysis.points_per_test is not None
+                      else self.structured_scoring_instructions) + self.structured_instructions
             )
         prompt = PreparedPrompt(
             system_instruction=instructions,
             context=json.dumps(context, ensure_ascii=False, indent=2, allow_nan=False),
-            version=self.extended_version if extended else self.version,
+            version=(self.per_test_version if analysis.points_per_test is not None
+                     else self.extended_version if extended else self.version),
         )
         # Include custom instructions in the whole-prompt limit.
         if len(prompt.text) > self.max_context_chars:

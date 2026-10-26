@@ -68,6 +68,40 @@ class GeminiProvider:
     def generate_feedback(self, req: FeedbackRequest) -> FeedbackResponse:
         """Return validated feedback; output token usage includes Gemini thoughts."""
         prompt = self._builder.prepare(req)
+        response_json_schema = None
+        if (req.analysis.points_per_test is not None
+                or (req.analysis.mode == "test_quality" and req.target.max_score is None)):
+            expected_tests = list(req.analysis.expected_tests)
+            # Scores belong to the backend, not the model's response contract.
+            response_json_schema = {
+                "type": "object",
+                "properties": {
+                    "feedback_text": {"type": "string"},
+                    "items": {
+                        "type": "array",
+                        "minItems": 1,
+                        "items": {
+                            "type": "object",
+                            "properties": {
+                                "test_id": {"type": "string"},
+                                "verdict": {"type": "string", "enum": [
+                                    "pass", "fail", "insufficient_evidence",
+                                ]},
+                                "feedback": {"type": "string"},
+                                "evidence": {"type": "string"},
+                            },
+                            "required": ["test_id", "verdict", "feedback", "evidence"],
+                            "additionalProperties": False,
+                        },
+                    },
+                },
+                "required": ["feedback_text", "items"],
+                "additionalProperties": False,
+            }
+            if expected_tests:
+                items_schema = response_json_schema["properties"]["items"]
+                items_schema["minItems"] = items_schema["maxItems"] = len(expected_tests)
+                items_schema["items"]["properties"]["test_id"]["enum"] = expected_tests
         try:
             response = self._client.models.generate_content(
                 model=self.model,
@@ -78,6 +112,7 @@ class GeminiProvider:
                     response_mime_type=(
                         "text/plain" if req.analysis.mode == "code_feedback" else "application/json"
                     ),
+                    response_json_schema=response_json_schema,
                     max_output_tokens=self._max_output_tokens,
                     candidate_count=1,
                     automatic_function_calling=types.AutomaticFunctionCallingConfig(
