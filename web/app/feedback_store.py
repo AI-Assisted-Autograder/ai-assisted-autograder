@@ -17,7 +17,7 @@ import threading
 from datetime import datetime, timezone
 from typing import Any
 
-from .feedback_config import AssignmentAccess, BackendConfig, RequestRecord, State
+from .feedback_config import AssignmentAccess, BackendConfig, RequestRecord, State, TokenRecord
 
 
 class StoreError(Exception):
@@ -96,8 +96,14 @@ class JsonStore:
                 fcntl.flock(self._lock_fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
             except BlockingIOError:
                 raise StoreError("worker_already_running") from None
-            self._state = State.model_validate_json(self.path.read_bytes())
-            changed = False
+            raw = self.path.read_bytes()
+            data = json.loads(raw)
+            changed = data.get("schema_version") == 2
+            if changed:
+                data["schema_version"] = 3
+                data["config"]["allowed_models"] = {"vertex": data["config"]["allowed_models"]}
+                raw = json.dumps(data)
+            self._state = State.model_validate_json(raw)
             for requests in self._state.requests.values():
                 for record in requests.values():
                     if record.status == "processing":
@@ -153,6 +159,21 @@ class JsonStore:
                 raise StoreError("assignment_forbidden", 403)
             return assignment.model_copy(deep=True)
 
+    def add_assignment(self, assignment_id: str, access: AssignmentAccess,
+                       digest: str, token: TokenRecord) -> None:
+        """Append access records while holding the same lock as the Web worker."""
+        with self._mutex:
+            self._ensure_open()
+            if assignment_id in self._state.assignments or digest in self._state.tokens:
+                raise ValueError("assignment or token already exists")
+            if token.assignment_id != assignment_id:
+                raise ValueError("token assignment must match")
+            candidate = self._state.model_copy(deep=True)
+            candidate.assignments[assignment_id] = access.model_copy(deep=True)
+            candidate.tokens[digest] = token.model_copy(deep=True)
+            self._persist(candidate)
+            self._state = candidate
+
     def get_request(self, assignment_id: str, request_id: str) -> RequestRecord | None:
         with self._mutex:
             self._ensure_open()
@@ -172,11 +193,12 @@ class JsonStore:
             raise StoreError("state_unavailable") from None
 
     def reserve(self, assignment_id: str, request_id: str, digest: str,
-                target_id: str, model: str) -> tuple[RequestRecord, bool]:
+                target_id: str, model: str, *, engine: str = "vertex",
+                provider: str = "GOOGLE") -> tuple[RequestRecord, bool]:
         with self._mutex:
             self._ensure_open()
             assignment = self.get_assignment(assignment_id)
-            if model not in self._state.config.allowed_models:
+            if model not in self._state.config.allowed_models.get(engine, []):
                 raise StoreError("assignment_config_unavailable")
             existing = self._state.requests.get(assignment_id, {}).get(request_id)
             if existing is not None:
@@ -187,7 +209,7 @@ class JsonStore:
                 raise StoreError("quota_exceeded", 429)
             now = utc_now()
             record = RequestRecord(request_id=request_id, target_id=target_id,
-                                   model=model, digest=digest,
+                                   engine=engine, provider=provider, model=model, digest=digest,
                                    status="processing", created_at=now, updated_at=now)
             candidate = self._state.model_copy(deep=True)
             candidate.assignments[assignment_id].used_calls += 1

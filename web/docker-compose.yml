@@ -7,12 +7,14 @@ services:
       - "8000:8000"
     volumes:
       - feedback_data:/var/lib/ai-feedback
-      - ${GOOGLE_ADC_DIR:-../ai_grading/.local-vertex/google}:/run/google:ro
+      - ${GOOGLE_ADC_DIR:-/dev/null}:/run/google:ro
     environment:
-      DATABASE_URL: postgresql+psycopg://autograder:autograder@db:5432/autograder
+      DATABASE_URL: ${DATABASE_URL:-postgresql+psycopg://autograder:autograder@db:5432/autograder}
       INTEGRATION_API_TOKEN: ${INTEGRATION_API_TOKEN:-}
       FEEDBACK_STATE_PATH: ${FEEDBACK_STATE_PATH:-}
       GOOGLE_APPLICATION_CREDENTIALS: /run/google/application_default_credentials.json
+      PITT_API_KEY: ${PITT_API_KEY:-}
+      GEMINI_API_KEY: ${GEMINI_API_KEY:-}
     depends_on:
       db:
         condition: service_healthy

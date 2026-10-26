@@ -160,7 +160,7 @@
 <ul class="plain">
     {% for p in assignment.providers %}
     <li>
-        {{ p.provider | title }} <code>{{ p.model_name }}</code>
+        {{ p.provider | title }} via <code>{{ p.engine }}</code>: <code>{{ p.model_name }}</code>
         {% if p.is_primary %}<span class="badge done">Primary</span>{% endif %}
     </li>
     {% endfor %}

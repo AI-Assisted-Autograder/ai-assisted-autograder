@@ -20,12 +20,12 @@ def add_feedback(root=Path("/autograder")):
     ]
     for target in feedback_config["targets"]:
         row = {
-            "name": f"AI Feedback (Vertex): {target['source']}",
+            "name": f"AI Feedback: {target['source']}",
             "score": 0,
             "max_score": 0,
             "visibility": "visible",
             "output_format": "text",
-            "output": "Vertex feedback is unavailable. Your functional-test score is unchanged.",
+            "output": "AI feedback is unavailable. Your functional-test score is unchanged.",
         }
         try:
             submissions = [
@@ -42,7 +42,9 @@ def add_feedback(root=Path("/autograder")):
             )
             row["output"] = response["feedback_text"]
             row["extra_data"] = {
-                "provider": "vertex",
+                "engine": response["engine"],
+                "provider": response["provider"],
+                "requested_model": response["requested_model"],
                 "model": response["model_name"],
                 "request_id": response["request_id"],
             }
@@ -65,4 +67,4 @@ if __name__ == "__main__":
     try:
         add_feedback()
     except Exception:
-        print("Vertex feedback unavailable: cannot update the original results.", file=sys.stderr)
+        print("AI feedback unavailable: cannot update the original results.", file=sys.stderr)

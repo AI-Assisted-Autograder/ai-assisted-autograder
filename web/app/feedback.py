@@ -3,25 +3,29 @@
 import asyncio
 from concurrent.futures import ThreadPoolExecutor
 from contextlib import asynccontextmanager
+from dataclasses import asdict
 import hashlib
 import json
 import logging
 import os
 from pathlib import Path
+import re
 from types import SimpleNamespace
 import threading
 import time
 
 from fastapi import APIRouter, FastAPI, Request
 from fastapi.responses import JSONResponse
-from pydantic import BaseModel, ConfigDict, Field
+from pydantic import BaseModel, ConfigDict, Field, model_validator
 
 from ai_grading.models import (
-    CodeFile, FeedbackRequest, GradingTarget, ResolvedSource, Rubric, TargetKind,
+    CodeFile, Evidence, FeedbackRequest, GradingTarget, ResolvedSource, Rubric, TargetKind,
 )
+from ai_grading.FileResolver import FileResolver
 from ai_grading.PromptBuilder import PromptBuilder
 from ai_grading.ILLMProvider.ILLMProvider import ProviderError
 from .feedback_store import JsonStore, StoreError
+from .feedback_config import validate_relative_path
 
 LOG = logging.getLogger(__name__)
 MESSAGES = {
@@ -36,9 +40,9 @@ MESSAGES = {
     "request_conflict": "This request_id was used with different content.",
     "processing": "This request is already processing; no new call was made.",
     "interrupted": "This request was interrupted; its reserved call remains consumed.",
-    "model_error": "Vertex did not return usable feedback; the reserved call remains consumed.",
-    "upstream_timeout": "Vertex timed out; the reserved call remains consumed.",
-    "backend_auth_unavailable": "Backend Vertex authentication is unavailable.",
+    "model_error": "The model did not return usable feedback; the reserved call remains consumed.",
+    "upstream_timeout": "The model timed out; the reserved call remains consumed.",
+    "backend_auth_unavailable": "Backend model authentication is unavailable.",
     "backend_error": "Backend could not safely finish this request.",
 }
 
@@ -47,9 +51,63 @@ class FeedbackInput(BaseModel):
     model_config = ConfigDict(extra="forbid", strict=True)
     request_id: str = Field(min_length=1, max_length=128, pattern=r"^[A-Za-z0-9_.:-]+$")
     target_id: str = Field(min_length=1, max_length=128, pattern=r"^[A-Za-z0-9_.:-]+$")
-    code: str = Field(min_length=1)
+    code: str | None = Field(default=None, min_length=1)
+    files: list[CodeFile] = Field(default_factory=list, max_length=64)
+    evidence: list[Evidence] = Field(default_factory=list, max_length=256)
     guidance: str | None = ""
     functional_test_feedback: list[str] = Field(default_factory=list)
+
+    @model_validator(mode="after")
+    def source_and_evidence(self):
+        if (self.code is None) == (not self.files):
+            raise ValueError("provide either code or files")
+        paths = [validate_relative_path(source.path) for source in self.files]
+        if len(paths) != len(set(paths)):
+            raise ValueError("source paths must be distinct")
+        ids = [item.id for item in self.evidence]
+        if len(ids) != len(set(ids)):
+            raise ValueError("evidence identifiers must be distinct")
+        for item in self.evidence:
+            if (max(len(item.id), len(item.source), len(item.test_id or "")) > 256
+                    or len(item.scope) > 512 or len(item.summary) > 4_000):
+                raise ValueError("evidence exceeds its limits")
+        return self
+
+
+def matches_path(path: str, patterns: tuple[str, ...]) -> bool:
+    return any(FileResolver._matches(path, pattern) for pattern in patterns)
+
+
+def resolve_input(payload: FeedbackInput, target) -> ResolvedSource:
+    """Apply the database target's file and artifact scope before reserving quota."""
+    if payload.files:
+        primary, *context = payload.files
+        source_patterns = target.analysis.source_globs or (target.source_path,)
+        if (target.analysis.max_source_files is not None
+                and sum(matches_path(source.path, source_patterns) for source in payload.files)
+                > target.analysis.max_source_files):
+            raise ValueError("source files exceed the configured primary-file limit")
+        if (not matches_path(primary.path, source_patterns)
+                or any(not matches_path(source.path, source_patterns + target.analysis.context_globs)
+                       for source in context)):
+            raise ValueError("source files are outside the configured target")
+        resolved = ResolvedSource(source_file=primary, context_files=tuple(context))
+    else:
+        resolved = ResolvedSource(source_file=CodeFile(path=target.source_path, content=payload.code))
+    sources = {source.label: source for source in target.analysis.evidence_sources}
+    kinds = {"gradescope": "runtime", "junit": "runtime", "jacoco": "coverage", "text": "diagnostic"}
+    for item in payload.evidence:
+        source = sources.get(item.source)
+        if source is None:
+            raise ValueError("evidence source is outside the configured target")
+        if (item.kind == "diagnostic" and item.status == "unknown"
+                and item.test_id is None and item.scope == source.label):
+            continue
+        selector = "\n".join((item.test_id or "", item.scope))
+        if (item.kind != kinds[source.format]
+                or (source.include and not any(re.search(pattern, selector) for pattern in source.include))):
+            raise ValueError("evidence is outside the configured target")
+    return resolved
 
 
 def error(code: str, status: int, request_id: str | None = None):
@@ -61,8 +119,24 @@ def error(code: str, status: int, request_id: str | None = None):
 
 
 def default_provider_factory(config, assignment):
-    from .vertex import VertexProvider
-    return VertexProvider(config, assignment)
+    options = {"model": assignment.model, "timeout_seconds": config.timeout_seconds,
+               "max_output_tokens": config.max_output_tokens}
+    if assignment.engine == "vertex":
+        from ai_grading.ILLMProvider.VertexProvider import VertexProvider
+        return VertexProvider(
+            **options, project=config.project, location=config.location,
+            service_account=config.service_account,
+        )
+    if assignment.engine == "pitt":
+        from ai_grading.ILLMProvider.PittProvider import PittProvider
+        return PittProvider(**options, provider=assignment.provider)
+    if assignment.engine == "gemini_api":
+        from ai_grading.ILLMProvider.GeminiProvider import GeminiProvider
+        key = os.environ.get("GEMINI_API_KEY") or os.environ.get("GOOGLE_API_KEY")
+        if not key or not key.strip():
+            raise ProviderError("backend_auth_unavailable", MESSAGES["backend_auth_unavailable"])
+        return GeminiProvider(**options, api_key=key)
+    raise ValueError("Unsupported feedback engine")
 
 
 def create_feedback_router(state_path: str | Path, *, assignment_loader,
@@ -83,7 +157,7 @@ def create_feedback_router(state_path: str | Path, *, assignment_loader,
         runtime.inflight = 0
         runtime.tasks = set()
         pool = ThreadPoolExecutor(max_workers=store.config.max_concurrency,
-                                  thread_name_prefix="vertex")
+                                  thread_name_prefix="feedback")
         runtime.pool = pool
         try:
             yield
@@ -114,7 +188,7 @@ def create_feedback_router(state_path: str | Path, *, assignment_loader,
         if time.monotonic() >= deadline:
             raise TimeoutError
         with runtime.provider_lock:
-            key = (assignment_id, assignment.model)
+            key = (assignment_id, assignment.engine, assignment.provider, assignment.model)
             if key not in runtime.providers:
                 runtime.providers[key] = factory(runtime.store.config, assignment)
             provider = runtime.providers[key]
@@ -149,14 +223,14 @@ def create_feedback_router(state_path: str | Path, *, assignment_loader,
         except Exception:
             return error("invalid_request", 400)
         rid = payload.request_id
-        if (len(payload.code) > config.max_code_chars
+        if (len(payload.code or "") + sum(len(source.content) for source in payload.files) > config.max_code_chars
                 or len(payload.guidance or "") > config.max_guidance_chars):
             return error("input_too_large", 413, rid)
         try:
             assignment = await asyncio.to_thread(assignment_loader, assignment_id)
             if assignment.id != assignment_id or not assignment.enabled:
                 return error("assignment_forbidden", 403, rid)
-            if assignment.model not in config.allowed_models:
+            if assignment.model not in config.allowed_models.get(assignment.engine, []):
                 return error("assignment_config_unavailable", 503, rid)
         except StoreError as exc:
             return error(exc.code, exc.status_code, rid)
@@ -168,21 +242,31 @@ def create_feedback_router(state_path: str | Path, *, assignment_loader,
         guidance = target.rubric.feedback_guidance
         if payload.guidance:
             guidance += "\nOptional client feedback guidance:\n" + payload.guidance
-        grading_request = FeedbackRequest(
-            target=GradingTarget(identifier=target.identifier, kind=TargetKind(target.kind),
-                                 id=payload.target_id),
-            rubric=Rubric(criteria_text=target.rubric.criteria_text, feedback_guidance=guidance,
-                          id=target.rubric.id, version=target.rubric.version,
-                          grading_target_id=payload.target_id),
-            resolved=ResolvedSource(source_file=CodeFile(path=target.source_path, content=payload.code)),
-            functional_test_feedback=tuple(payload.functional_test_feedback),
-        )
+        try:
+            resolved = resolve_input(payload, target)
+            grading_request = FeedbackRequest(
+                target=GradingTarget(identifier=target.identifier, kind=TargetKind(target.kind),
+                                     id=payload.target_id, max_score=target.max_score),
+                rubric=Rubric(criteria_text=target.rubric.criteria_text, feedback_guidance=guidance,
+                              id=target.rubric.id, version=target.rubric.version,
+                              grading_target_id=payload.target_id),
+                resolved=resolved, analysis=target.analysis, evidence=tuple(payload.evidence),
+                functional_test_feedback=tuple(payload.functional_test_feedback),
+            )
+        except ValueError:
+            return error("invalid_request", 422, rid)
         try:
             PromptBuilder().prepare(grading_request)
         except ValueError:
             return error("input_too_large", 413, rid)
-        content = payload.model_dump(exclude={"request_id"})
+        content = payload.model_dump(mode="json", exclude={"request_id"})
         content["guidance"] = payload.guidance or ""
+        # Keep legacy code requests byte-for-byte compatible with stored digests.
+        for field in ("files", "evidence"):
+            if not content[field]:
+                content.pop(field)
+        if payload.code is None:
+            content.pop("code")
         if not payload.functional_test_feedback:
             content.pop("functional_test_feedback")
         canonical = json.dumps(content,
@@ -195,14 +279,17 @@ def create_feedback_router(state_path: str | Path, *, assignment_loader,
             if existing is None and runtime.inflight >= config.max_concurrency:
                 return error("busy", 429, rid)
             record, created = store.reserve(assignment_id, rid, digest, payload.target_id,
-                                            assignment.model)
+                                            assignment.model, engine=assignment.engine,
+                                            provider=assignment.provider)
         except StoreError as exc:
             return error(exc.code, exc.status_code, rid)
         except Exception:
             return error("backend_error", 500, rid)
         if not created:
             if record.status == "completed":
-                return JSONResponse(record.result, headers={"Cache-Control": "no-store"})
+                result = {"engine": record.engine, "provider": record.provider,
+                          "requested_model": record.model, **record.result}
+                return JSONResponse(result, headers={"Cache-Control": "no-store"})
             if record.status in ("processing", "interrupted"):
                 return error(record.status, 409, rid)
             code = record.error_code or "model_error"
@@ -225,12 +312,22 @@ def create_feedback_router(state_path: str | Path, *, assignment_loader,
         future.add_done_callback(release)
         try:
             response = await asyncio.wait_for(asyncio.shield(future), config.timeout_seconds)
+            if (target.max_score is not None and response.suggested_score is not None
+                    and response.suggested_score > target.max_score):
+                raise ProviderError("invalid_provider_response", "Suggested score exceeds the configured maximum.")
             result = {
                 "request_id": rid, "status": "completed",
+                "engine": assignment.engine, "provider": assignment.provider,
+                "requested_model": assignment.model,
                 "feedback_text": response.feedback_text, "model_name": response.model_name,
                 "usage": {"input_tokens": response.input_tokens,
                           "output_tokens": response.output_tokens},
             }
+            if response.items:
+                result["items"] = [asdict(item) for item in response.items]
+            if target.max_score is not None:
+                result["suggested_score"] = response.suggested_score
+                result["max_score"] = target.max_score
             store.complete(assignment_id, rid, result)
             return JSONResponse(result, headers={"Cache-Control": "no-store"})
         except asyncio.CancelledError:

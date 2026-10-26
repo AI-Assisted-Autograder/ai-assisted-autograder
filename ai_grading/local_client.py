@@ -26,6 +26,7 @@ from urllib.request import HTTPRedirectHandler, ProxyHandler, Request, build_ope
 DEFAULT_BACKEND_URL = "http://127.0.0.1:8001"
 MAX_RESPONSE_BYTES = 1024 * 1024
 MAX_CODE_BYTES = 64 * 1024
+MAX_FILES_BYTES = 256 * 1024
 
 
 class ClientError(Exception):
@@ -93,12 +94,22 @@ def read_assignment_token(path: str | Path) -> str:
 
 
 def stable_request_id(
-    target_id: str, code: str, guidance: str | None = None,
+    target_id: str, code: str | None = None, guidance: str | None = None,
     functional_test_feedback: list[str] | None = None,
+    *, files: list[dict] | None = None, evidence: list[dict] | None = None,
+    namespace: str = "",
 ) -> str:
-    content = {"target_id": target_id, "code": code, "guidance": guidance or ""}
+    content = {"target_id": target_id, "guidance": guidance or ""}
+    if files is not None:
+        content["files"] = files
+    else:
+        content["code"] = code
     if functional_test_feedback:
         content["functional_test_feedback"] = functional_test_feedback
+    if evidence:
+        content["evidence"] = evidence
+    if namespace:
+        content["namespace"] = namespace
     canonical = json.dumps(content, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
     return "local-" + hashlib.sha256(canonical.encode("utf-8")).hexdigest()
 
@@ -124,10 +135,12 @@ def request_feedback(
     *,
     backend_url: str,
     token_file: str | Path,
-    code: str,
+    code: str | None = None,
     target_id: str = "example",
     guidance: str | None = None,
     functional_test_feedback: list[str] | None = None,
+    files: list[dict] | None = None,
+    evidence: list[dict] | None = None,
     request_id: str | None = None,
     timeout: float = 90,
 ) -> dict:
@@ -135,15 +148,33 @@ def request_feedback(
     origin = validate_backend_url(backend_url)
     if not math.isfinite(timeout) or not 0 < timeout <= 300:
         raise ClientError("Client timeout must be between 0 and 300 seconds.")
-    if not code.strip() or len(code.encode("utf-8")) > MAX_CODE_BYTES:
-        raise ClientError("Code must be nonempty and at most 64 KiB; backend limits may be lower.")
+    if files is None:
+        if not isinstance(code, str) or not code.strip() or len(code.encode("utf-8")) > MAX_CODE_BYTES:
+            raise ClientError("Code must be nonempty and at most 64 KiB; backend limits may be lower.")
+    else:
+        if code is not None or not isinstance(files, list) or not files:
+            raise ClientError("Supply either code or a nonempty files list.")
+        if any(not isinstance(item, dict) or set(item) != {"path", "content"}
+               or not isinstance(item["path"], str) or not item["path"]
+               or not isinstance(item["content"], str) for item in files):
+            raise ClientError("Each file must contain a path and UTF-8 content.")
+        if sum(len(item["content"].encode("utf-8")) for item in files) > MAX_FILES_BYTES:
+            raise ClientError("Files exceed the 256 KiB client limit; backend limits may be lower.")
     token = read_assignment_token(token_file)
-    identifier = request_id or stable_request_id(target_id, code, guidance, functional_test_feedback)
+    identifier = request_id or stable_request_id(
+        target_id, code, guidance, functional_test_feedback, files=files, evidence=evidence,
+    )
     if not re.fullmatch(r"[A-Za-z0-9._:-]{1,128}", identifier):
         raise ClientError("Request ID must contain 1–128 letters, digits, dots, underscores, colons, or hyphens.")
-    payload = {"request_id": identifier, "target_id": target_id, "code": code, "guidance": guidance or ""}
+    payload = {"request_id": identifier, "target_id": target_id, "guidance": guidance or ""}
+    if files is None:
+        payload["code"] = code
+    else:
+        payload["files"] = files
     if functional_test_feedback:
         payload["functional_test_feedback"] = functional_test_feedback
+    if evidence:
+        payload["evidence"] = evidence
     data = json.dumps(payload, ensure_ascii=False).encode("utf-8")
     request = Request(
         origin + "/v1/feedback",
@@ -174,14 +205,58 @@ def request_feedback(
             or not isinstance(result.get("usage"), (dict, type(None)))
         ):
             raise ValueError
+        engine = result.get("engine", "vertex")
+        provider = result.get("provider", "GOOGLE")
+        requested_model = result.get("requested_model", result["model_name"])
+        if (
+            engine not in {"vertex", "pitt", "gemini_api"}
+            or provider not in {"GOOGLE", "OPENAI", "ANTHROPIC"}
+            or not isinstance(requested_model, str)
+            or not requested_model.strip()
+        ):
+            raise ValueError
         usage = result.get("usage")
         if usage is not None:
             usage = {key: usage[key] for key in ("input_tokens", "output_tokens", "total_tokens") if key in usage}
             if any(value is not None and (type(value) is not int or value < 0) for value in usage.values()):
                 raise ValueError
-        # Do not expose unknown response fields, headers, or diagnostic payloads.
-        return {"request_id": identifier, "feedback_text": result["feedback_text"],
+        items = result.get("items", [])
+        if not isinstance(items, list):
+            raise ValueError
+        clean_items = []
+        for item in items:
+            if (not isinstance(item, dict)
+                    or any(not isinstance(item.get(key), str)
+                           for key in ("test_id", "verdict", "feedback", "evidence"))
+                    or not item["test_id"].strip()
+                    or item["verdict"] not in {"pass", "fail", "insufficient_evidence"}):
+                raise ValueError
+            clean_items.append({key: item[key] for key in ("test_id", "verdict", "feedback", "evidence")})
+            for key in ("suggested_score", "max_score"):
+                if key in item:
+                    value = item[key]
+                    if value is not None and (type(value) not in (int, float) or not math.isfinite(value) or value < 0):
+                        raise ValueError
+                    clean_items[-1][key] = value
+            score, maximum = item.get("suggested_score"), item.get("max_score")
+            if score is not None and (maximum is None or score > maximum):
+                raise ValueError
+        if len({item["test_id"] for item in clean_items}) != len(clean_items):
+            raise ValueError
+        # Only explicitly supported fields cross the client boundary.
+        safe = {"request_id": identifier, "feedback_text": result["feedback_text"],
+                "engine": engine, "provider": provider, "requested_model": requested_model,
                 "model_name": result["model_name"], "usage": usage}
+        if "items" in result:
+            safe["items"] = clean_items
+        if "max_score" in result:
+            maximum, score = result["max_score"], result.get("suggested_score")
+            if (type(maximum) not in (int, float) or not math.isfinite(maximum) or maximum < 0
+                    or (score is not None and (type(score) not in (int, float)
+                        or not math.isfinite(score) or not 0 <= score <= maximum))):
+                raise ValueError
+            safe.update(max_score=maximum, suggested_score=score)
+        return safe
     except (UnicodeError, ValueError, TypeError):
         raise ClientError("Backend returned an invalid response.") from None
 
@@ -205,21 +280,32 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--config", type=Path, default=Path(".local-vertex/client/config.json"))
     parser.add_argument("--backend-url", help="HTTPS or HTTP loopback origin; overrides the non-secret config file")
     parser.add_argument("--token-file", type=Path, default=Path(".local-vertex/client/token"))
-    parser.add_argument("--code-file", type=Path, required=True, help="UTF-8 source file to review")
+    source = parser.add_mutually_exclusive_group(required=True)
+    source.add_argument("--code-file", type=Path, help="UTF-8 source file to review (legacy input)")
+    source.add_argument("--files-json", type=Path, help="JSON array of {path, content} source files")
+    parser.add_argument("--evidence-json", type=Path, help="JSON array of runtime or coverage evidence")
     parser.add_argument("--target-id", default="example")
     parser.add_argument("--guidance", help="Optional feedback preference, subject to backend limits")
-    parser.add_argument("--request-id", help="Default: stable SHA-256 identifier of target, code, and guidance")
+    parser.add_argument("--request-id", help="New ID for each independent trial; reuse an ID for retries. Default: stable content hash")
     parser.add_argument("--timeout", type=float, default=90)
     parser.add_argument("--json", action="store_true", help="Print the safe response fields as JSON")
     args = parser.parse_args(argv)
     try:
-        if args.code_file.stat().st_size > MAX_CODE_BYTES:
-            raise ClientError("Code file exceeds the 64 KiB client limit.")
-        code = args.code_file.read_text(encoding="utf-8")
+        code = None
+        files = None
+        if args.code_file:
+            if args.code_file.stat().st_size > MAX_CODE_BYTES:
+                raise ClientError("Code file exceeds the 64 KiB client limit.")
+            code = args.code_file.read_text(encoding="utf-8")
+        else:
+            files = json.loads(args.files_json.read_text(encoding="utf-8"))
+        evidence = json.loads(args.evidence_json.read_text(encoding="utf-8")) if args.evidence_json else None
         result = request_feedback(
             backend_url=args.backend_url or _backend_from_config(args.config),
             token_file=args.token_file,
             code=code,
+            files=files,
+            evidence=evidence,
             target_id=args.target_id,
             guidance=args.guidance,
             request_id=args.request_id,
@@ -229,6 +315,8 @@ def main(argv: list[str] | None = None) -> int:
             print(json.dumps(result, ensure_ascii=False, indent=2))
         else:
             print("Request:", result["request_id"])
+            print("Engine:", result["engine"])
+            print("Requested model:", result["requested_model"])
             print("Model:", result["model_name"])
             print(result["feedback_text"])
             if result["usage"] is not None:
@@ -237,8 +325,8 @@ def main(argv: list[str] | None = None) -> int:
     except ClientError as error:
         print("Error:", str(error), file=sys.stderr)
         return 1
-    except (OSError, UnicodeError):
-        print("Error: Cannot read the UTF-8 source file.", file=sys.stderr)
+    except (OSError, UnicodeError, ValueError):
+        print("Error: Cannot read the UTF-8 source or JSON input file.", file=sys.stderr)
         return 1
 
 

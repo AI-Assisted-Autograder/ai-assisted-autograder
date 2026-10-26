@@ -115,6 +115,7 @@ class TargetConfig:
     max_score: Decimal | None
     # The current rubric, or None if the instructor has not written one.
     rubric: RubricConfig | None
+    analysis_config: dict = field(default_factory=dict)
 
 
 @dataclass(frozen=True)
@@ -122,6 +123,7 @@ class ProviderConfig:
     provider: str
     model_name: str
     is_primary: bool
+    engine: str = "vertex"
 
 
 @dataclass(frozen=True)

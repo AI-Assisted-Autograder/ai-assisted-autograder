@@ -80,6 +80,7 @@ class _GradingTarget:
     display_order: int | None
     kind: str
     max_score: Decimal | None
+    analysis_config: dict = field(default_factory=dict)
 
 
 @dataclass
@@ -98,6 +99,7 @@ class _LlmProviderConfig:
     model_name: str
     is_enabled: bool
     is_primary: bool
+    engine: str = "vertex"
 
 
 @dataclass
@@ -196,8 +198,10 @@ class InMemoryRepository(IGradingRepository):
         *,
         kind: str = "METHOD",
         max_score: Decimal | None = None,
+        analysis_config: dict | None = None,
     ) -> uuid.UUID:
-        gt = _GradingTarget(uuid.uuid4(), assignment_id, identifier, display_order, kind, max_score)
+        gt = _GradingTarget(uuid.uuid4(), assignment_id, identifier, display_order, kind, max_score,
+                            dict(analysis_config or {}))
         self.grading_targets[gt.id] = gt
         return gt.id
 
@@ -220,9 +224,10 @@ class InMemoryRepository(IGradingRepository):
         return r.id
 
     def add_provider(
-        self, provider: str, model_name: str, *, is_enabled: bool = True, is_primary: bool = False
+        self, provider: str, model_name: str, *, is_enabled: bool = True,
+        is_primary: bool = False, engine: str = "vertex",
     ) -> None:
-        self.providers.append(_LlmProviderConfig(provider, model_name, is_enabled, is_primary))
+        self.providers.append(_LlmProviderConfig(provider, model_name, is_enabled, is_primary, engine))
 
     def upsert_submission(self, ref: SubmissionRef) -> uuid.UUID:
         if ref.assignment_id not in self.assignments:
@@ -354,10 +359,11 @@ class InMemoryRepository(IGradingRepository):
             a.language,
             a.is_active,
             tuple(
-                TargetConfig(gt.id, gt.identifier, gt.kind, gt.max_score, self._current_rubric(gt.id))
+                TargetConfig(gt.id, gt.identifier, gt.kind, gt.max_score, self._current_rubric(gt.id),
+                             dict(gt.analysis_config))
                 for gt in targets
             ),
-            tuple(ProviderConfig(p.provider, p.model_name, p.is_primary) for p in providers),
+            tuple(ProviderConfig(p.provider, p.model_name, p.is_primary, p.engine) for p in providers),
         )
 
     def get_selected_feedback(self, submission_id: uuid.UUID) -> FeedbackPackage:
