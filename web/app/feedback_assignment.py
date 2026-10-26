@@ -36,7 +36,7 @@ def primary_model_config(providers) -> dict[str, str]:
 
 
 def read_assignment_config(repository, assignment_id: str) -> AssignmentConfig:
-    """Adapt the repository's current configuration without writing grading data."""
+    """Expose targets with a current rubric without writing grading data."""
     # Only the direct database path imports the SQL-backed repository package.
     from app.repository.base import NotFoundError
 
@@ -58,7 +58,7 @@ def read_assignment_config(repository, assignment_id: str) -> AssignmentConfig:
         for target in assignment.targets:
             rubric = target.rubric
             if rubric is None:
-                raise ValueError("Each target requires a current rubric")
+                continue
             targets[str(target.id)] = TargetConfig(
                 identifier=target.identifier,
                 kind=target.kind,

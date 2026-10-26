@@ -135,7 +135,8 @@ class AssignmentConfig(StrictModel):
     engine: Engine = "vertex"
     provider: Literal["GOOGLE", "OPENAI", "ANTHROPIC"] = "GOOGLE"
     model: ModelName
-    targets: Annotated[dict[Identifier, TargetConfig], Field(min_length=1)]
+    # An assignment may not have any targets with a current rubric yet.
+    targets: dict[Identifier, TargetConfig]
 
     @model_validator(mode="after")
     def selected_model(self) -> "AssignmentConfig":
