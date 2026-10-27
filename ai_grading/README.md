@@ -1,7 +1,35 @@
-# AI grading (Ivan)
+# AI Grading
 
-AI feedback for submitted code, with a reusable Python core and a Gradescope
-client. The Web backend selects an engine and model from database configuration.
+## Overview
+
+The AI Grading component generates AI-assisted feedback for student code submissions. It combines a reusable Python core with a Gradescope client and integrates with the Web backend to process submissions using configurable AI models.
+
+The Web backend manages assignment configuration, authentication, provider credentials, and request limits. Gradescope sends source code and relevant test or coverage evidence to the backend, which returns feedback and optional AI-generated scores. Supported engines are Vertex, Pitt, and the Gemini Developer API.
+
+## System Components
+
+- **Python Core:** Resolves source files, builds prompts, coordinates AI providers, and selects feedback.
+- **Web Backend:** Retrieves assignment and rubric configuration, authenticates requests, enforces limits, and calls the configured AI model.
+- **Gradescope Client:** Sends source code and test evidence to the backend using an assignment-specific token.
+- **Autograder Packages:** Integrate AI feedback into grading workflows while preserving functional scores when AI feedback is unavailable.
+- **AI Provider Adapters:** Support Vertex, Pitt, Gemini Developer API, and an offline fake provider for testing.
+
+Provider credentials remain on the backend; Gradescope packages cannot select models or call providers directly.
+
+## Documentation Guide
+
+- [Current Flow](#current-flow) — Understand how feedback requests are processed.
+- [Use the Backend](#use-the-backend) — Send test requests and configure the Gradescope client.
+- [RentACat Assignment Packages](#rentacat-assignment-packages) — Configure and build the RentACat integrations.
+- [Module Layout](#module-layout) — Find key files and their responsibilities.
+- [Reuse the Python Core](#reuse-the-python-core) — Integrate the grading logic into other applications.
+- [Current Limits](#current-limits) — Review known limitations and outstanding verification.
+
+For backend configuration and deployment, see the [Web deployment guide](../web/README.md#deploy-the-combined-web-and-ai-backend).
+
+## Getting Started
+
+Configure an assignment, AI engine, model, and assignment token using the [Web deployment guide](../web/README.md#deploy-the-combined-web-and-ai-backend). Then follow [Use the Backend](#use-the-backend) to test the API or configure a Gradescope package.
 
 ## Current flow
 
