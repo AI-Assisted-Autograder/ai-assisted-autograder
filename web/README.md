@@ -1,7 +1,44 @@
-# Web app (Aiden)
+# Web Application
 
-FastAPI backend + Jinja2/HTMX instructor UI, backed by PostgreSQL. See
-`docs/architecture/DECISIONS.md` (AD-13) for why this stack.
+## Overview
+
+The Web application is the backend and instructor-facing interface for the project's AI-assisted grading system. It manages assignment configuration, grading targets, rubrics, submission records, test results, and AI-generated feedback. It also provides internal endpoints used by the nightly grading integration and an optional API for generating AI feedback.
+
+The application is built with **FastAPI**, **Jinja2**, and **HTMX**, with **PostgreSQL** for relational data storage. Its AI feedback API supports three backend engines: Vertex, Pitt, and the Gemini Developer API. The application also maintains JSON-based runtime state for assignment tokens, call quotas, and replayed responses.
+
+## System Components
+
+- **Instructor UI:** A read-only, server-rendered interface that lets instructors inspect assignments, submissions, grading targets, rubrics, test results, and provider feedback.
+- **FastAPI backend:** Provides the application's routes, internal endpoints, database-backed assignment configuration, health checks, and optional AI feedback API.
+- **PostgreSQL database:** Stores courses, assignments, grading targets, rubric versions, provider configuration, submissions, test results, AI feedback, and nightly trigger records.
+- **Repository layer:** Provides a common interface for grading-pipeline data access, with a PostgreSQL implementation for the application and an in-memory implementation for testing.
+- **AI feedback API:** Generates feedback using the configured AI engine and model. Its JSON runtime state stores assignment tokens, usage quotas, and replay responses separately from the relational grading data.
+- **Nightly grading integration:** Uses protected internal endpoints to identify submissions awaiting nightly processing and authorize them for grading.
+
+## Documentation Guide
+
+Use the sections below to find setup instructions, implementation details, and operational guidance.
+
+- [Quick Start: View the Instructor UI](#quick-start-see-the-instructor-ui) — Start the application locally and explore sample grading data.
+- [Run with Docker](#run-with-docker-recommended) — Set up and run the application and its database using Docker Compose.
+- [Run without Docker](#run-without-docker) — Run the application against a local PostgreSQL instance.
+- [AI Feedback API](#ai-feedback-api-database-configuration) — Learn about supported AI engines, credentials, API endpoints, and assignment configuration.
+- [Deploy the Combined Web and AI Backend](#deploy-the-combined-web-and-ai-backend) — Configure and deploy the combined service.
+- [Change Engine or Model](#change-engine-or-model) — Update the configured AI engine and model.
+- [Database Schema](#database-schema) — Explore the database tables, relationships, conventions, and migration process.
+- [Application Layout](#layout) — Find the main source files and understand their responsibilities.
+- [Instructor UI](#instructor-ui) — Review the available pages and how the interface is implemented.
+- [Repository Layer](#repository-layer) — Understand the data-access interface and its SQL and in-memory implementations.
+- [Tests](#tests) — Run the Web application tests.
+- [Status](#status) and [Known Limitations](#known-limitations) — Review implemented functionality and outstanding limitations.
+
+For more information about the system's design, see [`docs/architecture/DECISIONS.md`](../docs/architecture/DECISIONS.md) (AD-13), which explains the technology-stack decision. The database model and repository interfaces are documented in [`docs/architecture/02-data-model.puml`](../docs/architecture/02-data-model.puml) and [`docs/architecture/07-interfaces.puml`](../docs/architecture/07-interfaces.puml).
+
+## Getting Started
+
+To run the application locally, follow the [Quick Start](#quick-start-see-the-instructor-ui) instructions below. This provides a disposable local database and sample data for exploring the instructor interface.
+
+---
 
 ## Quick start: see the instructor UI
 
