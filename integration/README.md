@@ -1,8 +1,32 @@
-# Gradescope integration
+# Gradescope Integration
 
-Playwright-based integration code for the Gradescope platform boundary. This
-directory owns browser-specific behavior and trigger orchestration; it does
-not contain AI provider code or the instructor's autograder implementation.
+## Overview
+
+The Gradescope Integration automates nightly autograder reruns using Playwright and the Web API. It retrieves eligible submissions from the database, authorizes each submission for grading, triggers a rerun in Gradescope, and records the outcome.
+
+The integration separates browser automation from grading logic through shared interfaces, production adapters, and test doubles. It also includes a runner for executing nightly cycles and scripts for scheduling them on Windows.
+
+## System Components
+
+- **Gradescope Platform:** Uses Playwright to authenticate, navigate to a submission, and trigger an autograder rerun.
+- **Web API Client:** Retrieves eligible submissions, authorizes grading, and records nightly run results through protected API endpoints.
+- **Nightly Trigger:** Coordinates the workflow by authorizing each submission before triggering its rerun.
+- **Interfaces and Test Doubles:** Define component boundaries and support browser-free orchestration tests.
+- **Nightly Runner and Scheduler:** Execute a trigger cycle manually or through scheduled automation.
+
+## Documentation Guide
+
+- [Current Status](#current-status) — Review implemented functionality and the current integration workflow.
+- [Files](#files) — Find the main source files and their responsibilities.
+- [Safety Requirements](#safety-requirements) — Review credential handling and safeguards for live reruns.
+- [Direct Rerun Test](#direct-rerun-test) — Test a rerun against a specifically selected submission.
+- [Database Bridge](#database-bridge) — Configure the Web API, database connection, and nightly submission workflow.
+- [Verification](#verification) — Run tests, check types, and validate the nightly trigger.
+- [Windows Nightly Scheduling](#windows-nightly-scheduling) — Configure or remove the scheduled nightly task.
+
+## Getting Started
+
+Start by reviewing the [Safety Requirements](#safety-requirements). To test the integration locally, follow [Database Bridge](#database-bridge) to start the Web API and database, then use [Verification](#verification) to check the implementation and run a controlled nightly cycle.
 
 ## Current status
 

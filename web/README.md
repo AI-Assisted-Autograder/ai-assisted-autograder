@@ -1,15 +1,52 @@
-# Web app (Aiden)
+# Web Application
 
-FastAPI backend + Jinja2/HTMX instructor UI, backed by PostgreSQL. See
-`docs/architecture/DECISIONS.md` (AD-13) for why this stack.
+## Overview
+
+The Web application is the backend and instructor-facing interface for the project's AI-assisted grading system. It manages assignment configuration, grading targets, rubrics, submission records, test results, and AI-generated feedback. It also provides internal endpoints used by the nightly grading integration and an optional API for generating AI feedback.
+
+The application is built with **FastAPI**, **Jinja2**, and **HTMX**, with **PostgreSQL** for relational data storage. Its AI feedback API supports three backend engines: Vertex, Pitt, and the Gemini Developer API. The application also maintains JSON-based runtime state for assignment tokens, call quotas, and replayed responses.
+
+## System Components
+
+- **Instructor UI:** A read-only, server-rendered interface that lets instructors inspect assignments, submissions, grading targets, rubrics, test results, and provider feedback.
+- **FastAPI backend:** Provides the application's routes, internal endpoints, database-backed assignment configuration, health checks, and optional AI feedback API.
+- **PostgreSQL database:** Stores courses, assignments, grading targets, rubric versions, provider configuration, submissions, test results, AI feedback, and nightly trigger records.
+- **Repository layer:** Provides a common interface for grading-pipeline data access, with a PostgreSQL implementation for the application and an in-memory implementation for testing.
+- **AI feedback API:** Generates feedback using the configured AI engine and model. Its JSON runtime state stores assignment tokens, usage quotas, and replay responses separately from the relational grading data.
+- **Nightly grading integration:** Uses protected internal endpoints to identify submissions awaiting nightly processing and authorize them for grading.
+
+## Documentation Guide
+
+Use the sections below to find setup instructions, implementation details, and operational guidance.
+
+- [Quick Start: View the Instructor UI](#quick-start-see-the-instructor-ui) — Start the application locally and explore sample grading data.
+- [Run with Docker](#run-with-docker-recommended) — Set up and run the application and its database using Docker Compose.
+- [Run without Docker](#run-without-docker) — Run the application against a local PostgreSQL instance.
+- [AI Feedback API](#ai-feedback-api-database-configuration) — Learn about supported AI engines, credentials, API endpoints, and assignment configuration.
+- [Deploy the Combined Web and AI Backend](#deploy-the-combined-web-and-ai-backend) — Configure and deploy the combined service.
+- [Change Engine or Model](#change-engine-or-model) — Update the configured AI engine and model.
+- [Database Schema](#database-schema) — Explore the database tables, relationships, conventions, and migration process.
+- [Application Layout](#layout) — Find the main source files and understand their responsibilities.
+- [Instructor UI](#instructor-ui) — Review the available pages and how the interface is implemented.
+- [Repository Layer](#repository-layer) — Understand the data-access interface and its SQL and in-memory implementations.
+- [Tests](#tests) — Run the Web application tests.
+- [Status](#status) and [Known Limitations](#known-limitations) — Review implemented functionality and outstanding limitations.
+
+For more information about the system's design, see [`docs/architecture/DECISIONS.md`](../docs/architecture/DECISIONS.md) (AD-13), which explains the technology-stack decision. The database model and repository interfaces are documented in [`docs/architecture/02-data-model.puml`](../docs/architecture/02-data-model.puml) and [`docs/architecture/07-interfaces.puml`](../docs/architecture/07-interfaces.puml).
+
+## Getting Started
+
+To run the application locally, follow the [Quick Start](#quick-start-see-the-instructor-ui) instructions below. This provides a disposable local database and sample data for exploring the instructor interface.
+
+---
 
 ## Quick start: see the instructor UI
 
-Needs Docker Desktop installed and running. From the repository root:
+For a disposable local database, with Docker installed and running. From the repository root:
 
 ```bash
 cd web
-cp .env.example .env
+[ -f .env ] || cp .env.example .env
 docker compose up --build -d
 docker compose exec web python -m app.seed
 ```
@@ -19,9 +56,9 @@ submissions, targets and rubrics, then a submission to see its test
 results and each provider's feedback. `bob@example.edu` on Project 1 has
 a target in each state: feedback given, failed and opted out.
 
-If you already had the containers running, `git pull` is enough: the
-server reloads `app/` on change. Rerun `docker compose up --build -d`
-only if `requirements.txt` or the `Dockerfile` changed.
+The image contains the application and AI package; source files are not bind-mounted.
+After pulling code changes, run `docker compose up -d --build web`. The server uses
+one worker without auto-reload.
 
 ## Run with Docker (recommended)
 
@@ -29,7 +66,7 @@ From the repository root:
 
 ```bash
 cd web
-cp .env.example .env
+[ -f .env ] || cp .env.example .env
 docker compose up --build -d
 ```
 
@@ -41,14 +78,16 @@ follows the server output, and `docker compose down` stops everything
 (the database volume is kept).
 
 `.env.example` sets `INTEGRATION_API_TOKEN` to `local-development-token`.
-The `/internal/nightly/...` endpoints return 401 unless requests send
-that value in an `X-Internal-Token` header, so the nightly trigger in
-`integration/` must use the same token. Restart the containers after
-changing `.env`.
+The `/internal/nightly/...` and assignment configuration endpoints return 401
+unless requests send that value in an `X-Internal-Token` header. The nightly
+trigger in `integration/` must use the same token. Recreate Web with
+`docker compose up -d web` after changing `.env`. For server deployment with AI feedback, follow
+[Deploy the combined Web and AI backend](#deploy-the-combined-web-and-ai-backend).
 
 ### Sample data
 
-The database starts empty. To load sample data, with the containers running:
+For a disposable local database only. Do not run this seeder on the shared server.
+With the containers running:
 
 ```bash
 docker compose exec web python -m app.seed          # load once; a rerun does nothing
@@ -92,6 +131,228 @@ alembic upgrade head
 uvicorn app.main:app --reload
 ```
 
+## AI feedback API (database configuration)
+
+The Web Docker service reads assignment, target, rubric and the primary engine/model
+configuration from PostgreSQL. Feedback is displayed in Gradescope, with optional
+DB-configured scoring; this path does not write submissions, test results or feedback
+to DB or participate in nightly scheduling. JSON retains backend policy, assignment
+token hashes, call quota and replay responses. The backend supports three engines:
+
+| Engine | Credentials on the backend | Model |
+| --- | --- | --- |
+| `vertex` | Google IAM through impersonation ADC | Vertex Gemini ID; vendor `GOOGLE` |
+| `pitt` | `PITT_API_KEY` | Exact Pitt project route; vendor `OPENAI`, `ANTHROPIC` or `GOOGLE` |
+| `gemini_api` | `GEMINI_API_KEY` | Gemini Developer API ID; vendor `GOOGLE` |
+
+Pitt requests use `POST https://api.portkey.ai/v1/chat/completions`,
+`x-portkey-api-key`, and JSON `model`/`messages`. Copy model IDs from the Pitt
+project details, including their full routing prefix. Gemini API free-tier access
+depends on the account, model and quota; the same engine supports paid use.
+The container sends neither model choices nor provider credentials.
+
+When running Web without Docker, export `PITT_API_KEY` or `GEMINI_API_KEY` in
+the server process environment before starting Uvicorn. Reading `.env` through
+Web settings does not export provider keys; Compose injects them automatically.
+
+### Prepare the database configuration
+
+| Endpoint | Authentication | Purpose |
+| --- | --- | --- |
+| `POST /internal/assignments` | `X-Internal-Token` | Create an assignment, targets and current rubrics atomically |
+| `GET /internal/assignments/{id}/config` | `X-Internal-Token` | Read current AI configuration |
+| `POST /v1/feedback` | Assignment Bearer token | Generate feedback; enabled after runtime initialization |
+
+Use `/docs` for request schemas and to create a test assignment. For example:
+
+```json
+{
+  "course": {"name": "AI Feedback Integration", "term": "Fall 2026"},
+  "platform_assignment_id": "YOUR_GRADESCOPE_ASSIGNMENT_ID",
+  "name": "Sorted Collection Feedback",
+  "language": "JAVA",
+  "targets": [{
+    "identifier": "SortedCollection.java",
+    "kind": "FILE",
+    "rubric": {
+      "criteria_text": "Review correctness and clarity using the supplied test diagnostics.",
+      "feedback_guidance": "Give concise, actionable feedback. Use SCORE: NONE; do not assign a grade."
+    }
+  }]
+}
+```
+
+Replace `course` with `"course_id": "YOUR_COURSE_UUID"` to reuse a course.
+Creation returns 201 with the assignment UUID in `id` and target UUIDs as keys in
+`targets`; duplicates return 409 without overwriting data. These DB UUIDs, not the
+Gradescope assignment number or filename, bind the token and feedback requests.
+Migration `0003` adds the global provider's `engine` column; Docker applies it at
+startup. Existing rows default to `vertex`. Global provider settings are managed
+separately from assignment creation.
+
+### Deploy the combined Web and AI backend
+
+The team must provide public HTTPS to Web port 8000, with proxy timeouts longer
+than the backend request timeout (120 seconds in the example below). The combined
+service reads SQL directly; `ASSIGNMENT_API_URL` is only needed for a separate AI process.
+
+1. From the existing `web/` directory, preserve the Compose project name and `.env`.
+   Retain the private `INTEGRATION_API_TOKEN` shared with nightly automation; replace
+   the example token on a new server. Leave `FEEDBACK_STATE_PATH=` empty for initial setup.
+2. Set `PITT_API_KEY` and/or `GEMINI_API_KEY` in private `.env` for those engines.
+   For Vertex, set `GOOGLE_ADC_DIR` to a private host directory containing
+   `application_default_credentials.json` (for example,
+   `../ai_grading/.local-vertex/google`, relative to `web/`). Use directory/file
+   permissions `700`/`600`; Compose mounts it read-only. Generate **impersonation ADC** with
+   `gcloud auth application-default login --impersonate-service-account=YOUR_SERVICE_ACCOUNT`.
+   That service account must match the initializer and have Vertex access; the caller
+   needs Service Account Token Creator permission. Ordinary user ADC and service-account
+   keys are unsupported. See [Google's ADC setup](https://docs.cloud.google.com/docs/authentication/set-up-adc-local-dev-environment).
+   Pitt/Gemini API do not need ADC: leave `GOOGLE_ADC_DIR` empty to mount an inert
+   `/dev/null` placeholder. Provider API keys are never stored in runtime JSON or the ZIP.
+3. Run `docker compose up -d --build web` and wait for `/health` to return 200.
+   Have the DB owner configure one enabled primary row in `llm_provider_config`
+   with the engine, vendor and accessible model. For an empty provider table:
+
+   ```sql
+   INSERT INTO llm_provider_config (engine, provider, model_name, is_enabled, is_primary)
+   VALUES ('pitt', 'OPENAI', '@pitt-ai-connect-azure-foundry/gpt-5.1', true, true);
+   ```
+
+   Substitute a model authorized for the Pitt project. For an existing primary row,
+   use the update below. Do not run `app.seed` on the shared DB. Create and read the
+   assignment using the endpoints above. For RentACat, use the supplied
+   [assignment JSON templates](../ai_grading/README.md#rentacat-assignment-packages);
+   the instructor forms do not configure their testplans or evidence mapping.
+4. Initialize the persistent state once, using the returned assignment UUID and the
+   same engine/model as the DB. Choose the call allowance and expiry for the planned test:
+
+   ```bash
+   docker compose exec web python -m app.seed_feedback \
+     --assignment-id YOUR_ASSIGNMENT_UUID \
+     --state /var/lib/ai-feedback/state.json \
+     --token-file /var/lib/ai-feedback/client/assignment.token \
+     --client-config /var/lib/ai-feedback/client/config.json \
+     --backend-url https://YOUR-SERVER \
+     --allow-model pitt:@pitt-ai-connect-azure-foundry/gpt-5.1 \
+     --max-code-chars 64000 --max-body-bytes 262144 \
+     --max-output-tokens 8192 --timeout-seconds 120 \
+     --max-calls 10 --expires-in-hours 168
+   ```
+
+   Repeat `--allow-model ENGINE:MODEL` for each permitted engine/model combination.
+   For Gemini API, use `--allow-model gemini_api:YOUR_GEMINI_MODEL`. For Vertex,
+   use `--allow-model vertex:YOUR_GEMINI_MODEL` and specify `--project`, `--location`
+   and `--service-account`. The legacy `--allowed-model` flag means Vertex only.
+   These limits cover the RentACat packages. A fresh Java submission can consume
+   five calls; Playwright consumes one. Allow for failed calls and independent trials.
+   Bind each assignment's UUID to its own token; use `--add-assignment` with the
+   existing state and new client output paths for the second assignment, as described below.
+   Additions inherit policy, so omit model and limit flags when adding an assignment.
+
+5. Export the assignment token and securely transfer it to the packaging workstation
+   at the same repository-relative path, owned by that user with mode `600`:
+
+   ```bash
+   install -d -m 700 ../ai_grading/.local-vertex/server-client
+   docker compose cp web:/var/lib/ai-feedback/client/assignment.token \
+     ../ai_grading/.local-vertex/server-client/assignment.token
+   chmod 600 ../ai_grading/.local-vertex/server-client/assignment.token
+   ```
+
+   All provider credentials, the internal token and backend state stay on the server.
+6. Set `FEEDBACK_STATE_PATH=/var/lib/ai-feedback/state.json` in `.env`, then run
+   `docker compose up -d --no-deps web`. `/docs` should include `/v1/feedback`.
+   `/health` checks the DB, not provider access; verify a real request below.
+
+For later updates, run `docker compose up -d --build web`. Preserve `.env`,
+`db_data` and `feedback_data`; never use `down -v` or rerun the initializer to update.
+Use one Web worker/container per state volume.
+
+### Change engine or model
+
+The enabled primary DB row selects the engine/model for **all assignments**. The
+JSON `config.allowed_models` allowlist must also include that exact pair. Stop Web
+before editing the existing state file, preserve tokens/quota/replay records, and
+restart afterward. Do not rerun the initializer. Example allowlist:
+
+```json
+{
+  "vertex": ["YOUR_VERTEX_GEMINI_MODEL"],
+  "pitt": ["@pitt-ai-connect-azure-foundry/gpt-5.1"],
+  "gemini_api": ["YOUR_GEMINI_API_MODEL"]
+}
+```
+
+Omit engines you do not enable. If adding Vertex, also configure `project`,
+`location` and `service_account` in the existing `config` and supply its ADC.
+After the allowlist and credentials are ready, update the current primary row:
+
+```sql
+BEGIN;
+UPDATE llm_provider_config
+SET engine = 'pitt', provider = 'OPENAI',
+    model_name = '@pitt-ai-connect-azure-foundry/gpt-5.1', is_enabled = true
+WHERE is_primary = true;
+COMMIT;
+```
+
+Use the corresponding vendor when changing models, and verify the update affected
+one row. Read the assignment configuration endpoint to confirm the selection.
+There is no configuration editor in the current instructor UI.
+
+### Package and run in Gradescope
+
+From the packaging workstation's repository root, verify one real request first
+(it consumes one call):
+
+```bash
+python3 -I -S ai_grading/local_client.py \
+  --backend-url https://YOUR-SERVER \
+  --token-file ai_grading/.local-vertex/server-client/assignment.token \
+  --code-file /absolute/path/to/SortedCollection.java \
+  --target-id YOUR_TARGET_UUID --request-id pitt-gpt51-trial-001 --json
+```
+
+In `ai_grading/autograder-vertex-feedback/ai_feedback.json`, set `targets[].target_id`
+to the returned DB target UUID and `targets[].source` to `**/SortedCollection.java`.
+Rebuild with the server URL, token and existing functional-grader checkout:
+
+```bash
+python3 ai_grading/autograder-vertex-feedback/build.py \
+  --backend-url https://YOUR-SERVER \
+  --token-file ai_grading/.local-vertex/server-client/assignment.token \
+  --functional-source /absolute/path/to/functional-grader
+```
+
+Upload `ai_grading/autograder-vertex-feedback/vertex autograder.zip` and submit
+`SortedCollection.java`. The package remains specific to the SortedCollection/Java
+grader. AI failure preserves functional scores; compilation failure exits before AI.
+The response and Gradescope `extra_data` identify the engine, vendor, requested
+model and returned model. Local Docker DB-to-feedback requests have succeeded
+through all three engines. Production deployment still needs verification with
+the deployment credentials.
+
+### Current limits and local use
+
+- Initialization creates one assignment/token in new schema-3 state. Schema-2 state
+  upgrades on load while retaining tokens, quota and replay results; schema-1 is
+  incompatible. Stop Web and use `seed_feedback --add-assignment` with the existing
+  state path and new client output paths to add another assignment without resetting
+  quota or replay records. Token rotation remains unimplemented.
+- Failures/timeouts retain reserved calls. Reusing a request ID returns its cached
+  response even after engine/model/rubric changes. Use a new `--request-id` for every
+  independent repeat or comparison; use the same ID for retries. The Gradescope
+  connector uses a stable content hash, so unchanged resubmissions replay feedback.
+  Pitt requests set `x-portkey-cache-force-refresh: true` to bypass the gateway cache.
+  DB outages also prevent replay. Stop Web before editing JSON policy.
+- For a separate local AI process, set `ASSIGNMENT_API_URL` and `INTEGRATION_API_TOKEN`,
+  then use `python3 -m web.app.seed_feedback --help` and `python3 -m web.app.feedback --help`
+  from the repository root. Keep local state separate from the server volume. The API
+  reader and Gradescope client accept HTTPS or loopback HTTP origins only. Export
+  `PITT_API_KEY`/`GEMINI_API_KEY` or `GOOGLE_APPLICATION_CREDENTIALS` in the process
+  environment as needed; standalone Python does not automatically load `web/.env`.
+
 ## Database schema
 
 Tables are defined in `app/models.py`, which mirrors
@@ -101,8 +362,8 @@ container starts.
 
 ### Tables
 
-Instructor configuration, set up per course (directly or by
-`app.seed` until the instructor UI exists):
+Instructor configuration, created through the assignment API or directly;
+global providers are managed separately. `app.seed` also supplies sample data:
 
 | Table | One row per | Notes |
 | --- | --- | --- |
@@ -161,12 +422,17 @@ read the generated file before committing it.
 
 ```
 app/
-  config.py      Settings read from .env (DATABASE_URL, INTEGRATION_API_TOKEN)
+  config.py      Settings read from .env (including optional FEEDBACK_STATE_PATH)
   db.py          SQLAlchemy engine and SessionLocal
-  main.py        FastAPI app: /health and the /internal/nightly endpoints
+  feedback.py    Feedback router and standalone local entry point
+  feedback_config.py  DB configuration and JSON runtime record types
+  feedback_assignment.py  DB configuration adapter and protected API reader
+  feedback_store.py   JSON storage, quota reservation and idempotency
+  main.py        FastAPI app: assignment configuration, health, nightly, UI and optional feedback
   models.py      ORM tables (02-data-model.puml)
   repository/    Data access used by the grading pipeline (below)
   seed.py        Sample data (see "Sample data" above)
+  seed_feedback.py  Bind private token/runtime state to an existing DB assignment
   ui.py          Instructor UI pages (below)
   templates/     Jinja2 templates for the UI
   static/        CSS
@@ -310,8 +576,11 @@ different database.
 
 Done: the schema and migrations, the full repository (SQL and in
 memory) with tests, the sample data script, the internal endpoints the
-nightly trigger calls (shared-token auth), and the read-only instructor
-pages.
+nightly trigger calls (shared-token auth), authenticated assignment creation and
+configuration reads, and the read-only instructor pages. The optional AI
+feedback API selects Vertex, Pitt or Gemini API from PostgreSQL configuration
+and retains assignment tokens, quota and replay state in JSON (see above). It
+does not persist feedback or participate in the submission/nightly lifecycle.
 
 Not done yet: the REST API the container calls, with per-assignment token
 auth (the schema has no token column yet); in the instructor UI, the

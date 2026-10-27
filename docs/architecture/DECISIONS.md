@@ -105,6 +105,16 @@ assignment's exact identifiers, so the second typing is a paste.
 
 ### AD-4. The autograder container holds the LLM API key
 
+**`vertex-backend-refactor` branch override (local prototype).** The new
+[web feedback API](../../web/README.md#vertex-feedback-api-local-prototype) replaces this decision for
+its local client: the client holds only an assignment token, while the backend
+authenticates it, enforces assignment policy and quota, and calls Vertex with
+backend-owned Google credentials. It persists results in JSON and never hands
+Google tokens to clients. It disables automatic upstream retries and conservatively
+charges every reserved attempt, including failed or interrupted ones. The text
+below describes the earlier architecture; existing container/nightly behavior and
+diagrams are not migrated by this local experiment.
+
 The AI phase calls the providers directly from inside the platform's
 container, using the instructor's own key. Our service never proxies an
 LLM call and never sees a provider key.

@@ -2,7 +2,8 @@
 
 from dataclasses import field
 from enum import Enum
-from typing import Annotated
+from math import isclose
+from typing import Annotated, Literal
 
 from pydantic import Field
 from pydantic.dataclasses import dataclass
@@ -51,33 +52,111 @@ class CodeFile:
 
 
 @dataclass(frozen=True, config=CONTRACT_CONFIG)
+class EvidenceSource:
+    """Instructor-selected runtime artifact, relative to the autograder root."""
+
+    format: Literal["gradescope", "junit", "jacoco", "text"]
+    path: Identifier
+    label: Identifier
+    include: tuple[Identifier, ...] = ()
+
+
+@dataclass(frozen=True, config=CONTRACT_CONFIG)
+class AnalysisConfig:
+    """Backend-owned analysis instructions and artifact selection."""
+
+    mode: Literal["code_feedback", "testplan", "test_quality"] = "code_feedback"
+    source_globs: tuple[Identifier, ...] = ()
+    context_globs: tuple[Identifier, ...] = ()
+    test_plan: str = ""
+    expected_tests: tuple[Identifier, ...] = ()
+    evidence_sources: tuple[EvidenceSource, ...] = ()
+    points_per_test: Score | None = None
+    max_source_files: Annotated[int, Field(strict=True, ge=1, le=64)] | None = None
+
+    def __post_init__(self) -> None:
+        if len(self.expected_tests) != len(set(self.expected_tests)):
+            raise ValueError("expected test identifiers must be distinct")
+        labels = [source.label for source in self.evidence_sources]
+        if len(labels) != len(set(labels)):
+            raise ValueError("evidence source labels must be distinct")
+        if self.points_per_test is not None and (self.mode != "testplan" or not self.expected_tests):
+            raise ValueError("per-test points require testplan mode and expected tests")
+
+
+@dataclass(frozen=True, config=CONTRACT_CONFIG)
+class Evidence:
+    """An identified observation from a configured execution artifact."""
+
+    id: Identifier
+    kind: Literal["runtime", "coverage", "diagnostic"]
+    source: Identifier
+    summary: Identifier
+    test_id: Identifier | None = None
+    scope: str = ""
+    status: Literal["pass", "fail", "error", "skipped", "unknown"] = "unknown"
+
+
+@dataclass(frozen=True, config=CONTRACT_CONFIG)
 class ResolvedSource:
-    """Exactly one source body, plus names of files the model cannot inspect."""
+    """A primary source, supplied context files, and names of unread files."""
 
     source_file: CodeFile
     other_file_paths: tuple[Identifier, ...] = ()
+    context_files: tuple[CodeFile, ...] = ()
 
     def __post_init__(self) -> None:
         paths = self.other_file_paths
         if len(paths) != len(set(paths)):
             raise ValueError("other file paths must be distinct")
-        if self.source_file.path in paths:
-            raise ValueError("other file paths must exclude the resolved source file")
+        supplied = [self.source_file.path, *(source.path for source in self.context_files)]
+        if len(supplied) != len(set(supplied)):
+            raise ValueError("supplied source file paths must be distinct")
+        if set(supplied).intersection(paths):
+            raise ValueError("other file paths must exclude supplied source files")
 
 
 @dataclass(frozen=True, config=CONTRACT_CONFIG)
 class FeedbackRequest:
-    """One resolved target with diagnostic strings ordered by the caller."""
+    """One target with backend instructions, source context and execution evidence."""
 
     target: GradingTarget
     rubric: Rubric
     resolved: ResolvedSource
     functional_test_feedback: tuple[str, ...] = ()
+    analysis: AnalysisConfig = field(default_factory=AnalysisConfig)
+    evidence: tuple[Evidence, ...] = ()
 
     def __post_init__(self) -> None:
         if (self.rubric.grading_target_id is not None and self.target.id is not None
                 and self.rubric.grading_target_id != self.target.id):
             raise ValueError("rubric must belong to the request's grading target")
+        evidence_ids = [item.id for item in self.evidence]
+        if len(evidence_ids) != len(set(evidence_ids)):
+            raise ValueError("evidence identifiers must be distinct")
+        if self.analysis.points_per_test is not None:
+            total = self.analysis.points_per_test * len(self.analysis.expected_tests)
+            if self.target.max_score is None or not isclose(self.target.max_score, total):
+                raise ValueError("target maximum must equal the configured per-test total")
+
+
+@dataclass(frozen=True, config=CONTRACT_CONFIG)
+class FeedbackItem:
+    """One analysis verdict, with separate student feedback and instructor evidence."""
+
+    test_id: Identifier
+    verdict: Literal["pass", "fail", "insufficient_evidence"]
+    feedback: Annotated[str, Field(max_length=MAX_FEEDBACK_CHARS)]
+    evidence: FeedbackText
+    suggested_score: Score | None = None
+    max_score: Score | None = None
+
+    def __post_init__(self) -> None:
+        if self.verdict != "pass" and not self.feedback.strip():
+            raise ValueError("non-passing verdicts require student feedback")
+        if self.suggested_score is not None:
+            if self.max_score is None or self.suggested_score > self.max_score:
+                raise ValueError("item score requires and must not exceed its maximum")
 
 
 @dataclass(frozen=True, config=CONTRACT_CONFIG)
@@ -96,6 +175,7 @@ class FeedbackResponse:
     input_tokens: Count | None = None
     output_tokens: Count | None = None
     rubric_id: Identifier | None = field(default=None, kw_only=True)
+    items: tuple[FeedbackItem, ...] = ()
 
 
 @dataclass(frozen=True, config=CONTRACT_CONFIG)

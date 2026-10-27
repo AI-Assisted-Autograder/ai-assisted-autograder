@@ -1,0 +1,23 @@
+# Send only runtime source files to Docker.
+**
+!web/
+!web/Dockerfile
+!web/requirements.txt
+!web/alembic.ini
+!web/app/
+!web/app/*.py
+!web/app/repository/
+!web/app/repository/*.py
+!web/app/templates/
+!web/app/templates/*.html
+!web/app/static/
+!web/app/static/*.css
+!web/migrations/
+!web/migrations/*.py
+!web/migrations/script.py.mako
+!web/migrations/versions/
+!web/migrations/versions/*.py
+!ai_grading/
+!ai_grading/*.py
+!ai_grading/ILLMProvider/
+!ai_grading/ILLMProvider/*.py

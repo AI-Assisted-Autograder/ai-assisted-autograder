@@ -1,4 +1,4 @@
-"""Gemini adapter for the container, with instructor credentials and local config."""
+"""Gemini adapter for an injected Vertex client or a Gemini API-key client."""
 
 import json
 from math import isfinite
@@ -31,11 +31,13 @@ class GeminiProvider:
         max_output_tokens: int = 4096,
         builder: PromptBuilder | None = None,
     ) -> None:
-        model = model if model is not None else os.getenv("GEMINI_MODEL")
+        # An injected backend client must never consult legacy caller credentials.
+        model = model if model is not None else (os.getenv("GEMINI_MODEL") if client is None else None)
         api_key = api_key if api_key is not None else (
-            os.getenv("GEMINI_API_KEY") or os.getenv("GOOGLE_API_KEY")
+            (os.getenv("GEMINI_API_KEY") or os.getenv("GOOGLE_API_KEY"))
+            if client is None else None
         )
-        if (model is None or (client is None and api_key is None)) and LOCAL_CONFIG_PATH.is_file():
+        if client is None and (model is None or api_key is None) and LOCAL_CONFIG_PATH.is_file():
             config = json.loads(LOCAL_CONFIG_PATH.read_text(encoding="utf-8"))
             if model is None:
                 model = config.get("model")
@@ -58,6 +60,7 @@ class GeminiProvider:
         )
         self._owns_client = client is None
         self._client = client if client is not None else genai.Client(
+            vertexai=False,
             api_key=api_key,
             http_options=self._http_options,
         )
@@ -65,6 +68,40 @@ class GeminiProvider:
     def generate_feedback(self, req: FeedbackRequest) -> FeedbackResponse:
         """Return validated feedback; output token usage includes Gemini thoughts."""
         prompt = self._builder.prepare(req)
+        response_json_schema = None
+        if (req.analysis.points_per_test is not None
+                or (req.analysis.mode == "test_quality" and req.target.max_score is None)):
+            expected_tests = list(req.analysis.expected_tests)
+            # Scores belong to the backend, not the model's response contract.
+            response_json_schema = {
+                "type": "object",
+                "properties": {
+                    "feedback_text": {"type": "string"},
+                    "items": {
+                        "type": "array",
+                        "minItems": 1,
+                        "items": {
+                            "type": "object",
+                            "properties": {
+                                "test_id": {"type": "string"},
+                                "verdict": {"type": "string", "enum": [
+                                    "pass", "fail", "insufficient_evidence",
+                                ]},
+                                "feedback": {"type": "string"},
+                                "evidence": {"type": "string"},
+                            },
+                            "required": ["test_id", "verdict", "feedback", "evidence"],
+                            "additionalProperties": False,
+                        },
+                    },
+                },
+                "required": ["feedback_text", "items"],
+                "additionalProperties": False,
+            }
+            if expected_tests:
+                items_schema = response_json_schema["properties"]["items"]
+                items_schema["minItems"] = items_schema["maxItems"] = len(expected_tests)
+                items_schema["items"]["properties"]["test_id"]["enum"] = expected_tests
         try:
             response = self._client.models.generate_content(
                 model=self.model,
@@ -72,7 +109,10 @@ class GeminiProvider:
                 config=types.GenerateContentConfig(
                     system_instruction=prompt.system_instruction,
                     http_options=self._http_options,
-                    response_mime_type="text/plain",
+                    response_mime_type=(
+                        "text/plain" if req.analysis.mode == "code_feedback" else "application/json"
+                    ),
+                    response_json_schema=response_json_schema,
                     max_output_tokens=self._max_output_tokens,
                     candidate_count=1,
                     automatic_function_calling=types.AutomaticFunctionCallingConfig(
