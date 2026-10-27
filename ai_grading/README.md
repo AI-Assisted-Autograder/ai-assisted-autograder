@@ -35,6 +35,12 @@ to configure the DB assignment, engine/model, credentials and assignment token.
 For a local backend process, install `web/requirements.txt`; Docker installs those
 dependencies during its build.
 
+For Vertex Gemini 3.8 Flash, stop the backend before adding that model to the
+active state's `config.allowed_models.vertex`, using `location=global`; preserve
+tokens, quota and replay records. Select `engine=vertex`, `provider=GOOGLE`,
+`model_name=gemini-3.8-flash` in the primary `llm_provider_config` row, then start
+the backend with the updated adapter. This selection applies to all assignments.
+
 The HTTP client uses only the Python standard library. From the repository root:
 
 ```bash
@@ -73,6 +79,9 @@ Reuse the same ID only to retry/check the same request. The default content hash
 replays cached feedback even after an engine, model or rubric change. Fix the code,
 rubric and prompt inputs when comparing predictability across repeated generations.
 Pitt requests force a fresh gateway call with `x-portkey-cache-force-refresh: true`.
+The two server assignment packages use new Gemini 3.8 Flash request namespaces.
+Upload their updated ZIPs to regenerate feedback for unchanged submissions; retries
+within the same namespace still reuse their original results.
 
 ## Module layout
 

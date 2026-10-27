@@ -114,7 +114,10 @@ class GeminiProvider:
                     ),
                     response_json_schema=response_json_schema,
                     max_output_tokens=self._max_output_tokens,
-                    candidate_count=1,
+                    temperature=(
+                        None if self.model.startswith("gemini-3.8-")
+                        else req.analysis.temperature
+                    ),
                     automatic_function_calling=types.AutomaticFunctionCallingConfig(
                         disable=True,
                     ),
