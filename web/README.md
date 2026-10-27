@@ -184,9 +184,8 @@ service reads SQL directly; `ASSIGNMENT_API_URL` is only needed for a separate A
 
    Substitute a model authorized for the Pitt project. For an existing primary row,
    use the update below. Do not run `app.seed` on the shared DB. Create and read the
-   assignment using the endpoints above. For RentACat, use the supplied
-   [assignment JSON templates](../ai_grading/README.md#rentacat-assignment-packages);
-   the instructor forms do not configure their testplans or evidence mapping.
+   assignment using the endpoints above. The instructor forms do not configure
+   testplans or evidence mapping.
 4. Initialize the persistent state once, using the returned assignment UUID and the
    same engine/model as the DB. Choose the call allowance and expiry for the planned test:
 
@@ -213,20 +212,10 @@ service reads SQL directly; `ASSIGNMENT_API_URL` is only needed for a separate A
    existing state and new client output paths for the second assignment, as described below.
    Additions inherit policy, so omit model and limit flags when adding an assignment.
 
-5. Export the assignment token and securely transfer it to the packaging workstation
-   at the same repository-relative path, owned by that user with mode `600`:
-
-   ```bash
-   install -d -m 700 ../ai_grading/.local-vertex/server-client
-   docker compose cp web:/var/lib/ai-feedback/client/assignment.token \
-     ../ai_grading/.local-vertex/server-client/assignment.token
-   chmod 600 ../ai_grading/.local-vertex/server-client/assignment.token
-   ```
-
-   All provider credentials, the internal token and backend state stay on the server.
-6. Set `FEEDBACK_STATE_PATH=/var/lib/ai-feedback/state.json` in `.env`, then run
+5. Set `FEEDBACK_STATE_PATH=/var/lib/ai-feedback/state.json` in `.env`, then run
    `docker compose up -d --no-deps web`. `/docs` should include `/v1/feedback`.
-   `/health` checks the DB, not provider access; verify a real request below.
+   `/health` checks the DB, not provider access; verify a real request with the
+   [HTTP client](../ai_grading/README.md#use-the-backend).
 
 For later updates, run `docker compose up -d --build web`. Preserve `.env`,
 `db_data` and `feedback_data`; never use `down -v` or rerun the initializer to update.
@@ -263,38 +252,6 @@ COMMIT;
 Use the corresponding vendor when changing models, and verify the update affected
 one row. Read the assignment configuration endpoint to confirm the selection.
 There is no configuration editor in the current instructor UI.
-
-### Package and run in Gradescope
-
-From the packaging workstation's repository root, verify one real request first
-(it consumes one call):
-
-```bash
-python3 -I -S ai_grading/local_client.py \
-  --backend-url https://YOUR-SERVER \
-  --token-file ai_grading/.local-vertex/server-client/assignment.token \
-  --code-file /absolute/path/to/SortedCollection.java \
-  --target-id YOUR_TARGET_UUID --request-id pitt-gpt51-trial-001 --json
-```
-
-In `ai_grading/autograder-vertex-feedback/ai_feedback.json`, set `targets[].target_id`
-to the returned DB target UUID and `targets[].source` to `**/SortedCollection.java`.
-Rebuild with the server URL, token and existing functional-grader checkout:
-
-```bash
-python3 ai_grading/autograder-vertex-feedback/build.py \
-  --backend-url https://YOUR-SERVER \
-  --token-file ai_grading/.local-vertex/server-client/assignment.token \
-  --functional-source /absolute/path/to/functional-grader
-```
-
-Upload `ai_grading/autograder-vertex-feedback/vertex autograder.zip` and submit
-`SortedCollection.java`. The package remains specific to the SortedCollection/Java
-grader. AI failure preserves functional scores; compilation failure exits before AI.
-The response and Gradescope `extra_data` identify the engine, vendor, requested
-model and returned model. Local Docker DB-to-feedback requests have succeeded
-through all three engines. Production deployment still needs verification with
-the deployment credentials.
 
 ### Current limits and local use
 

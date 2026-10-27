@@ -47,50 +47,24 @@ python3 -I -S ai_grading/local_client.py \
 
 Supply `--code-file` or `--files-json` (an array of `{path, content}`), with optional
 `--evidence-json`; `--target-id` is the DB target UUID. Public backend
-URLs must use HTTPS. For Gradescope, map `targets[].source` to the submitted file
-and `targets[].target_id` to that UUID, then follow the
-[packaging steps](../web/README.md#package-and-run-in-gradescope).
-The build copies the canonical `local_client.py` into the ZIP; keep tokens and
-generated ZIPs out of Git.
+URLs must use HTTPS.
 
-## RentACat assignment packages
+## RentACat feedback
 
-- `autograder-rentacat-playwright/`: testplan analysis of 11 tests, 5 AI points per
+- Playwright: testplan analysis of 11 tests, 5 AI points per
   test, alongside the unchanged functional grader. The backend derives scores
   from verdicts; an insufficient-evidence verdict remains unscored.
-- `autograder-rentacat-java/`: feedback for unit, integration, implementation and
+- Java: feedback for unit, integration, implementation and
   system-test targets, using runtime diagnostics and aggregate JaCoCo coverage.
   Its AI feedback is unscored; existing functional and coverage scores remain intact.
 
-Each package's `assignment.json` is an assignment-create template. Replace course
-and platform IDs before posting it to the existing configuration API. Migration
-`0004` stores target analysis settings; rubric, trusted testplan, scoring and model
-selection remain backend-owned. Export `GET /internal/assignments/{id}/config`,
-then build either package with its own assignment token:
-
-```bash
-python3 ai_grading/build_autograder.py \
-  --package-dir ai_grading/autograder-rentacat-playwright \
-  --assignment-config ai_grading/.local-feedback/playwright.config.json \
-  --backend-url https://YOUR-SERVER \
-  --token-file ai_grading/.local-feedback/playwright.token \
-  --output ai_grading/.local-feedback/playwright.zip \
-  --request-namespace trial-001
-```
-
-The builder writes a private ZIP and matching runtime directory. The shared hook
-collects configured artifacts after functional grading, including error paths,
+The shared hook collects configured artifacts after functional grading, including error paths,
 and preserves functional scores when AI is unavailable. Instructor evidence is
 kept in `results/ai_evidence.json` and the autograder log, outside student rows.
 Playwright requires one matching primary source; ambiguous copies receive no AI
-score. The AI phase has a 300-second total budget (`--total-timeout`), with each
-request limited by the remaining time. Java's five sequential requests share that
-budget; use `--total-timeout 600` for slower models when testing all five targets,
-and allow enough Gradescope execution time for functional grading plus AI.
+score. The AI phase defaults to a 300-second total budget, with each request
+limited by the remaining time. Java's five sequential requests share that budget.
 Set Gradescope's Outline maximum explicitly; adding AI rows does not change it.
-Use a new request namespace for an independent run or after configuration changes.
-New configurations should allow 64,000 source characters, 262,144 body bytes,
-8,192 output tokens and 120 seconds; the client defaults to 150 seconds.
 
 The response identifies `engine`, vendor `provider`, `requested_model`, returned
 `model_name`, feedback and available usage. For each independent repeat or model
@@ -105,8 +79,8 @@ Pitt requests force a fresh gateway call with `x-portkey-cache-force-refresh: tr
 | Location | Responsibility |
 | --- | --- |
 | [local_client.py](local_client.py) | Assignment-token HTTP client and CLI |
-| [gradescope_feedback.py](gradescope_feedback.py), [build_autograder.py](build_autograder.py) | Shared evidence collection, result rendering and package build |
-| [autograder-vertex-feedback/](autograder-vertex-feedback/) | Gradescope connector, functional-grader package and ZIP builder |
+| [gradescope_feedback.py](gradescope_feedback.py) | Shared evidence collection and result rendering |
+| [autograder-vertex-feedback/](autograder-vertex-feedback/) | Legacy Gradescope connector and functional grader |
 | [models.py](models.py) | Typed source, target, rubric, request and response contracts |
 | [FileResolver.py](FileResolver.py) | Resolve a target to one source file without executing student code |
 | [PromptBuilder.py](PromptBuilder.py) | Build prompts from code, rubric and test diagnostics |
