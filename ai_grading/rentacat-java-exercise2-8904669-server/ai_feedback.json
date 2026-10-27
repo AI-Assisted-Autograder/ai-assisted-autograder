@@ -1,0 +1,242 @@
+{
+  "assignment_id": "5967e0f0-cd01-48fa-a5cb-9a3d60a01476",
+  "targets": {
+    "6e94178d-7311-40ab-a4a3-2ba844a4b799": {
+      "identifier": "CatUnitTest.java",
+      "analysis": {
+        "mode": "test_quality",
+        "source_globs": [
+          "**/src/test/java/edu/pitt/cs/CatUnitTest.java"
+        ],
+        "context_globs": [
+          "**/src/main/java/edu/pitt/cs/Cat.java",
+          "**/src/main/java/edu/pitt/cs/CatImpl.java"
+        ],
+        "evidence_sources": [
+          {
+            "format": "gradescope",
+            "path": "results/results.json",
+            "label": "Functional checks for CatUnitTest",
+            "include": [
+              "^CatUnitTest\\.",
+              "^Submission structure$",
+              "^Autograder error$"
+            ]
+          },
+          {
+            "format": "junit",
+            "path": "source/target/surefire-reports/TEST-edu.pitt.cs.CatUnitTest.xml",
+            "label": "Student CatUnitTest execution against submitted implementations",
+            "include": []
+          },
+          {
+            "format": "jacoco",
+            "path": "source/target/site/jacoco/jacoco.xml",
+            "label": "Aggregate implementation coverage from the Maven test run; not coverage attributable to an individual test or test class",
+            "include": [
+              "(^|/)CatImpl$"
+            ]
+          },
+          {
+            "format": "text",
+            "path": "compile.msg",
+            "label": "Compilation or build diagnostics; an absent file means this phase recorded no error file",
+            "include": []
+          }
+        ],
+        "max_source_files": null
+      }
+    },
+    "a3f3cfdc-dc8c-406d-a57b-e20fe6215f49": {
+      "identifier": "RentACatUnitTest.java",
+      "analysis": {
+        "mode": "test_quality",
+        "source_globs": [
+          "**/src/test/java/edu/pitt/cs/RentACatUnitTest.java"
+        ],
+        "context_globs": [
+          "**/src/main/java/edu/pitt/cs/RentACat.java",
+          "**/src/main/java/edu/pitt/cs/RentACatImpl.java",
+          "**/src/main/java/edu/pitt/cs/Cat.java"
+        ],
+        "evidence_sources": [
+          {
+            "format": "gradescope",
+            "path": "results/results.json",
+            "label": "Functional checks for RentACatUnitTest",
+            "include": [
+              "^RentACatUnitTest\\.",
+              "^Submission structure$",
+              "^Autograder error$"
+            ]
+          },
+          {
+            "format": "junit",
+            "path": "source/target/surefire-reports/TEST-edu.pitt.cs.RentACatUnitTest.xml",
+            "label": "Student RentACatUnitTest execution against submitted implementations",
+            "include": []
+          },
+          {
+            "format": "jacoco",
+            "path": "source/target/site/jacoco/jacoco.xml",
+            "label": "Aggregate implementation coverage from the Maven test run; not coverage attributable to an individual test or test class",
+            "include": [
+              "(^|/)RentACatImpl$"
+            ]
+          },
+          {
+            "format": "text",
+            "path": "compile.msg",
+            "label": "Compilation or build diagnostics; an absent file means this phase recorded no error file",
+            "include": []
+          }
+        ],
+        "max_source_files": null
+      }
+    },
+    "0242ccbc-f152-4482-a238-3d97ae317c62": {
+      "identifier": "RentACatIntegrationTest.java",
+      "analysis": {
+        "mode": "test_quality",
+        "source_globs": [
+          "**/src/test/java/edu/pitt/cs/RentACatIntegrationTest.java"
+        ],
+        "context_globs": [
+          "**/src/main/java/edu/pitt/cs/RentACat.java",
+          "**/src/main/java/edu/pitt/cs/RentACatImpl.java",
+          "**/src/main/java/edu/pitt/cs/Cat.java",
+          "**/src/main/java/edu/pitt/cs/CatImpl.java"
+        ],
+        "evidence_sources": [
+          {
+            "format": "gradescope",
+            "path": "results/results.json",
+            "label": "Functional checks for RentACatIntegrationTest",
+            "include": [
+              "^RentACatIntegrationTest\\.",
+              "^Submission structure$",
+              "^Autograder error$"
+            ]
+          },
+          {
+            "format": "junit",
+            "path": "source/target/surefire-reports/TEST-edu.pitt.cs.RentACatIntegrationTest.xml",
+            "label": "Student RentACatIntegrationTest execution against submitted implementations",
+            "include": []
+          },
+          {
+            "format": "jacoco",
+            "path": "source/target/site/jacoco/jacoco.xml",
+            "label": "Aggregate implementation coverage from the Maven test run; not coverage attributable to an individual test or test class",
+            "include": [
+              "(^|/)CatImpl$",
+              "(^|/)RentACatImpl$"
+            ]
+          },
+          {
+            "format": "text",
+            "path": "compile.msg",
+            "label": "Compilation or build diagnostics; an absent file means this phase recorded no error file",
+            "include": []
+          }
+        ],
+        "max_source_files": null
+      }
+    },
+    "874b5439-c65c-4faa-a56c-49784a8276b5": {
+      "identifier": "RentACatImplementation",
+      "analysis": {
+        "mode": "code_feedback",
+        "source_globs": [
+          "**/src/main/java/edu/pitt/cs/CatImpl.java",
+          "**/src/main/java/edu/pitt/cs/RentACatImpl.java"
+        ],
+        "context_globs": [
+          "**/src/main/java/edu/pitt/cs/Cat.java",
+          "**/src/main/java/edu/pitt/cs/RentACat.java"
+        ],
+        "evidence_sources": [
+          {
+            "format": "gradescope",
+            "path": "results/results.json",
+            "label": "Instructor implementation checks and measured coverage summaries",
+            "include": [
+              "^RentACatIntegrationTestSolution\\.",
+              "^(CatImpl|RentACatImpl) Jacoco Coverage Check$",
+              "^Jacoco Coverage Check$",
+              "^Submission structure$",
+              "^Autograder error$"
+            ]
+          },
+          {
+            "format": "jacoco",
+            "path": "source/target/site/jacoco/jacoco.xml",
+            "label": "Aggregate implementation coverage from the Maven test run; not coverage attributable to an individual test or test class",
+            "include": [
+              "(^|/)CatImpl$",
+              "(^|/)RentACatImpl$"
+            ]
+          },
+          {
+            "format": "text",
+            "path": "compile.msg",
+            "label": "Compilation or build diagnostics; an absent file means this phase recorded no error file",
+            "include": []
+          }
+        ],
+        "max_source_files": null
+      }
+    },
+    "6d7937f5-3570-4d60-987d-fae298799a41": {
+      "identifier": "SystemsTest.java",
+      "analysis": {
+        "mode": "test_quality",
+        "source_globs": [
+          "**/src/test/java/edu/pitt/cs/SystemsTest.java"
+        ],
+        "context_globs": [
+          "**/src/main/java/edu/pitt/cs/RentACat.java",
+          "**/src/main/java/edu/pitt/cs/RentACatImpl.java",
+          "**/src/main/java/edu/pitt/cs/Cat.java",
+          "**/src/main/java/edu/pitt/cs/CatImpl.java"
+        ],
+        "evidence_sources": [
+          {
+            "format": "gradescope",
+            "path": "results/results.json",
+            "label": "Per-method system test outcomes against submitted and inert implementations",
+            "include": [
+              "^SystemsTest on RentACatImpl and RentACatNull$",
+              "^Submission structure$",
+              "^Autograder error$"
+            ]
+          },
+          {
+            "format": "junit",
+            "path": "source/target/surefire-reports/TEST-edu.pitt.cs.SystemsTest.xml",
+            "label": "Student system tests against submitted implementations",
+            "include": []
+          },
+          {
+            "format": "jacoco",
+            "path": "source/target/site/jacoco/jacoco.xml",
+            "label": "Aggregate implementation coverage from the Maven test run; not coverage attributable to an individual test or test class",
+            "include": [
+              "(^|/)RentACatImpl$"
+            ]
+          },
+          {
+            "format": "text",
+            "path": "compile.msg",
+            "label": "Compilation or build diagnostics; an absent file means this phase recorded no error file",
+            "include": []
+          }
+        ],
+        "max_source_files": null
+      }
+    }
+  },
+  "request_namespace": "gradescope-server-231906d-java-4a80cfacfe88",
+  "timeout": 150.0,
+  "total_timeout": 300.0
+}

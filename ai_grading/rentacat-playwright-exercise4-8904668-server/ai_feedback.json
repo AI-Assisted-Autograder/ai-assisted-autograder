@@ -1,0 +1,53 @@
+{
+  "assignment_id": "03bc2a2b-3d88-4e1a-a009-de45724672b0",
+  "targets": {
+    "f4eb1663-ed5d-4b4b-aad5-978fd1c89d54": {
+      "identifier": "tests/rentacat.spec.ts",
+      "analysis": {
+        "mode": "testplan",
+        "source_globs": [
+          "**/tests/rentacat.spec.ts",
+          "**/rentacat.spec.ts"
+        ],
+        "context_globs": [],
+        "evidence_sources": [
+          {
+            "format": "gradescope",
+            "path": "results/results.json",
+            "label": "Existing functional grader results",
+            "include": [
+              "^TEST-\\d+-",
+              "^Playwright test results$"
+            ]
+          },
+          {
+            "format": "junit",
+            "path": "source/submission/playwright-report/results.xml",
+            "label": "Playwright on the correct website",
+            "include": [
+              "TEST-\\d+-"
+            ]
+          },
+          {
+            "format": "junit",
+            "path": "source/submission/playwright-report/results-buggy.xml",
+            "label": "Playwright on the buggy website; failure is expected for a defect-detecting test",
+            "include": [
+              "TEST-\\d+-"
+            ]
+          },
+          {
+            "format": "text",
+            "path": "source/submission/playwright-report/notes.txt",
+            "label": "Functional grader submission preparation notes",
+            "include": []
+          }
+        ],
+        "max_source_files": 1
+      }
+    }
+  },
+  "request_namespace": "gradescope-server-231906d-playwright-65af49d88bcf",
+  "timeout": 150.0,
+  "total_timeout": 300.0
+}
