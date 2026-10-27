@@ -152,6 +152,7 @@ def assignment_page(
     target_error: str | None = None,
     status_code: int = 200,
     view: str = "students",
+    delete_error: str | None = None,
 ):
     by_target = view == "targets"
     try:
@@ -172,6 +173,7 @@ def assignment_page(
             "target_summaries": target_summaries,
             "target_form": target_form or {},
             "target_error": target_error,
+            "delete_error": delete_error,
         },
         status_code=status_code,
     )
@@ -205,6 +207,23 @@ def create_target(
     except (ValueError, ConflictError) as error:
         message, status = form_error(error)
         return assignment_page(request, repo, assignment_id, form, message, status)
+    return see_other(f"/assignments/{assignment_id}#targets")
+
+
+@router.post("/assignments/{assignment_id}/targets/{target_id}/delete")
+def delete_target(
+    request: Request,
+    assignment_id: uuid.UUID,
+    target_id: uuid.UUID,
+    repo: IGradingRepository = Depends(get_repository),
+):
+    try:
+        repo.delete_target(assignment_id, target_id)
+    except NotFoundError:
+        return not_found(request, "That grading target does not exist.")
+    except ConflictError as error:
+        message, status = form_error(error)
+        return assignment_page(request, repo, assignment_id, status_code=status, delete_error=message)
     return see_other(f"/assignments/{assignment_id}#targets")
 
 

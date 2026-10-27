@@ -15,14 +15,14 @@
             <input name="course_name" value="{{ form.course_name or '' }}" required placeholder="CS 0401">
         </label>
         <label>
-            Term <span class="sub">optional</span>
+            Term (optional)
             <input name="term" value="{{ form.term or '' }}" placeholder="Fall 2026">
         </label>
     </div>
     <p class="hint">An assignment joins the course with this name and term, which is created if it is new.</p>
 
     <label>
-        Name <span class="sub">optional</span>
+        Name (optional)
         <input name="name" value="{{ form.name or '' }}" placeholder="Project 1: Calculator">
     </label>
 

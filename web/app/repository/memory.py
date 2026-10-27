@@ -617,6 +617,15 @@ class InMemoryRepository(IGradingRepository):
         last = max((gt.display_order or 0 for gt in registered), default=0)
         return self.add_grading_target(assignment_id, identifier, last + 1, kind=kind, max_score=max_score)
 
+    def delete_target(self, assignment_id: uuid.UUID, target_id: uuid.UUID) -> None:
+        gt = self.grading_targets.get(target_id)
+        if gt is None or gt.assignment_id != assignment_id:
+            raise NotFoundError(f"Grading target {target_id} not found")
+        if any(st.grading_target_id == target_id for st in self.submission_targets.values()):
+            raise ConflictError(f"Target {gt.identifier!r} already has submissions, so it cannot be deleted")
+        self.rubrics = {rid: r for rid, r in self.rubrics.items() if r.grading_target_id != target_id}
+        del self.grading_targets[target_id]
+
     def upsert_rubric(
         self,
         grading_target_id: uuid.UUID,

@@ -1,7 +1,7 @@
 import uuid
 from decimal import Decimal
 
-from sqlalchemy import Uuid, and_, exists, func, literal, select, update
+from sqlalchemy import Uuid, and_, delete, exists, func, literal, select, update
 from sqlalchemy.dialects.postgresql import insert
 from sqlalchemy.orm import Session, sessionmaker
 
@@ -599,6 +599,17 @@ class SqlGradingRepository(IGradingRepository):
             if inserted is None:
                 raise ConflictError(f"Target {identifier!r} is already registered on this assignment")
             return inserted
+
+    def delete_target(self, assignment_id: uuid.UUID, target_id: uuid.UUID) -> None:
+        with self._sessions.begin() as s:
+            # Locked so a submission run cannot register against it mid-delete.
+            gt = s.get(GradingTarget, target_id, with_for_update=True)
+            if gt is None or gt.assignment_id != assignment_id:
+                raise NotFoundError(f"Grading target {target_id} not found")
+            if s.scalar(select(exists().where(SubmissionTarget.grading_target_id == target_id))):
+                raise ConflictError(f"Target {gt.identifier!r} already has submissions, so it cannot be deleted")
+            s.execute(delete(Rubric).where(Rubric.grading_target_id == target_id))
+            s.delete(gt)
 
     def upsert_rubric(
         self,

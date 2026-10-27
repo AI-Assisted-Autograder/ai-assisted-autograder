@@ -3,6 +3,18 @@
 {% set title = assignment.name or assignment.platform_assignment_id %}
 {% block title %}{{ title }}{% endblock %}
 
+{# Real rubrics are LLM prompts thousands of characters long, so long text starts collapsed to a preview. #}
+{% macro long_text(text) %}
+{% if text | length > 300 %}
+<details class="long-text">
+    <summary><span class="preview">{{ text | truncate(200) }}</span> <span class="sub">Show all ({{ text | length }} characters)</span></summary>
+    <p class="prose">{{ text }}</p>
+</details>
+{% else %}
+<p class="prose">{{ text }}</p>
+{% endif %}
+{% endmacro %}
+
 {% block content %}
 <p class="crumbs"><a href="/">Assignments</a> /</p>
 <h1>
@@ -98,6 +110,7 @@
     The instructor's test suite refers to targets by these identifiers, so
     they must match it exactly (AD-3).
 </p>
+{% if delete_error %}<p class="form-error" role="alert">{{ delete_error }}</p>{% endif %}
 {% if assignment.targets %}
 <div class="cards">
     {% for t in assignment.targets %}
@@ -109,17 +122,21 @@
         </header>
         {% if t.rubric %}
         <h3>Rubric <span class="sub">version {{ t.rubric.version }}</span></h3>
-        <p class="prose">{{ t.rubric.criteria_text or "(no criteria)" }}</p>
+        {{ long_text(t.rubric.criteria_text or "(no criteria)") }}
         {% if t.rubric.feedback_guidance %}
         <h3>Feedback guidance</h3>
-        <p class="prose">{{ t.rubric.feedback_guidance }}</p>
+        {{ long_text(t.rubric.feedback_guidance) }}
         {% endif %}
         {% else %}
         <p class="empty">No rubric yet. This target cannot be graded until it has one.</p>
         {% endif %}
-        <p class="card-action">
+        <div class="card-action">
             <a href="/assignments/{{ assignment.id }}/targets/{{ t.id }}/rubric">{{ "Edit rubric" if t.rubric else "Write rubric" }}</a>
-        </p>
+            <form method="post" action="/assignments/{{ assignment.id }}/targets/{{ t.id }}/delete"
+                data-confirm="Delete target {{ t.identifier }} and its rubric?" onsubmit="return confirm(this.dataset.confirm)">
+                <button type="submit" class="link danger">Delete target</button>
+            </form>
+        </div>
     </section>
     {% endfor %}
 </div>
@@ -144,7 +161,7 @@
         </select>
     </label>
     <label class="narrow">
-        Max score <span class="sub">optional</span>
+        Max score (optional)
         <input name="max_score" value="{{ target_form.max_score or '' }}" inputmode="decimal">
     </label>
     <button type="submit">Add target</button>

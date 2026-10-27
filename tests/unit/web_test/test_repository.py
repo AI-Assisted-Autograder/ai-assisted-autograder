@@ -1018,6 +1018,40 @@ def test_create_target_rejects_bad_fields(backend, identifier, kind, max_score):
     assert backend.repo.get_assignment_config(aid).targets == ()
 
 
+def test_delete_target_removes_it_and_its_rubrics(backend):
+    aid = backend.add_assignment("IMMEDIATE", (("add", 1), ("divide", 2)))
+    tid = backend.repo.get_assignment_config(aid).targets[0].id
+    backend.repo.upsert_rubric(tid, criteria_text="Returns the sum.", feedback_guidance=None)
+    backend.repo.upsert_rubric(tid, criteria_text="Returns the sum of two ints.", feedback_guidance=None)
+
+    backend.repo.delete_target(aid, tid)
+
+    assert [t.identifier for t in backend.repo.get_assignment_config(aid).targets] == ["divide"]
+    # The identifier is free to register again.
+    backend.repo.create_target(aid, identifier="add", kind="METHOD", max_score=None)
+
+
+def test_delete_target_with_submissions_conflicts(backend):
+    aid, _ = started(backend, targets=(("add", 1),))
+    tid = backend.repo.get_assignment_config(aid).targets[0].id
+
+    with pytest.raises(ConflictError):
+        backend.repo.delete_target(aid, tid)
+    assert [t.identifier for t in backend.repo.get_assignment_config(aid).targets] == ["add"]
+
+
+def test_delete_target_must_belong_to_the_assignment(backend):
+    aid = backend.add_assignment("IMMEDIATE", (("add", 1),))
+    other = backend.add_assignment("IMMEDIATE", ())
+    tid = backend.repo.get_assignment_config(aid).targets[0].id
+
+    with pytest.raises(NotFoundError):
+        backend.repo.delete_target(other, tid)
+    with pytest.raises(NotFoundError):
+        backend.repo.delete_target(aid, uuid.uuid4())
+    assert len(backend.repo.get_assignment_config(aid).targets) == 1
+
+
 def test_upsert_rubric_versions_rather_than_overwrites(backend):
     aid = backend.add_assignment("IMMEDIATE", (("add", 1),))
     tid = backend.repo.get_assignment_config(aid).targets[0].id

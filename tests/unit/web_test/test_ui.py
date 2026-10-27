@@ -89,6 +89,54 @@ def test_assignment_page_shows_submissions_targets_and_rubric(client, repo):
     assert "gemini-2.5-flash" in text
 
 
+def test_assignment_page_collapses_long_rubric_text(client, repo):
+    aid = repo.add_assignment("IMMEDIATE", name="Calc")
+    tid = repo.add_grading_target(aid, "add", 1)
+    long_criteria = "Check every step. " * 40
+    repo.add_rubric(tid, criteria_text=long_criteria, feedback_guidance="Be brief.")
+
+    text = client.get(f"/assignments/{aid}").text
+
+    assert '<details class="long-text">' in text
+    assert f"Show all ({len(long_criteria)} characters)" in text
+    assert long_criteria in text
+    # Short text is still shown in full, not collapsed.
+    assert '<p class="prose">Be brief.</p>' in text
+
+
+def test_delete_target(client, repo):
+    aid = repo.add_assignment("IMMEDIATE", name="Calc")
+    tid = repo.add_grading_target(aid, "add", 1)
+    repo.add_grading_target(aid, "divide", 2)
+
+    assert f'action="/assignments/{aid}/targets/{tid}/delete"' in client.get(f"/assignments/{aid}").text
+    response = client.post(f"/assignments/{aid}/targets/{tid}/delete", follow_redirects=False)
+
+    assert response.status_code == 303
+    assert response.headers["location"] == f"/assignments/{aid}#targets"
+    assert [t.identifier for t in repo.get_assignment_config(aid).targets] == ["divide"]
+
+
+def test_delete_target_with_submissions_is_409(client, repo):
+    aid, _ = graded_submission(repo)
+    tid = repo.get_assignment_config(aid).targets[0].id
+
+    response = client.post(f"/assignments/{aid}/targets/{tid}/delete")
+
+    assert response.status_code == 409
+    assert "already has submissions" in response.text
+    assert len(repo.get_assignment_config(aid).targets) == 3
+
+
+def test_delete_target_under_another_assignment_is_404(client, repo):
+    aid = repo.add_assignment("IMMEDIATE", name="Calc")
+    tid = repo.add_grading_target(aid, "add", 1)
+    other = repo.add_assignment("IMMEDIATE", platform_assignment_id="other", name="Other")
+
+    assert client.post(f"/assignments/{other}/targets/{tid}/delete").status_code == 404
+    assert len(repo.get_assignment_config(aid).targets) == 1
+
+
 def test_submission_page_shows_each_target_state(client, repo):
     _, sid = graded_submission(repo)
 

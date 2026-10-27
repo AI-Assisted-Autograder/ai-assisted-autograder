@@ -653,6 +653,16 @@ class IGradingRepository(ABC):
         """
 
     @abstractmethod
+    def delete_target(self, assignment_id: uuid.UUID, target_id: uuid.UUID) -> None:
+        """Remove a target and its rubric versions.
+
+        Only a target no submission has used yet: ConflictError once any
+        submission_target points at it, since its results and feedback
+        would go with it. NotFoundError if the target is not registered on
+        this assignment.
+        """
+
+    @abstractmethod
     def upsert_rubric(
         self,
         grading_target_id: uuid.UUID,
