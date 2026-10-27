@@ -1,9 +1,11 @@
 # AI grading (Student A)
 
 Python library for generating feedback on one grading target at a time.
-The grading core, three LLM provider adapters, and FakeProvider are implemented.
-FakeProvider returns fixed feedback without API calls for offline integration.
-Integration with the Web module and Gradescope is not implemented yet.
+The grading core, three LLM provider adapters, FakeProvider, and the
+deterministic `ResultsPackager` are implemented. FakeProvider returns fixed
+feedback without API calls for offline integration. The packager preserves the
+instructor's functional-test entries and appends AI feedback as zero-point
+entries; it does not call an LLM or decide scores.
 
 ## Setup
 
@@ -54,3 +56,24 @@ def grade_target(request: FeedbackRequest):
 Call `result = grade_target(request)`. Read `result.selected.feedback_text` for
 feedback and `result.selected.suggested_score` for the optional score.
 The caller handles fetching backend data, saving results and updating submission state.
+
+## ResultsPackager
+
+`ResultsPackager` reads the existing `results.json` object and provides three
+deterministic updates:
+
+```python
+from ai_grading.ResultsPackager import FeedbackItem, FeedbackPackage, ResultsPackager
+
+packager = ResultsPackager()
+results = packager.parse("results.json")
+results = packager.splice(
+    results,
+    FeedbackPackage((FeedbackItem("add", "Use a clearer variable name."),)),
+)
+packager.write("results.json", results)
+```
+
+`append_deferred` and `append_error` cover the non-GRADE paths. The original
+functional-test entries are copied unchanged, and writes use a temporary file
+followed by an atomic replace.

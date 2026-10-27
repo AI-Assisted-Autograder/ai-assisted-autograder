@@ -188,6 +188,12 @@ also been validated with local sample records, but sample IDs are not real
 Gradescope submissions. A full production batch run requires real imported
 submission records and should be tested with a controlled assignment first.
 
+After clicking `Rerun Autograder`, the adapter polls the submission page until
+Gradescope shows completed autograder results. A queued or started message is
+not recorded as final success. Configure the wait with
+`GRADESCOPE_RERUN_TIMEOUT_MS` (default five minutes) and
+`GRADESCOPE_RERUN_POLL_INTERVAL_MS` (default five seconds).
+
 The login test is read-only with respect to Gradescope. The rerun test changes
 Gradescope state and must be run only for an intentionally selected submission.
 
