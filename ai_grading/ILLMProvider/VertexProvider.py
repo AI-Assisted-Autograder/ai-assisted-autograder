@@ -54,8 +54,8 @@ class VertexProvider:
         project: str,
         location: str,
         service_account: str,
-        timeout_seconds: float = 60.0,
-        max_output_tokens: int = 4096,
+        timeout_seconds: float = 240.0,
+        max_output_tokens: int = 16_384,
     ) -> None:
         self._client = None
         try:

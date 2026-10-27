@@ -206,7 +206,7 @@ def add_feedback(root=Path('/autograder'), *, run_id=None):
             response = request_feedback(backend_url=config['backend_url'],
                                         token_file=root / 'source/assignment.token',
                                         target_id=target_id, files=files, evidence=evidence,
-                                        request_id=request_id, timeout=min(manifest.get('timeout', 150), remaining))
+                                        request_id=request_id, timeout=min(manifest.get('timeout', 270), remaining))
             metadata = {key: response[key] for key in ('engine', 'provider', 'requested_model',
                                                       'model_name', 'request_id')}
             metadata['target_id'] = target_id

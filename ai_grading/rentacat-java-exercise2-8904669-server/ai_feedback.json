@@ -236,7 +236,7 @@
       }
     }
   },
-  "request_namespace": "gradescope-server-gemini-3.8-flash-java-8904669-v1",
-  "timeout": 150.0,
-  "total_timeout": 300.0
+  "request_namespace": "gradescope-server-gemini-3.8-flash-java-8904669-v3",
+  "timeout": 270.0,
+  "total_timeout": 480.0
 }

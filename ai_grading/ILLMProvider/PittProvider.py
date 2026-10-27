@@ -18,8 +18,8 @@ class PittProvider:
         *,
         api_key: str | None = None,
         provider: str = "PITT",
-        timeout_seconds: float = 60.0,
-        max_output_tokens: int = 4096,
+        timeout_seconds: float = 240.0,
+        max_output_tokens: int = 16_384,
         builder: PromptBuilder | None = None,
     ) -> None:
         if not model or not model.strip():

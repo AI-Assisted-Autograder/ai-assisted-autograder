@@ -41,6 +41,14 @@ tokens, quota and replay records. Select `engine=vertex`, `provider=GOOGLE`,
 `model_name=gemini-3.8-flash` in the primary `llm_provider_config` row, then start
 the backend with the updated adapter. This selection applies to all assignments.
 
+The state's global `config.max_output_tokens` defaults to 16,384 (maximum 65,536)
+for all assignments and targets. Gemini thinking and visible feedback share this
+budget.
+
+The global model timeout defaults to 240 seconds. The client waits up to 270
+seconds and polls the same authenticated request while the backend generates
+feedback, avoiding a long idle HTTPS request without reserving another call.
+
 The HTTP client uses only the Python standard library. From the repository root:
 
 ```bash
@@ -69,7 +77,8 @@ and preserves functional scores when AI is unavailable. Instructor evidence is
 kept in `results/ai_evidence.json` and the autograder log, outside student rows.
 Playwright requires one matching primary source; ambiguous copies receive no AI
 score. The AI phase defaults to a 300-second total budget, with each request
-limited by the remaining time. Java's five sequential requests share that budget.
+limited by the remaining time. The server Java package gives its five sequential
+requests a shared 480-second budget within the assignment's 10-minute limit.
 Set Gradescope's Outline maximum explicitly; adding AI rows does not change it.
 
 The response identifies `engine`, vendor `provider`, `requested_model`, returned

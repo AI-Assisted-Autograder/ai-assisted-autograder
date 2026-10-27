@@ -156,12 +156,15 @@ def create_feedback_router(state_path: str | Path, *, assignment_loader,
         runtime.provider_lock = threading.Lock()
         runtime.inflight = 0
         runtime.tasks = set()
+        runtime.jobs = set()
         pool = ThreadPoolExecutor(max_workers=store.config.max_concurrency,
                                   thread_name_prefix="feedback")
         runtime.pool = pool
         try:
             yield
         finally:
+            if runtime.jobs:
+                await asyncio.gather(*list(runtime.jobs), return_exceptions=True)
             # A timed-out HTTP request may still have a running SDK call. Retain
             # its slot and worker lock until it exits; never start an extra call.
             if runtime.tasks:
@@ -196,9 +199,63 @@ def create_feedback_router(state_path: str | Path, *, assignment_loader,
             raise TimeoutError
         return provider.generate_feedback(grading_request)
 
+    def processing_response(request_id):
+        return JSONResponse(
+            {"request_id": request_id, "status": "processing"}, status_code=202,
+            headers={"Cache-Control": "no-store", "Retry-After": "2",
+                     "Preference-Applied": "respond-async"},
+        )
+
+    async def finish_feedback(future, assignment_id, rid, assignment, target, timeout):
+        store = runtime.store
+        try:
+            response = await asyncio.wait_for(asyncio.shield(future), timeout)
+            if (target.max_score is not None and response.suggested_score is not None
+                    and response.suggested_score > target.max_score):
+                raise ProviderError("invalid_provider_response", "Suggested score exceeds the configured maximum.")
+            result = {
+                "request_id": rid, "status": "completed",
+                "engine": assignment.engine, "provider": assignment.provider,
+                "requested_model": assignment.model,
+                "feedback_text": response.feedback_text, "model_name": response.model_name,
+                "usage": {"input_tokens": response.input_tokens,
+                          "output_tokens": response.output_tokens},
+            }
+            if response.items:
+                result["items"] = [asdict(item) for item in response.items]
+            if target.max_score is not None:
+                result["suggested_score"] = response.suggested_score
+                result["max_score"] = target.max_score
+            store.complete(assignment_id, rid, result)
+            return JSONResponse(result, headers={"Cache-Control": "no-store"})
+        except asyncio.CancelledError:
+            # Only cancellation of the job itself interrupts generation; an HTTP
+            # disconnect cannot cancel the independently tracked job.
+            store.fail(assignment_id, rid, code="upstream_timeout")
+            raise
+        except TimeoutError:
+            code = "upstream_timeout"
+        except ProviderError as exc:
+            LOG.warning("feedback_provider_failed request_id=%s code=%s message=%s",
+                        rid, exc.code, exc.message)
+            code = ("upstream_timeout" if exc.code == "timeout" else
+                    "backend_auth_unavailable" if exc.code == "backend_auth_unavailable" else "model_error")
+        except Exception:
+            code = "model_error"
+        try:
+            store.fail(assignment_id, rid, code=code)
+        except Exception:
+            return error("backend_error", 500, rid)
+        LOG.warning("feedback_request_failed code=%s request_id=%s", code, rid)
+        return error(code, 504 if code == "upstream_timeout" else 502, rid)
+
     async def handle_feedback(request: Request):
         store = runtime.store
         config = store.config
+        respond_async = "respond-async" in {
+            preference.strip().lower()
+            for preference in request.headers.get("prefer", "").split(",")
+        }
         headers = request.headers.getlist("authorization")
         if len(headers) != 1:
             return error("unauthorized", 401)
@@ -290,6 +347,8 @@ def create_feedback_router(state_path: str | Path, *, assignment_loader,
                 result = {"engine": record.engine, "provider": record.provider,
                           "requested_model": record.model, **record.result}
                 return JSONResponse(result, headers={"Cache-Control": "no-store"})
+            if record.status == "processing" and respond_async:
+                return processing_response(rid)
             if record.status in ("processing", "interrupted"):
                 return error(record.status, 409, rid)
             code = record.error_code or "model_error"
@@ -310,43 +369,20 @@ def create_feedback_router(state_path: str | Path, *, assignment_loader,
                 done.exception()
 
         future.add_done_callback(release)
-        try:
-            response = await asyncio.wait_for(asyncio.shield(future), config.timeout_seconds)
-            if (target.max_score is not None and response.suggested_score is not None
-                    and response.suggested_score > target.max_score):
-                raise ProviderError("invalid_provider_response", "Suggested score exceeds the configured maximum.")
-            result = {
-                "request_id": rid, "status": "completed",
-                "engine": assignment.engine, "provider": assignment.provider,
-                "requested_model": assignment.model,
-                "feedback_text": response.feedback_text, "model_name": response.model_name,
-                "usage": {"input_tokens": response.input_tokens,
-                          "output_tokens": response.output_tokens},
-            }
-            if response.items:
-                result["items"] = [asdict(item) for item in response.items]
-            if target.max_score is not None:
-                result["suggested_score"] = response.suggested_score
-                result["max_score"] = target.max_score
-            store.complete(assignment_id, rid, result)
-            return JSONResponse(result, headers={"Cache-Control": "no-store"})
-        except asyncio.CancelledError:
-            # A disconnect/shutdown cannot release quota or cancel the SDK call.
-            store.fail(assignment_id, rid, code="upstream_timeout")
-            raise
-        except TimeoutError:
-            code = "upstream_timeout"
-        except ProviderError as exc:
-            code = ("upstream_timeout" if exc.code == "timeout" else
-                    "backend_auth_unavailable" if exc.code == "backend_auth_unavailable" else "model_error")
-        except Exception:
-            code = "model_error"
-        try:
-            store.fail(assignment_id, rid, code=code)
-        except Exception:
-            return error("backend_error", 500, rid)
-        LOG.warning("feedback_request_failed code=%s", code)
-        return error(code, 504 if code == "upstream_timeout" else 502, rid)
+        job = asyncio.create_task(finish_feedback(
+            future, assignment_id, rid, assignment, target, config.timeout_seconds,
+        ))
+        runtime.jobs.add(job)
+
+        def forget_job(done):
+            runtime.jobs.discard(done)
+            if not done.cancelled() and done.exception() is not None:
+                LOG.error("feedback_job_failed")
+
+        job.add_done_callback(forget_job)
+        if respond_async:
+            return processing_response(rid)
+        return await asyncio.shield(job)
 
     @router.post("/v1/feedback")
     async def feedback(request: Request):

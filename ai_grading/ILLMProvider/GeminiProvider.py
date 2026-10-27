@@ -27,8 +27,8 @@ class GeminiProvider:
         *,
         client: genai.Client | None = None,
         api_key: str | None = None,
-        timeout_seconds: float = 60.0,
-        max_output_tokens: int = 4096,
+        timeout_seconds: float = 240.0,
+        max_output_tokens: int = 16_384,
         builder: PromptBuilder | None = None,
     ) -> None:
         # An injected backend client must never consult legacy caller credentials.
@@ -132,6 +132,10 @@ class GeminiProvider:
                 "provider_unavailable", "Could not reach Gemini.", retryable=True,
             ) from None
         except errors.APIError as exc:
+            if exc.code in (408, 504):
+                raise ProviderError(
+                    "timeout", f"Gemini request timed out (HTTP {exc.code}).", retryable=True,
+                ) from None
             retryable = exc.code in (408, 429) or 500 <= exc.code < 600
             raise ProviderError(
                 "provider_error", f"Gemini rejected the request (HTTP {exc.code}).",
@@ -160,7 +164,8 @@ class GeminiProvider:
             raise ProviderError("provider_refusal", "Gemini declined this request.")
         if candidate.finish_reason != types.FinishReason.STOP:
             raise ProviderError(
-                "incomplete_provider_response", "Gemini did not finish generating feedback.",
+                "incomplete_provider_response",
+                f"Gemini did not finish generating feedback ({candidate.finish_reason}).",
             )
         # Exclude thinking parts; neither tool calls nor thoughts are feedback.
         parts = candidate.content.parts if candidate.content else []

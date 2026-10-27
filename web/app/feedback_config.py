@@ -30,8 +30,8 @@ class BackendConfig(StrictModel):
     allowed_models: Annotated[dict[Engine, ModelList], Field(min_length=1)]
     max_code_chars: int = Field(default=12_000, ge=1, le=120_000)
     max_guidance_chars: int = Field(default=2_000, ge=0, le=16_000)
-    max_output_tokens: int = Field(default=1_024, ge=1, le=8_192)
-    timeout_seconds: float = Field(default=30.0, gt=0, le=300)
+    max_output_tokens: int = Field(default=16_384, ge=1, le=65_536)
+    timeout_seconds: float = Field(default=240.0, gt=0, le=300)
     max_concurrency: int = Field(default=2, ge=1, le=64)
     max_body_bytes: int = Field(default=65_536, ge=1, le=1_048_576)
 
