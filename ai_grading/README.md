@@ -2,6 +2,13 @@
 
 ## Overview
 
+This Python library generates feedback for one grading target at a time. The
+grading core, provider adapters, offline `FakeProvider`, and deterministic
+`ResultsPackager` are implemented. `FakeProvider` returns fixed feedback
+without API calls for offline integration. `ResultsPackager` preserves the
+instructor's functional-test entries and appends AI feedback as zero-point
+entries; it does not call an LLM or decide scores.
+
 The AI Grading component generates AI-assisted feedback for student code submissions. It combines a reusable Python core with a Gradescope client and integrates with the Web backend to process submissions using configurable AI models.
 
 The Web backend manages assignment configuration, authentication, provider credentials, and request limits. Gradescope sends source code and relevant test or coverage evidence to the backend, which returns feedback and optional AI-generated scores. Supported engines are Vertex, Pitt, and the Gemini Developer API.
@@ -122,6 +129,27 @@ The two server assignment packages use new Gemini 3.8 Flash request namespaces.
 Upload their updated ZIPs to regenerate feedback for unchanged submissions; retries
 within the same namespace still reuse their original results.
 
+## ResultsPackager
+
+`ResultsPackager` reads the existing `results.json` object and provides three
+deterministic updates:
+
+```python
+from ai_grading.ResultsPackager import FeedbackItem, FeedbackPackage, ResultsPackager
+
+packager = ResultsPackager()
+results = packager.parse("results.json")
+results = packager.splice(
+    results,
+    FeedbackPackage((FeedbackItem("add", "Use a clearer variable name."),)),
+)
+packager.write("results.json", results)
+```
+
+`append_deferred` and `append_error` cover the non-GRADE paths. The original
+functional-test entries are copied unchanged, and writes use a temporary file
+followed by an atomic replace.
+
 ## Module layout
 
 | Location | Responsibility |
@@ -152,6 +180,10 @@ in `ILLMProvider/` and receive explicit settings without depending on Web types.
 `AIGradingComponent` is available for other integrations. Optional target scores
 and configured per-test scores reach the HTTP client; comparison fields remain
 outside this flow. Structured responses separate student feedback and teacher evidence.
+
+Call `result = AIGradingComponent(providers).grade(request)`. Read `result.selected.feedback_text` for
+feedback and `result.selected.suggested_score` for the optional score.
+The caller handles fetching backend data, saving results and updating submission state.
 
 ## Current limits
 
