@@ -159,7 +159,7 @@ followed by an atomic replace.
 | --- | --- |
 | [local_client.py](local_client.py) | Assignment-token HTTP client and CLI |
 | [gradescope_feedback.py](gradescope_feedback.py) | Shared evidence collection and result rendering |
-| [autograder-vertex-feedback/](autograder-vertex-feedback/) | Legacy Gradescope connector and functional grader |
+| [autograders/](../autograders/) | Gradescope autograder packages |
 | [models.py](models.py) | Typed source, target, rubric, request and response contracts |
 | [FileResolver.py](FileResolver.py) | Resolve a target to one source file without executing student code |
 | [PromptBuilder.py](PromptBuilder.py) | Build prompts from code, rubric and test diagnostics |
@@ -198,5 +198,5 @@ The caller handles fetching backend data, saving results and updating submission
   server DB-to-Vertex-to-Gradescope flow still need verification.
 - Local Docker feedback through all three engines has been verified with live
   models. Each deployment still needs its own credential/access check.
-  The historical `autograder-gemini-feedback/` package calls Google
+  The historical `autograders/autograder-gemini-feedback/` package calls Google
   directly; use the backend client above for the selectable-engine architecture.
