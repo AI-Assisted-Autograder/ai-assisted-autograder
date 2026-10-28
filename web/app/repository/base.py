@@ -658,6 +658,8 @@ class IGradingRepository(ABC):
     ) -> uuid.UUID:
         """Register a target, after the assignment's existing ones in display order.
 
+        Omitted or empty analysis_config leaves source selection for rubric
+        configuration; a nonempty analysis_config is validated immediately.
         Raises ConflictError if the identifier is already registered on the
         assignment (AD-3), and ValueError for a blank identifier, an
         unknown kind, or a negative max score.
@@ -688,8 +690,9 @@ class IGradingRepository(ABC):
         Rubrics are versioned, not overwritten, so feedback keeps pointing
         at the rubric it was generated from. Saving text identical to the
         current rubric returns it unchanged rather than adding a version.
-        When analysis_config is supplied, update it and max_score atomically
-        with the rubric; otherwise preserve the target configuration.
-        Raises ValueError for blank criteria.
+        Validate source selection and analysis before saving. When
+        analysis_config is supplied, update it and max_score atomically
+        with the rubric; otherwise validate and resolve the stored configuration.
+        Raises ValueError for blank criteria or invalid target configuration.
         """
 

@@ -614,9 +614,10 @@ class InMemoryRepository(IGradingRepository):
         identifier = check_target_fields(identifier, kind, max_score)
         if assignment_id not in self.assignments:
             raise NotFoundError(f"Assignment {assignment_id} not found")
-        analysis_config = check_target_analysis(
-            identifier, kind, self.assignments[assignment_id].language, analysis_config or {}, max_score,
-        )
+        if analysis_config:
+            analysis_config = check_target_analysis(
+                identifier, kind, self.assignments[assignment_id].language, analysis_config, max_score,
+            )
         registered = self._registered(assignment_id)
         if any(gt.identifier == identifier for gt in registered):
             raise ConflictError(f"Target {identifier!r} is already registered on this assignment")
@@ -648,13 +649,14 @@ class InMemoryRepository(IGradingRepository):
         if grading_target_id not in self.grading_targets:
             raise NotFoundError(f"Grading target {grading_target_id} not found")
         target = self.grading_targets[grading_target_id]
-        if analysis_config is not None:
-            check_target_fields(target.identifier, target.kind, max_score)
-            target.analysis_config = check_target_analysis(
-                target.identifier, target.kind, self.assignments[target.assignment_id].language,
-                analysis_config, max_score,
-            )
-            target.max_score = max_score
+        if analysis_config is None:
+            analysis_config, max_score = target.analysis_config, target.max_score
+        check_target_fields(target.identifier, target.kind, max_score)
+        target.analysis_config = check_target_analysis(
+            target.identifier, target.kind, self.assignments[target.assignment_id].language,
+            analysis_config, max_score,
+        )
+        target.max_score = max_score
         current = self._current_rubric(grading_target_id)
         if current is not None and (current.criteria_text, current.feedback_guidance) == (
             criteria_text,

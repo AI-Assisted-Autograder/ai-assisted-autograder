@@ -315,12 +315,12 @@ def test_rubric_form_prefills_current_rubric(client, repo):
     assert response.status_code == 200
     assert "Returns the sum.</textarea>" in response.text
     assert "Be brief.</textarea>" in response.text
-    assert "creates version 3" in response.text
+    assert "Rubric version 2" in response.text
 
 
 def test_save_rubric_creates_a_version(client, repo):
     aid = repo.add_assignment("IMMEDIATE", name="Calc")
-    tid = repo.add_grading_target(aid, "add", 1)
+    tid = repo.add_grading_target(aid, "add", 1, analysis_config={"source_globs": ["calculator.py"]})
 
     response = client.post(
         f"/assignments/{aid}/targets/{tid}/rubric",

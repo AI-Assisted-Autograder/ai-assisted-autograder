@@ -585,9 +585,10 @@ class SqlGradingRepository(IGradingRepository):
             assignment = s.get(Assignment, assignment_id, with_for_update=True)
             if assignment is None:
                 raise NotFoundError(f"Assignment {assignment_id} not found")
-            analysis_config = check_target_analysis(
-                identifier, kind, assignment.language, analysis_config or {}, max_score,
-            )
+            if analysis_config:
+                analysis_config = check_target_analysis(
+                    identifier, kind, assignment.language, analysis_config, max_score,
+                )
             last = s.scalar(
                 select(func.max(GradingTarget.display_order)).where(GradingTarget.assignment_id == assignment_id)
             )
@@ -598,7 +599,7 @@ class SqlGradingRepository(IGradingRepository):
                     identifier=identifier,
                     kind=kind,
                     max_score=max_score,
-                    analysis_config=analysis_config,
+                    analysis_config=analysis_config or {},
                     display_order=(last or 0) + 1,
                 )
                 .on_conflict_do_nothing(index_elements=["assignment_id", "identifier"])
@@ -636,13 +637,14 @@ class SqlGradingRepository(IGradingRepository):
             target = s.get(GradingTarget, grading_target_id, with_for_update=True)
             if target is None:
                 raise NotFoundError(f"Grading target {grading_target_id} not found")
-            if analysis_config is not None:
-                check_target_fields(target.identifier, target.kind, max_score)
-                target.analysis_config = check_target_analysis(
-                    target.identifier, target.kind, s.get(Assignment, target.assignment_id).language,
-                    analysis_config, max_score,
-                )
-                target.max_score = max_score
+            if analysis_config is None:
+                analysis_config, max_score = target.analysis_config, target.max_score
+            check_target_fields(target.identifier, target.kind, max_score)
+            target.analysis_config = check_target_analysis(
+                target.identifier, target.kind, s.get(Assignment, target.assignment_id).language,
+                analysis_config, max_score,
+            )
+            target.max_score = max_score
             current = s.scalar(
                 select(Rubric).where(Rubric.grading_target_id == grading_target_id, Rubric.is_current)
             )
