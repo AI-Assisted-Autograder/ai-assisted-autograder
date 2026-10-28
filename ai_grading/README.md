@@ -96,17 +96,19 @@ URLs must use HTTPS.
 - Playwright: testplan analysis of 11 tests, 5 AI points per
   test, alongside the unchanged functional grader. The backend derives scores
   from verdicts; an insufficient-evidence verdict remains unscored.
-- Java: feedback for unit, integration, implementation and
-  system-test targets, using runtime diagnostics and aggregate JaCoCo coverage.
-  Its AI feedback is unscored; existing functional and coverage scores remain intact.
+- Java: one overall analysis of the submitted implementation, interfaces, helper
+  classes and tests, together with functional results, JUnit reports, aggregate
+  JaCoCo coverage and build diagnostics. One unscored `AI Feedback` entry appears
+  at the end; existing functional and coverage scores remain intact.
 
 The shared hook collects configured artifacts after functional grading, including error paths,
-and preserves functional scores when AI is unavailable. Instructor evidence is
+and preserves functional scores when AI is unavailable. Only targets configured
+for AI grading produce separate scoring entries; unscored feedback is combined
+into one final entry. Instructor evidence is
 kept in `results/ai_evidence.json` and the autograder log, outside student rows.
 Playwright requires one matching primary source; ambiguous copies receive no AI
-score. The AI phase defaults to a 300-second total budget, with each request
-limited by the remaining time. The server Java package gives its five sequential
-requests a shared 480-second budget within the assignment's 10-minute limit.
+score. Both server packages use a 300-second total AI budget, with each request
+limited by the remaining time. Java sends one overall request.
 Set Gradescope's Outline maximum explicitly; adding AI rows does not change it.
 
 The response identifies `engine`, vendor `provider`, `requested_model`, returned

@@ -191,8 +191,10 @@ def add_feedback(root=Path('/autograder'), *, run_id=None):
     previous_ai = [row for row in tests if row.get('extra_data', {}).get('ai_feedback')]
     results['tests'] = [row for row in tests if not row.get('extra_data', {}).get('ai_feedback')]
     instructor_results = []
+    unscored_feedback = []
     for target_id, target in manifest['targets'].items():
         name = f"AI Feedback: {target['identifier']}"
+        scored = target.get('max_score') is not None
         try:
             if time.monotonic() >= deadline:
                 raise ClientError('The total AI feedback time budget was exhausted.')
@@ -213,24 +215,34 @@ def add_feedback(root=Path('/autograder'), *, run_id=None):
             items = response.get('items', [])
             if target['analysis']['mode'] != 'code_feedback' and not items:
                 raise ClientError('Backend returned no structured feedback for this target.')
-            if items:
+            scored = response.get('max_score') is not None or any(item.get('max_score') is not None for item in items)
+            if scored and items:
                 for item in items:
                     verdict = {'pass': 'Meets the criterion', 'fail': 'Does not meet the criterion',
                                'insufficient_evidence': 'Insufficient evidence'}[item['verdict']]
                     output = verdict + (f"\n{item['feedback']}" if item['feedback'] else '')
                     results['tests'].append(feedback_row(f"{name} / {item['test_id']}", output, metadata,
                                                         score=item.get('suggested_score'), max_score=item.get('max_score')))
-            else:
+            elif scored:
                 results['tests'].append(feedback_row(name, response['feedback_text'], metadata))
+            else:
+                unscored_feedback.append(feedback_row(name, response['feedback_text'], metadata))
             if response.get('suggested_score') is not None and not any(item.get('max_score') is not None for item in items):
                 results['tests'].append(feedback_row(f"AI Score: {target['identifier']}", response['feedback_text'], metadata,
                                                     score=response['suggested_score'], max_score=response['max_score']))
             instructor_results.append({'target_id': target_id, **response})
         except Exception as exc:
             detail = str(exc) if isinstance(exc, ClientError) else 'Could not collect or process configured feedback inputs.'
-            results['tests'].append(feedback_row(name,
+            destination = results['tests'] if scored else unscored_feedback
+            destination.append(feedback_row(name,
                 'AI feedback is unavailable. Your functional-test score is unchanged.\n' + detail,
                 {'target_id': target_id}))
+    if unscored_feedback:
+        output = '\n\n'.join(row['output'] if len(unscored_feedback) == 1 else f"{row['name']}\n{row['output']}"
+                             for row in unscored_feedback)
+        metadata = (unscored_feedback[0]['extra_data'] if len(unscored_feedback) == 1 else
+                    {'targets': [row['extra_data'] for row in unscored_feedback]})
+        results['tests'].append(feedback_row('AI Feedback', output, metadata))
     # Explicit top-level totals override Gradescope row totals. Adjust only our
     # own contribution, preserving the functional grader's original arithmetic.
     new_ai = [row for row in results['tests'] if row.get('extra_data', {}).get('ai_feedback')]
