@@ -121,7 +121,7 @@ def _safe_http_error(status: int) -> ClientError:
         401: "Assignment token is missing, invalid, expired, or revoked.",
         403: "This assignment token cannot access the requested target.",
         404: "Backend endpoint or target was not found.",
-        409: "Request ID conflicts with existing content or has an unfinished/failed attempt.",
+        409: "Assignment configuration changed, or this request ID conflicts with an existing attempt.",
         413: "Request exceeds the backend input limit.",
         422: "Request parameters do not meet the backend limits.",
         429: "Assignment quota or backend concurrency limit reached.",
@@ -130,6 +130,45 @@ def _safe_http_error(status: int) -> ClientError:
         504: "Model request timed out; the reserved call remains consumed.",
     }
     return ClientError(messages.get(status, "Backend request failed."))
+
+
+def get_assignment_config(
+    *, backend_url: str, token_file: str | Path, timeout: float = 30,
+) -> dict:
+    """Read this token's current assignment configuration without reserving a call."""
+    origin = validate_backend_url(backend_url)
+    if not math.isfinite(timeout) or not 0 < timeout <= 300:
+        raise ClientError("Client timeout must be between 0 and 300 seconds.")
+    token = read_assignment_token(token_file)
+    request = Request(
+        origin + "/v1/assignment/config",
+        headers={"Authorization": "Bearer " + token, "Accept": "application/json"},
+    )
+    try:
+        with build_opener(ProxyHandler({}), _NoRedirects()).open(request, timeout=timeout) as response:
+            raw = response.read(MAX_RESPONSE_BYTES + 1)
+            if response.getcode() != 200 or len(raw) > MAX_RESPONSE_BYTES or token.encode("ascii") in raw:
+                raise ClientError("Backend returned an invalid assignment configuration.")
+    except HTTPError as error:
+        error.close()
+        raise _safe_http_error(error.code) from None
+    except (TimeoutError, socket.timeout):
+        raise ClientError("Assignment configuration request timed out.") from None
+    except (URLError, OSError, ValueError, HTTPException):
+        raise ClientError("Cannot reach the backend. Check its address and running process.") from None
+    try:
+        config = json.loads(raw)
+        if (not isinstance(config, dict) or not isinstance(config.get("assignment_id"), str)
+                or not re.fullmatch(r"[0-9a-f]{64}", config.get("revision", ""))
+                or not isinstance(config.get("targets"), dict)):
+            raise ValueError
+        for target in config["targets"].values():
+            if (not isinstance(target, dict) or not isinstance(target.get("identifier"), str)
+                    or not isinstance(target.get("analysis"), dict)):
+                raise ValueError
+        return config
+    except (UnicodeError, ValueError, TypeError):
+        raise ClientError("Backend returned an invalid assignment configuration.") from None
 
 
 def request_feedback(
@@ -143,6 +182,7 @@ def request_feedback(
     files: list[dict] | None = None,
     evidence: list[dict] | None = None,
     request_id: str | None = None,
+    config_revision: str | None = None,
     timeout: float = 270,
 ) -> dict:
     """Submit and poll one request, with no proxy, redirect, or upstream fallback."""
@@ -164,10 +204,13 @@ def request_feedback(
     token = read_assignment_token(token_file)
     identifier = request_id or stable_request_id(
         target_id, code, guidance, functional_test_feedback, files=files, evidence=evidence,
+        namespace=config_revision or "",
     )
     if not re.fullmatch(r"[A-Za-z0-9._:-]{1,128}", identifier):
         raise ClientError("Request ID must contain 1–128 letters, digits, dots, underscores, colons, or hyphens.")
     payload = {"request_id": identifier, "target_id": target_id, "guidance": guidance or ""}
+    if config_revision is not None:
+        payload["config_revision"] = config_revision
     if files is None:
         payload["code"] = code
     else:

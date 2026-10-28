@@ -11,11 +11,13 @@ the AD-3 unregistered-name check covers every one of them.
 
 import uuid
 from abc import ABC, abstractmethod
-from dataclasses import dataclass, field
+from dataclasses import asdict, dataclass, field
 from datetime import datetime
 from decimal import Decimal
 from enum import Enum
+from types import SimpleNamespace
 
+from app.feedback_config import resolve_target_analysis, validate_target_scoring
 from app.models import GRADING_MODES, TARGET_KINDS
 
 
@@ -482,6 +484,13 @@ def check_target_fields(identifier: str, kind: str, max_score: Decimal | None) -
     return required(identifier, "Identifier")
 
 
+def check_target_analysis(identifier: str, kind: str, language: str, analysis: dict,
+                          max_score: Decimal | None) -> dict:
+    resolved = resolve_target_analysis(identifier, kind, language, analysis)
+    validate_target_scoring(SimpleNamespace(analysis=resolved, max_score=max_score))
+    return asdict(resolved)
+
+
 class IGradingRepository(ABC):
     @abstractmethod
     def upsert_submission(self, ref: SubmissionRef) -> uuid.UUID:
@@ -644,6 +653,7 @@ class IGradingRepository(ABC):
         identifier: str,
         kind: str,
         max_score: Decimal | None,
+        analysis_config: dict | None = None,
     ) -> uuid.UUID:
         """Register a target, after the assignment's existing ones in display order.
 
@@ -669,12 +679,16 @@ class IGradingRepository(ABC):
         *,
         criteria_text: str,
         feedback_guidance: str | None,
+        analysis_config: dict | None = None,
+        max_score: Decimal | None = None,
     ) -> RubricConfig:
         """Make this the target's current rubric, as version n+1.
 
         Rubrics are versioned, not overwritten, so feedback keeps pointing
         at the rubric it was generated from. Saving text identical to the
         current rubric returns it unchanged rather than adding a version.
+        When analysis_config is supplied, update it and max_score atomically
+        with the rubric; otherwise preserve the target configuration.
         Raises ValueError for blank criteria.
         """
 

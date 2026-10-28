@@ -1,7 +1,7 @@
 {% extends "base.html" %}
 
 {% set assignment_title = assignment.name or assignment.platform_assignment_id %}
-{% block title %}Rubric for {{ target.identifier }}{% endblock %}
+{% block title %}Configure {{ target.identifier }}{% endblock %}
 
 {% block content %}
 <p class="crumbs">
@@ -9,13 +9,13 @@
     <a href="/assignments/{{ assignment.id }}">{{ assignment_title }}</a> /
 </p>
 <h1>
-    Rubric for <code class="target">{{ target.identifier }}</code>
+    Configure <code class="target">{{ target.identifier }}</code>
     <span class="badge muted">{{ target.kind | title }}</span>
 </h1>
 <p class="hint">
     {% if target.rubric %}
-    Currently version {{ target.rubric.version }}. Saving changes creates version {{ target.rubric.version + 1 }};
-    earlier versions are kept, so feedback already generated still shows which rubric it was graded against.
+    Rubric version {{ target.rubric.version }}. Changes to criteria or feedback guidance create a new version;
+    changes to source selection and analysis keep the existing rubric version.
     {% else %}
     This target has no rubric yet, so it cannot be graded until you save one.
     {% endif %}
@@ -24,20 +24,113 @@
 {% if error %}<p class="form-error" role="alert">{{ error }}</p>{% endif %}
 
 <form class="card form" method="post" action="/assignments/{{ assignment.id }}/targets/{{ target.id }}/rubric">
+    <div class="row">
+        <label>
+            Analysis
+            <select name="analysis_mode">
+                {% for value, label in [('code_feedback', 'Code feedback'), ('testplan', 'Testplan adherence'), ('test_quality', 'Test quality')] %}
+                <option value="{{ value }}" {% if form.analysis_mode == value %}selected{% endif %}>{{ label }}</option>
+                {% endfor %}
+            </select>
+        </label>
+        <label>
+            Max score (optional)
+            <input type="number" name="max_score" min="0" step="any" value="{{ form.max_score if form.max_score is not none else '' }}">
+        </label>
+    </div>
+    <p class="hint">Leave max score blank for feedback without points.</p>
+
     <label>
         Criteria
-        <textarea name="criteria_text" rows="8" required>{{ form.criteria_text }}</textarea>
+        <textarea name="criteria_text" rows="8" maxlength="16000" required>{{ form.criteria_text }}</textarea>
     </label>
     <p class="hint">What a correct, well-written {{ target.kind | lower }} does. The model grades against this.</p>
 
     <label>
         Feedback guidance (optional)
-        <textarea name="feedback_guidance" rows="4">{{ form.feedback_guidance }}</textarea>
+        <textarea name="feedback_guidance" rows="4" maxlength="8000">{{ form.feedback_guidance }}</textarea>
     </label>
     <p class="hint">How to talk to the student: tone, length, what not to give away.</p>
 
+    <fieldset>
+        <legend>Source selection</legend>
+        <label>
+            Primary source patterns
+            <textarea name="source_globs" rows="3" placeholder="src/**/*.java">{{ form.source_globs }}</textarea>
+        </label>
+        <p class="hint">One submission-relative glob per line. Leave blank to locate one file from the target identifier and assignment language.</p>
+        <label>
+            Context source patterns (optional)
+            <textarea name="context_globs" rows="2">{{ form.context_globs }}</textarea>
+        </label>
+        <label>
+            Maximum primary files (optional)
+            <input type="number" name="max_source_files" min="1" max="64" value="{{ form.max_source_files if form.max_source_files is not none else '' }}">
+        </label>
+        <p class="hint">Use 1 when the target must identify a single file. Leave blank to allow multiple files selected by explicit patterns.</p>
+    </fieldset>
+
+    <fieldset>
+        <legend>Testplan and criteria</legend>
+        <label>
+            Instructor testplan (optional)
+            <textarea name="test_plan" rows="5">{{ form.test_plan }}</textarea>
+        </label>
+        <label>
+            Expected test or criterion IDs
+            <textarea name="expected_tests" rows="4">{{ form.expected_tests }}</textarea>
+        </label>
+        <p class="hint">One ID per line. Required for testplan analysis; optional for test quality analysis.</p>
+        <label>
+            Points per test (optional)
+            <input type="number" name="points_per_test" min="0" step="any" value="{{ form.points_per_test if form.points_per_test is not none else '' }}">
+        </label>
+        <p class="hint">For scored testplans, max score must equal points per test multiplied by the number of expected IDs.</p>
+    </fieldset>
+
+    {% macro evidence_fields(source) %}
+    <fieldset class="card">
+        <label>
+            Report format
+            <select name="evidence_format">
+                {% for value, label in [('gradescope', 'Gradescope results'), ('junit', 'JUnit XML'), ('jacoco', 'JaCoCo XML or CSV'), ('text', 'Diagnostic text')] %}
+                <option value="{{ value }}" {% if source.format == value %}selected{% endif %}>{{ label }}</option>
+                {% endfor %}
+            </select>
+        </label>
+        <label>
+            Report path
+            <input name="evidence_path" value="{{ source.path or '' }}" placeholder="results/results.json">
+        </label>
+        <label>
+            Evidence label
+            <input name="evidence_label" value="{{ source.label or '' }}" placeholder="Functional test results">
+        </label>
+        <label>
+            Included test or class patterns (optional)
+            <textarea name="evidence_include" rows="2">{{ source.include or '' }}</textarea>
+        </label>
+        <button type="button" class="link danger" onclick="this.closest('fieldset').remove()">Remove evidence source</button>
+    </fieldset>
+    {% endmacro %}
+    <fieldset>
+        <legend>Runtime evidence (optional)</legend>
+        <p class="hint">Paths are relative to /autograder. Labels must be unique. Include patterns are regular expressions, one per line; leave blank to include all observations.</p>
+        <div id="evidence-sources">
+            {% for source in form.evidence_sources or [{}] %}{{ evidence_fields(source) }}{% endfor %}
+        </div>
+        <template id="evidence-source-template">{{ evidence_fields({}) }}</template>
+        <button type="button" class="link" onclick="document.getElementById('evidence-sources').append(document.getElementById('evidence-source-template').content.cloneNode(true))">Add evidence source</button>
+    </fieldset>
+
+    <label>
+        Temperature (optional)
+        <input type="number" name="temperature" min="0" max="2" step="any" value="{{ form.temperature if form.temperature is not none else '' }}">
+    </label>
+    <p class="hint">Leave blank to use the selected model's default. Some models do not accept this setting.</p>
+
     <div class="actions">
-        <button type="submit">Save rubric</button>
+        <button type="submit">Save configuration</button>
         <a href="/assignments/{{ assignment.id }}#targets">Cancel</a>
     </div>
 </form>

@@ -108,7 +108,8 @@ URLs must use HTTPS.
   JaCoCo coverage and build diagnostics. One unscored `AI Feedback` entry appears
   at the end; existing functional and coverage scores remain intact.
 
-The shared hook collects configured artifacts after functional grading, including error paths,
+The shared hook reads its assignment configuration from `GET /v1/assignment/config`
+using `assignment.token`, then collects configured artifacts after functional grading, including error paths,
 and preserves functional scores when AI is unavailable. Only targets configured
 for AI grading produce separate scoring entries; unscored feedback is combined
 into one final entry. Instructor evidence is
@@ -125,9 +126,11 @@ Reuse the same ID only to retry/check the same request. The default content hash
 replays cached feedback even after an engine, model or rubric change. Fix the code,
 rubric and prompt inputs when comparing predictability across repeated generations.
 Pitt requests force a fresh gateway call with `x-portkey-cache-force-refresh: true`.
-The two server assignment packages use new Gemini 3.8 Flash request namespaces.
-Upload their updated ZIPs to regenerate feedback for unchanged submissions; retries
-within the same namespace still reuse their original results.
+Configure targets and rubrics in the Web forms; existing DB-injected configurations
+use the same reader. Backend-connected packages keep only the backend URL in
+`config.json` and the assignment token, without an `ai_feedback.json` copy.
+The shared hook includes the current configuration revision in request IDs, so
+rubric, model or analysis changes take effect on the next run without repackaging.
 
 ## ResultsPackager
 

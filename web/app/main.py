@@ -13,6 +13,7 @@ from app.db import SessionLocal, engine
 from .feedback_assignment import MAX_CONFIG_BYTES, primary_model_config, read_assignment_config
 from .feedback_config import (
     AssignmentConfig, AssignmentCreateInput, CreatedAssignmentConfig, RubricConfig, TargetConfig,
+    resolve_target_analysis,
 )
 from .feedback_store import StoreError
 from app.models import (
@@ -104,10 +105,11 @@ def create_assignment(
             session.flush()
             targets = {}
             for order, item in enumerate(request.targets):
+                analysis = resolve_target_analysis(item.identifier, item.kind, request.language, item.analysis)
                 target = GradingTarget(
                     assignment_id=assignment.id, identifier=item.identifier,
                     kind=item.kind, display_order=order,
-                    analysis_config=asdict(item.analysis),
+                    analysis_config=asdict(analysis),
                     max_score=item.max_score,
                 )
                 session.add(target)
@@ -122,7 +124,7 @@ def create_assignment(
                 targets[str(target.id)] = TargetConfig(
                     identifier=target.identifier, kind=target.kind,
                     source_path=target.identifier if target.kind == "FILE" else "submitted-source",
-                    analysis=item.analysis,
+                    analysis=analysis,
                     max_score=item.max_score,
                     rubric=RubricConfig(id=str(rubric.id), version=rubric.version,
                                         **item.rubric.model_dump()),
@@ -140,6 +142,8 @@ def create_assignment(
         ) from None
     except IntegrityError:
         raise HTTPException(status_code=409, detail="Assignment configuration conflicts with existing data") from None
+    except ValueError as exc:
+        raise HTTPException(status_code=422, detail=str(exc)) from None
     response.headers["Cache-Control"] = "no-store"
     response.headers["Location"] = f"/internal/assignments/{result.id}/config"
     return result

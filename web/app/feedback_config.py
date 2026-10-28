@@ -1,5 +1,6 @@
 """Validated database configuration and backend-owned runtime state records."""
 
+from dataclasses import replace
 from datetime import datetime
 from decimal import Decimal
 from pathlib import PurePosixPath
@@ -7,9 +8,10 @@ import re
 from typing import Annotated, Any, Literal
 from uuid import UUID
 
-from pydantic import AfterValidator, BaseModel, ConfigDict, Field, field_validator, model_validator
+from pydantic import AfterValidator, BaseModel, ConfigDict, Field, TypeAdapter, field_validator, model_validator
 
-from ai_grading.models import AnalysisConfig, Score
+from ai_grading.FileResolver import FileResolver
+from ai_grading.models import AnalysisConfig, Score, TargetKind
 
 
 Identifier = Annotated[str, Field(min_length=1, max_length=128, pattern=r"^[A-Za-z0-9_.:-]+$")]
@@ -95,6 +97,25 @@ def validate_analysis(value: AnalysisConfig) -> AnalysisConfig:
 
 
 Analysis = Annotated[AnalysisConfig, AfterValidator(validate_analysis)]
+
+
+def resolve_target_analysis(identifier: str, kind: str, language: str,
+                            analysis: dict | AnalysisConfig) -> AnalysisConfig:
+    """Use explicit collection rules, or resolve a basic Web target's source file."""
+    value = TypeAdapter(Analysis).validate_python(analysis)
+    if value.source_globs:
+        return value
+    if kind == "FILE":
+        patterns = (FileResolver._relative_pattern(identifier),)
+    elif language.casefold() == "java":
+        patterns = tuple("**/" + name for name in sorted(
+            FileResolver._java_source_names(identifier, TargetKind(kind))))
+    elif language.casefold() == "python":
+        patterns = (FileResolver._python_source_path(identifier),)
+    else:
+        raise ValueError("Use a FILE target or specify source patterns for this language")
+    return validate_analysis(replace(value, source_globs=patterns,
+                                     max_source_files=value.max_source_files or 1))
 
 
 def validate_target_scoring(target):

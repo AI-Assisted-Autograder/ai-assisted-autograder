@@ -1,8 +1,0 @@
-{
-  "targets": [
-    {
-      "source": "**/SortedCollection.java",
-      "target_id": "sorted-collection"
-    }
-  ]
-}

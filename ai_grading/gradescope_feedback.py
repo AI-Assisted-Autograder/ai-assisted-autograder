@@ -1,7 +1,7 @@
 """Collect configured evidence and append backend feedback to Gradescope results.
 
 This module and local_client.py use only the standard library. Assignment-specific
-file and report selection comes from the backend configuration exported at build time.
+file and report selection is read from the backend at the start of each run.
 """
 
 import argparse
@@ -14,7 +14,9 @@ import sys
 import time
 import xml.etree.ElementTree as ET
 
-from local_client import ClientError, MAX_FILES_BYTES, request_feedback, stable_request_id
+from local_client import (
+    ClientError, MAX_FILES_BYTES, get_assignment_config, request_feedback, stable_request_id,
+)
 
 
 MAX_ARTIFACT_BYTES = 2 * 1024 * 1024
@@ -184,8 +186,9 @@ def add_feedback(root=Path('/autograder'), *, run_id=None):
     results_path = root / 'results/results.json'
     results = json.loads(results_path.read_text(encoding='utf-8'))
     config = json.loads((root / 'source/config.json').read_text(encoding='utf-8'))
-    manifest = json.loads((root / 'source/ai_feedback.json').read_text(encoding='utf-8'))
-    deadline = started + manifest.get('total_timeout', 300)
+    token_file = root / 'source/assignment.token'
+    manifest = get_assignment_config(backend_url=config['backend_url'], token_file=token_file)
+    deadline = started + 300
     # Re-running just the hook replaces its own rows, never functional rows.
     tests = results.setdefault('tests', [])
     previous_ai = [row for row in tests if row.get('extra_data', {}).get('ai_feedback')]
@@ -201,14 +204,15 @@ def add_feedback(root=Path('/autograder'), *, run_id=None):
             files = collect_files(root / 'submission', target['analysis'])
             evidence = collect_evidence(root, target['analysis'])
             request_id = stable_request_id(target_id, files=files, evidence=evidence,
-                                           namespace=run_id or manifest.get('request_namespace', ''))
+                                           namespace=f"{manifest['revision']}:{run_id or ''}")
             remaining = deadline - time.monotonic()
             if remaining <= 0:
                 raise ClientError('The total AI feedback time budget was exhausted.')
             response = request_feedback(backend_url=config['backend_url'],
-                                        token_file=root / 'source/assignment.token',
+                                        token_file=token_file,
                                         target_id=target_id, files=files, evidence=evidence,
-                                        request_id=request_id, timeout=min(manifest.get('timeout', 270), remaining))
+                                        request_id=request_id, config_revision=manifest['revision'],
+                                        timeout=min(270, remaining))
             metadata = {key: response[key] for key in ('engine', 'provider', 'requested_model',
                                                       'model_name', 'request_id')}
             metadata['target_id'] = target_id

@@ -33,6 +33,7 @@ MESSAGES = {
     "assignment_forbidden": "Assignment is unavailable.",
     "target_forbidden": "Target is not available for this assignment.",
     "assignment_config_unavailable": "Database assignment configuration is unavailable.",
+    "config_changed": "Assignment configuration changed. Fetch the current configuration and retry.",
     "invalid_request": "Request fields or JSON are invalid.",
     "input_too_large": "Input exceeds the backend limit.",
     "quota_exceeded": "Assignment call quota is exhausted.",
@@ -51,6 +52,7 @@ class FeedbackInput(BaseModel):
     model_config = ConfigDict(extra="forbid", strict=True)
     request_id: str = Field(min_length=1, max_length=128, pattern=r"^[A-Za-z0-9_.:-]+$")
     target_id: str = Field(min_length=1, max_length=128, pattern=r"^[A-Za-z0-9_.:-]+$")
+    config_revision: str | None = Field(default=None, pattern=r"^[0-9a-f]{64}$")
     code: str | None = Field(default=None, min_length=1)
     files: list[CodeFile] = Field(default_factory=list, max_length=64)
     evidence: list[Evidence] = Field(default_factory=list, max_length=256)
@@ -76,6 +78,15 @@ class FeedbackInput(BaseModel):
 
 def matches_path(path: str, patterns: tuple[str, ...]) -> bool:
     return any(FileResolver._matches(path, pattern) for pattern in patterns)
+
+
+def assignment_revision(assignment) -> str:
+    """Bind collected inputs and replay IDs to the grading configuration."""
+    content = {"assignment": assignment.model_dump(mode="json"),
+               "prompts": [PromptBuilder.version, PromptBuilder.extended_version,
+                           PromptBuilder.per_test_version]}
+    canonical = json.dumps(content, sort_keys=True, separators=(",", ":"), ensure_ascii=False)
+    return hashlib.sha256(canonical.encode("utf-8")).hexdigest()
 
 
 def resolve_input(payload: FeedbackInput, target) -> ResolvedSource:
@@ -179,6 +190,49 @@ def create_feedback_router(state_path: str | Path, *, assignment_loader,
 
     router = APIRouter(lifespan=lifespan)
 
+    def authenticate(request):
+        headers = request.headers.getlist("authorization")
+        if len(headers) != 1:
+            raise StoreError("unauthorized", 401)
+        scheme, _, token = headers[0].partition(" ")
+        if scheme.lower() != "bearer" or not token or len(token) > 256 or not token.isascii():
+            raise StoreError("unauthorized", 401)
+        return runtime.store.authenticate(token)
+
+    async def load_assignment(assignment_id):
+        try:
+            assignment = await asyncio.to_thread(assignment_loader, assignment_id)
+            if assignment.id != assignment_id or not assignment.enabled:
+                raise StoreError("assignment_forbidden", 403)
+            if assignment.model not in runtime.store.config.allowed_models.get(assignment.engine, []):
+                raise StoreError("assignment_config_unavailable", 503)
+            return assignment
+        except StoreError:
+            raise
+        except Exception:
+            raise StoreError("assignment_config_unavailable", 503) from None
+
+    @router.get("/v1/assignment/config")
+    async def assignment_config(request: Request):
+        """Return collection rules for the authenticated assignment, without using quota."""
+        try:
+            assignment = await load_assignment(authenticate(request))
+        except StoreError as exc:
+            return error(exc.code, exc.status_code)
+        targets = {}
+        for target_id, target in assignment.targets.items():
+            analysis = asdict(target.analysis)
+            targets[target_id] = {
+                "identifier": target.identifier, "kind": target.kind,
+                "source_path": target.source_path, "max_score": target.max_score,
+                "analysis": {key: analysis[key] for key in (
+                    "mode", "source_globs", "context_globs", "evidence_sources", "max_source_files",
+                )},
+            }
+        return JSONResponse({"assignment_id": assignment.id,
+                             "revision": assignment_revision(assignment), "targets": targets},
+                            headers={"Cache-Control": "no-store"})
+
     async def read_body(request, limit):
         body = bytearray()
         async for chunk in request.stream():
@@ -256,14 +310,8 @@ def create_feedback_router(state_path: str | Path, *, assignment_loader,
             preference.strip().lower()
             for preference in request.headers.get("prefer", "").split(",")
         }
-        headers = request.headers.getlist("authorization")
-        if len(headers) != 1:
-            return error("unauthorized", 401)
-        scheme, _, token = headers[0].partition(" ")
-        if scheme.lower() != "bearer" or not token or len(token) > 256 or not token.isascii():
-            return error("unauthorized", 401)
         try:
-            assignment_id = store.authenticate(token)
+            assignment_id = authenticate(request)
         except StoreError as exc:
             return error(exc.code, exc.status_code)
 
@@ -284,15 +332,11 @@ def create_feedback_router(state_path: str | Path, *, assignment_loader,
                 or len(payload.guidance or "") > config.max_guidance_chars):
             return error("input_too_large", 413, rid)
         try:
-            assignment = await asyncio.to_thread(assignment_loader, assignment_id)
-            if assignment.id != assignment_id or not assignment.enabled:
-                return error("assignment_forbidden", 403, rid)
-            if assignment.model not in config.allowed_models.get(assignment.engine, []):
-                return error("assignment_config_unavailable", 503, rid)
+            assignment = await load_assignment(assignment_id)
         except StoreError as exc:
             return error(exc.code, exc.status_code, rid)
-        except Exception:
-            return error("assignment_config_unavailable", 503, rid)
+        if payload.config_revision is not None and payload.config_revision != assignment_revision(assignment):
+            return error("config_changed", 409, rid)
         target = assignment.targets.get(payload.target_id)
         if target is None:
             return error("target_forbidden", 403, rid)
@@ -317,6 +361,8 @@ def create_feedback_router(state_path: str | Path, *, assignment_loader,
         except ValueError:
             return error("input_too_large", 413, rid)
         content = payload.model_dump(mode="json", exclude={"request_id"})
+        if payload.config_revision is None:
+            content.pop("config_revision")
         content["guidance"] = payload.guidance or ""
         # Keep legacy code requests byte-for-byte compatible with stored digests.
         for field in ("files", "evidence"):
