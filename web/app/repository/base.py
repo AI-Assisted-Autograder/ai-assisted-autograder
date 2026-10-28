@@ -15,9 +15,8 @@ from dataclasses import asdict, dataclass, field
 from datetime import datetime
 from decimal import Decimal
 from enum import Enum
-from types import SimpleNamespace
 
-from app.feedback_config import resolve_target_analysis, validate_target_scoring
+from app.feedback_config import TargetSettings, resolve_target_analysis
 from app.models import GRADING_MODES, TARGET_KINDS
 
 
@@ -486,9 +485,11 @@ def check_target_fields(identifier: str, kind: str, max_score: Decimal | None) -
 
 def check_target_analysis(identifier: str, kind: str, language: str, analysis: dict,
                           max_score: Decimal | None) -> dict:
-    resolved = resolve_target_analysis(identifier, kind, language, analysis)
-    validate_target_scoring(SimpleNamespace(analysis=resolved, max_score=max_score))
-    return asdict(resolved)
+    settings = TargetSettings(
+        identifier=identifier, kind=kind, max_score=max_score,
+        analysis=resolve_target_analysis(identifier, kind, language, analysis),
+    )
+    return asdict(settings.analysis)
 
 
 class IGradingRepository(ABC):

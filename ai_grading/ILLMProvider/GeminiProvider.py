@@ -1,9 +1,7 @@
 """Gemini adapter for an injected Vertex client or a Gemini API-key client."""
 
-import json
 from math import isfinite
 import os
-from pathlib import Path
 
 import httpx
 from google import genai
@@ -13,9 +11,6 @@ from ..models import FeedbackRequest, FeedbackResponse
 from ..PromptBuilder import PromptBuilder
 from .FeedbackParser import parse_feedback
 from .ILLMProvider import ProviderError
-
-
-LOCAL_CONFIG_PATH = Path(__file__).with_name(".gemini.json")
 
 
 class GeminiProvider:
@@ -37,12 +32,6 @@ class GeminiProvider:
             (os.getenv("GEMINI_API_KEY") or os.getenv("GOOGLE_API_KEY"))
             if client is None else None
         )
-        if client is None and (model is None or api_key is None) and LOCAL_CONFIG_PATH.is_file():
-            config = json.loads(LOCAL_CONFIG_PATH.read_text(encoding="utf-8"))
-            if model is None:
-                model = config.get("model")
-            if api_key is None:
-                api_key = config.get("api_key")
         if not model or not model.strip():
             raise ValueError("model must be configured explicitly")
         if not isfinite(timeout_seconds) or timeout_seconds <= 0:

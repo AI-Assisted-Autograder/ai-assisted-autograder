@@ -66,19 +66,21 @@ def report_rows(text, format_name):
     """Yield (kind, test_id, scope, status, summary) without inferring test coverage."""
     if format_name == 'gradescope':
         results = json.loads(text)
+        visibility = results.get('visibility', results.get('test_visibility', 'visible'))
         functional_rows = [row for row in results.get('tests', [])
                            if not row.get('extra_data', {}).get('ai_feedback')]
         for row in functional_rows:
-            if row.get('visibility', results.get('test_visibility', 'visible')) != 'visible':
+            if row.get('visibility', visibility) != 'visible':
                 continue
             name = str(row.get('name', 'Unnamed functional result'))
             score, maximum = row.get('score'), row.get('max_score')
-            status = 'unknown'
-            if isinstance(score, (int, float)) and isinstance(maximum, (int, float)) and maximum > 0:
+            status = {'passed': 'pass', 'failed': 'fail'}.get(row.get('status'), 'unknown')
+            if (status == 'unknown' and isinstance(score, (int, float))
+                    and isinstance(maximum, (int, float)) and maximum > 0):
                 status = 'pass' if score >= maximum else 'fail'
             yield ('runtime', name, '', status,
                    f"Reported score: {score}/{maximum}.\n{row.get('output', '')}")
-        if not functional_rows and results.get('output'):
+        if not functional_rows and visibility == 'visible' and results.get('output'):
             yield ('runtime', 'execution', '', 'unknown', str(results['output']))
     elif format_name == 'junit':
         tree = ET.fromstring(text)
@@ -125,13 +127,14 @@ def report_rows(text, format_name):
 
 def collect_evidence(root, analysis):
     evidence = []
-    for source in analysis.get('evidence_sources', []):
+    for source_index, source in enumerate(analysis.get('evidence_sources', [])):
         label = source['label']
+        source_id = f'source-{source_index}'
         try:
             raw = read_artifact(root, source['path'])
             rows = list(report_rows(raw, source['format']))
         except (OSError, ValueError, KeyError, ET.ParseError, ClientError):
-            evidence.append({'id': label + ':unavailable', 'kind': 'diagnostic', 'source': label,
+            evidence.append({'id': source_id + ':unavailable', 'kind': 'diagnostic', 'source': label,
                              'summary': 'The configured artifact is missing, unreadable or invalid; no execution outcome can be inferred.',
                              'scope': label, 'status': 'unknown'})
             continue
@@ -144,11 +147,11 @@ def collect_evidence(root, analysis):
                 continue
             if len(summary) > MAX_SUMMARY_CHARS:
                 summary = summary[:MAX_SUMMARY_CHARS] + '\n[Evidence excerpt truncated.]'
-            evidence.append({'id': f'{label}:{index}', 'kind': kind, 'source': label,
+            evidence.append({'id': f'{source_id}:{index}', 'kind': kind, 'source': label,
                              'summary': summary, 'test_id': test_id, 'scope': scope, 'status': status})
             selected += 1
         if not selected:
-            evidence.append({'id': label + ':empty', 'kind': 'diagnostic', 'source': label,
+            evidence.append({'id': source_id + ':empty', 'kind': 'diagnostic', 'source': label,
                              'summary': 'No matching observations were present in the configured artifact; no pass or failure is inferred.',
                              'scope': label, 'status': 'unknown'})
     if len(evidence) > 256:
@@ -257,9 +260,10 @@ def add_feedback(root=Path('/autograder'), *, run_id=None):
     evidence_path = root / 'results/ai_evidence.json'
     evidence_path.write_text(json.dumps(instructor_results, ensure_ascii=False, indent=2) + '\n', encoding='utf-8')
     evidence_path.chmod(0o600)
-    for result in instructor_results:
-        for item in result.get('items', []):
-            print(f"Instructor AI evidence [{result['target_id']} / {item['test_id']}]: {item['evidence']}", file=sys.stderr)
+    if results.get('stdout_visibility', 'hidden') == 'hidden':
+        for result in instructor_results:
+            for item in result.get('items', []):
+                print(f"Instructor AI evidence [{result['target_id']} / {item['test_id']}]: {item['evidence']}", file=sys.stderr)
     temporary = results_path.with_suffix('.tmp')
     temporary.write_text(json.dumps(results, ensure_ascii=False, indent=2) + '\n', encoding='utf-8')
     temporary.replace(results_path)

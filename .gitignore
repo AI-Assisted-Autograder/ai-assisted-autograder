@@ -240,8 +240,3 @@ autograders/**/assignment.token
 autograders/**/config.json
 autograders/**/deploy_key
 autograders/**/.gemini.json
-# Locally bundled files in the legacy Vertex package.
-autograders/autograder-vertex-feedback/local_client.py
-autograders/autograder-vertex-feedback/github/
-autograders/autograder-vertex-feedback/compile_error.prefix
-autograders/autograder-vertex-feedback/compile_error.postfix

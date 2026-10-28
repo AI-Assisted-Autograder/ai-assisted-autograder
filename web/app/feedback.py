@@ -335,31 +335,9 @@ def create_feedback_router(state_path: str | Path, *, assignment_loader,
             assignment = await load_assignment(assignment_id)
         except StoreError as exc:
             return error(exc.code, exc.status_code, rid)
-        if payload.config_revision is not None and payload.config_revision != assignment_revision(assignment):
-            return error("config_changed", 409, rid)
         target = assignment.targets.get(payload.target_id)
         if target is None:
             return error("target_forbidden", 403, rid)
-        guidance = target.rubric.feedback_guidance
-        if payload.guidance:
-            guidance += "\nOptional client feedback guidance:\n" + payload.guidance
-        try:
-            resolved = resolve_input(payload, target)
-            grading_request = FeedbackRequest(
-                target=GradingTarget(identifier=target.identifier, kind=TargetKind(target.kind),
-                                     id=payload.target_id, max_score=target.max_score),
-                rubric=Rubric(criteria_text=target.rubric.criteria_text, feedback_guidance=guidance,
-                              id=target.rubric.id, version=target.rubric.version,
-                              grading_target_id=payload.target_id),
-                resolved=resolved, analysis=target.analysis, evidence=tuple(payload.evidence),
-                functional_test_feedback=tuple(payload.functional_test_feedback),
-            )
-        except ValueError:
-            return error("invalid_request", 422, rid)
-        try:
-            PromptBuilder().prepare(grading_request)
-        except ValueError:
-            return error("input_too_large", 413, rid)
         content = payload.model_dump(mode="json", exclude={"request_id"})
         if payload.config_revision is None:
             content.pop("config_revision")
@@ -375,10 +353,38 @@ def create_feedback_router(state_path: str | Path, *, assignment_loader,
         canonical = json.dumps(content,
                                sort_keys=True, separators=(",", ":"), ensure_ascii=False)
         digest = hashlib.sha256(canonical.encode("utf-8")).hexdigest()
+        try:
+            existing = store.get_request(assignment_id, rid)
+        except StoreError as exc:
+            return error(exc.code, exc.status_code, rid)
+        # An accepted request retains its configuration snapshot while polling.
+        # Current assignment/target authorization above still applies to replays.
+        if existing is None:
+            if payload.config_revision is not None and payload.config_revision != assignment_revision(assignment):
+                return error("config_changed", 409, rid)
+            guidance = target.rubric.feedback_guidance
+            if payload.guidance:
+                guidance += "\nOptional client feedback guidance:\n" + payload.guidance
+            try:
+                resolved = resolve_input(payload, target)
+                grading_request = FeedbackRequest(
+                    target=GradingTarget(identifier=target.identifier, kind=TargetKind(target.kind),
+                                         id=payload.target_id, max_score=target.max_score),
+                    rubric=Rubric(criteria_text=target.rubric.criteria_text, feedback_guidance=guidance,
+                                  id=target.rubric.id, version=target.rubric.version,
+                                  grading_target_id=payload.target_id),
+                    resolved=resolved, analysis=target.analysis, evidence=tuple(payload.evidence),
+                    functional_test_feedback=tuple(payload.functional_test_feedback),
+                )
+            except ValueError:
+                return error("invalid_request", 422, rid)
+            try:
+                PromptBuilder().prepare(grading_request)
+            except ValueError:
+                return error("input_too_large", 413, rid)
         # No await between checking capacity, reserving quota and occupying it.
         # Replays must still work at full capacity and after quota exhaustion.
         try:
-            existing = store.get_request(assignment_id, rid)
             if existing is None and runtime.inflight >= config.max_concurrency:
                 return error("busy", 429, rid)
             record, created = store.reserve(assignment_id, rid, digest, payload.target_id,
