@@ -190,7 +190,6 @@ def add_feedback(root=Path('/autograder'), *, run_id=None):
     results = json.loads(results_path.read_text(encoding='utf-8'))
     config = json.loads((root / 'source/config.json').read_text(encoding='utf-8'))
     token_file = root / 'source/assignment.token'
-    manifest = get_assignment_config(backend_url=config['backend_url'], token_file=token_file)
     deadline = started + 300
     # Re-running just the hook replaces its own rows, never functional rows.
     tests = results.setdefault('tests', [])
@@ -198,6 +197,12 @@ def add_feedback(root=Path('/autograder'), *, run_id=None):
     results['tests'] = [row for row in tests if not row.get('extra_data', {}).get('ai_feedback')]
     instructor_results = []
     unscored_feedback = []
+    try:
+        manifest = get_assignment_config(backend_url=config['backend_url'], token_file=token_file)
+    except ClientError as exc:
+        manifest = {'targets': {}}
+        unscored_feedback.append(feedback_row('AI Feedback',
+            'AI feedback is unavailable. Your functional-test score is unchanged.\n' + str(exc), {}))
     for target_id, target in manifest['targets'].items():
         name = f"AI Feedback: {target['identifier']}"
         scored = target.get('max_score') is not None
