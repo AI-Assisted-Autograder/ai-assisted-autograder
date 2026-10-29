@@ -1,9 +1,7 @@
 """Gemini adapter for an injected Vertex client or a Gemini API-key client."""
 
-import json
 from math import isfinite
 import os
-from pathlib import Path
 
 import httpx
 from google import genai
@@ -15,9 +13,6 @@ from .FeedbackParser import parse_feedback
 from .ILLMProvider import ProviderError
 
 
-LOCAL_CONFIG_PATH = Path(__file__).with_name(".gemini.json")
-
-
 class GeminiProvider:
     name = "GOOGLE"
 
@@ -27,8 +22,8 @@ class GeminiProvider:
         *,
         client: genai.Client | None = None,
         api_key: str | None = None,
-        timeout_seconds: float = 60.0,
-        max_output_tokens: int = 4096,
+        timeout_seconds: float = 240.0,
+        max_output_tokens: int = 16_384,
         builder: PromptBuilder | None = None,
     ) -> None:
         # An injected backend client must never consult legacy caller credentials.
@@ -37,12 +32,6 @@ class GeminiProvider:
             (os.getenv("GEMINI_API_KEY") or os.getenv("GOOGLE_API_KEY"))
             if client is None else None
         )
-        if client is None and (model is None or api_key is None) and LOCAL_CONFIG_PATH.is_file():
-            config = json.loads(LOCAL_CONFIG_PATH.read_text(encoding="utf-8"))
-            if model is None:
-                model = config.get("model")
-            if api_key is None:
-                api_key = config.get("api_key")
         if not model or not model.strip():
             raise ValueError("model must be configured explicitly")
         if not isfinite(timeout_seconds) or timeout_seconds <= 0:
@@ -114,7 +103,10 @@ class GeminiProvider:
                     ),
                     response_json_schema=response_json_schema,
                     max_output_tokens=self._max_output_tokens,
-                    candidate_count=1,
+                    temperature=(
+                        None if self.model.startswith("gemini-3.8-")
+                        else req.analysis.temperature
+                    ),
                     automatic_function_calling=types.AutomaticFunctionCallingConfig(
                         disable=True,
                     ),
@@ -129,6 +121,10 @@ class GeminiProvider:
                 "provider_unavailable", "Could not reach Gemini.", retryable=True,
             ) from None
         except errors.APIError as exc:
+            if exc.code in (408, 504):
+                raise ProviderError(
+                    "timeout", f"Gemini request timed out (HTTP {exc.code}).", retryable=True,
+                ) from None
             retryable = exc.code in (408, 429) or 500 <= exc.code < 600
             raise ProviderError(
                 "provider_error", f"Gemini rejected the request (HTTP {exc.code}).",
@@ -157,7 +153,8 @@ class GeminiProvider:
             raise ProviderError("provider_refusal", "Gemini declined this request.")
         if candidate.finish_reason != types.FinishReason.STOP:
             raise ProviderError(
-                "incomplete_provider_response", "Gemini did not finish generating feedback.",
+                "incomplete_provider_response",
+                f"Gemini did not finish generating feedback ({candidate.finish_reason}).",
             )
         # Exclude thinking parts; neither tool calls nor thoughts are feedback.
         parts = candidate.content.parts if candidate.content else []

@@ -33,6 +33,7 @@ MESSAGES = {
     "assignment_forbidden": "Assignment is unavailable.",
     "target_forbidden": "Target is not available for this assignment.",
     "assignment_config_unavailable": "Database assignment configuration is unavailable.",
+    "config_changed": "Assignment configuration changed. Fetch the current configuration and retry.",
     "invalid_request": "Request fields or JSON are invalid.",
     "input_too_large": "Input exceeds the backend limit.",
     "quota_exceeded": "Assignment call quota is exhausted.",
@@ -51,6 +52,7 @@ class FeedbackInput(BaseModel):
     model_config = ConfigDict(extra="forbid", strict=True)
     request_id: str = Field(min_length=1, max_length=128, pattern=r"^[A-Za-z0-9_.:-]+$")
     target_id: str = Field(min_length=1, max_length=128, pattern=r"^[A-Za-z0-9_.:-]+$")
+    config_revision: str | None = Field(default=None, pattern=r"^[0-9a-f]{64}$")
     code: str | None = Field(default=None, min_length=1)
     files: list[CodeFile] = Field(default_factory=list, max_length=64)
     evidence: list[Evidence] = Field(default_factory=list, max_length=256)
@@ -76,6 +78,15 @@ class FeedbackInput(BaseModel):
 
 def matches_path(path: str, patterns: tuple[str, ...]) -> bool:
     return any(FileResolver._matches(path, pattern) for pattern in patterns)
+
+
+def assignment_revision(assignment) -> str:
+    """Bind collected inputs and replay IDs to the grading configuration."""
+    content = {"assignment": assignment.model_dump(mode="json"),
+               "prompts": [PromptBuilder.version, PromptBuilder.extended_version,
+                           PromptBuilder.per_test_version]}
+    canonical = json.dumps(content, sort_keys=True, separators=(",", ":"), ensure_ascii=False)
+    return hashlib.sha256(canonical.encode("utf-8")).hexdigest()
 
 
 def resolve_input(payload: FeedbackInput, target) -> ResolvedSource:
@@ -156,12 +167,15 @@ def create_feedback_router(state_path: str | Path, *, assignment_loader,
         runtime.provider_lock = threading.Lock()
         runtime.inflight = 0
         runtime.tasks = set()
+        runtime.jobs = set()
         pool = ThreadPoolExecutor(max_workers=store.config.max_concurrency,
                                   thread_name_prefix="feedback")
         runtime.pool = pool
         try:
             yield
         finally:
+            if runtime.jobs:
+                await asyncio.gather(*list(runtime.jobs), return_exceptions=True)
             # A timed-out HTTP request may still have a running SDK call. Retain
             # its slot and worker lock until it exits; never start an extra call.
             if runtime.tasks:
@@ -175,6 +189,49 @@ def create_feedback_router(state_path: str | Path, *, assignment_loader,
             store.close()
 
     router = APIRouter(lifespan=lifespan)
+
+    def authenticate(request):
+        headers = request.headers.getlist("authorization")
+        if len(headers) != 1:
+            raise StoreError("unauthorized", 401)
+        scheme, _, token = headers[0].partition(" ")
+        if scheme.lower() != "bearer" or not token or len(token) > 256 or not token.isascii():
+            raise StoreError("unauthorized", 401)
+        return runtime.store.authenticate(token)
+
+    async def load_assignment(assignment_id):
+        try:
+            assignment = await asyncio.to_thread(assignment_loader, assignment_id)
+            if assignment.id != assignment_id or not assignment.enabled:
+                raise StoreError("assignment_forbidden", 403)
+            if assignment.model not in runtime.store.config.allowed_models.get(assignment.engine, []):
+                raise StoreError("assignment_config_unavailable", 503)
+            return assignment
+        except StoreError:
+            raise
+        except Exception:
+            raise StoreError("assignment_config_unavailable", 503) from None
+
+    @router.get("/v1/assignment/config")
+    async def assignment_config(request: Request):
+        """Return collection rules for the authenticated assignment, without using quota."""
+        try:
+            assignment = await load_assignment(authenticate(request))
+        except StoreError as exc:
+            return error(exc.code, exc.status_code)
+        targets = {}
+        for target_id, target in assignment.targets.items():
+            analysis = asdict(target.analysis)
+            targets[target_id] = {
+                "identifier": target.identifier, "kind": target.kind,
+                "source_path": target.source_path, "max_score": target.max_score,
+                "analysis": {key: analysis[key] for key in (
+                    "mode", "source_globs", "context_globs", "evidence_sources", "max_source_files",
+                )},
+            }
+        return JSONResponse({"assignment_id": assignment.id,
+                             "revision": assignment_revision(assignment), "targets": targets},
+                            headers={"Cache-Control": "no-store"})
 
     async def read_body(request, limit):
         body = bytearray()
@@ -196,17 +253,65 @@ def create_feedback_router(state_path: str | Path, *, assignment_loader,
             raise TimeoutError
         return provider.generate_feedback(grading_request)
 
+    def processing_response(request_id):
+        return JSONResponse(
+            {"request_id": request_id, "status": "processing"}, status_code=202,
+            headers={"Cache-Control": "no-store", "Retry-After": "2",
+                     "Preference-Applied": "respond-async"},
+        )
+
+    async def finish_feedback(future, assignment_id, rid, assignment, target, timeout):
+        store = runtime.store
+        try:
+            response = await asyncio.wait_for(asyncio.shield(future), timeout)
+            if (target.max_score is not None and response.suggested_score is not None
+                    and response.suggested_score > target.max_score):
+                raise ProviderError("invalid_provider_response", "Suggested score exceeds the configured maximum.")
+            result = {
+                "request_id": rid, "status": "completed",
+                "engine": assignment.engine, "provider": assignment.provider,
+                "requested_model": assignment.model,
+                "feedback_text": response.feedback_text, "model_name": response.model_name,
+                "usage": {"input_tokens": response.input_tokens,
+                          "output_tokens": response.output_tokens},
+            }
+            if response.items:
+                result["items"] = [asdict(item) for item in response.items]
+            if target.max_score is not None:
+                result["suggested_score"] = response.suggested_score
+                result["max_score"] = target.max_score
+            store.complete(assignment_id, rid, result)
+            return JSONResponse(result, headers={"Cache-Control": "no-store"})
+        except asyncio.CancelledError:
+            # Only cancellation of the job itself interrupts generation; an HTTP
+            # disconnect cannot cancel the independently tracked job.
+            store.fail(assignment_id, rid, code="upstream_timeout")
+            raise
+        except TimeoutError:
+            code = "upstream_timeout"
+        except ProviderError as exc:
+            LOG.warning("feedback_provider_failed request_id=%s code=%s message=%s",
+                        rid, exc.code, exc.message)
+            code = ("upstream_timeout" if exc.code == "timeout" else
+                    "backend_auth_unavailable" if exc.code == "backend_auth_unavailable" else "model_error")
+        except Exception:
+            code = "model_error"
+        try:
+            store.fail(assignment_id, rid, code=code)
+        except Exception:
+            return error("backend_error", 500, rid)
+        LOG.warning("feedback_request_failed code=%s request_id=%s", code, rid)
+        return error(code, 504 if code == "upstream_timeout" else 502, rid)
+
     async def handle_feedback(request: Request):
         store = runtime.store
         config = store.config
-        headers = request.headers.getlist("authorization")
-        if len(headers) != 1:
-            return error("unauthorized", 401)
-        scheme, _, token = headers[0].partition(" ")
-        if scheme.lower() != "bearer" or not token or len(token) > 256 or not token.isascii():
-            return error("unauthorized", 401)
+        respond_async = "respond-async" in {
+            preference.strip().lower()
+            for preference in request.headers.get("prefer", "").split(",")
+        }
         try:
-            assignment_id = store.authenticate(token)
+            assignment_id = authenticate(request)
         except StoreError as exc:
             return error(exc.code, exc.status_code)
 
@@ -227,39 +332,15 @@ def create_feedback_router(state_path: str | Path, *, assignment_loader,
                 or len(payload.guidance or "") > config.max_guidance_chars):
             return error("input_too_large", 413, rid)
         try:
-            assignment = await asyncio.to_thread(assignment_loader, assignment_id)
-            if assignment.id != assignment_id or not assignment.enabled:
-                return error("assignment_forbidden", 403, rid)
-            if assignment.model not in config.allowed_models.get(assignment.engine, []):
-                return error("assignment_config_unavailable", 503, rid)
+            assignment = await load_assignment(assignment_id)
         except StoreError as exc:
             return error(exc.code, exc.status_code, rid)
-        except Exception:
-            return error("assignment_config_unavailable", 503, rid)
         target = assignment.targets.get(payload.target_id)
         if target is None:
             return error("target_forbidden", 403, rid)
-        guidance = target.rubric.feedback_guidance
-        if payload.guidance:
-            guidance += "\nOptional client feedback guidance:\n" + payload.guidance
-        try:
-            resolved = resolve_input(payload, target)
-            grading_request = FeedbackRequest(
-                target=GradingTarget(identifier=target.identifier, kind=TargetKind(target.kind),
-                                     id=payload.target_id, max_score=target.max_score),
-                rubric=Rubric(criteria_text=target.rubric.criteria_text, feedback_guidance=guidance,
-                              id=target.rubric.id, version=target.rubric.version,
-                              grading_target_id=payload.target_id),
-                resolved=resolved, analysis=target.analysis, evidence=tuple(payload.evidence),
-                functional_test_feedback=tuple(payload.functional_test_feedback),
-            )
-        except ValueError:
-            return error("invalid_request", 422, rid)
-        try:
-            PromptBuilder().prepare(grading_request)
-        except ValueError:
-            return error("input_too_large", 413, rid)
         content = payload.model_dump(mode="json", exclude={"request_id"})
+        if payload.config_revision is None:
+            content.pop("config_revision")
         content["guidance"] = payload.guidance or ""
         # Keep legacy code requests byte-for-byte compatible with stored digests.
         for field in ("files", "evidence"):
@@ -272,10 +353,38 @@ def create_feedback_router(state_path: str | Path, *, assignment_loader,
         canonical = json.dumps(content,
                                sort_keys=True, separators=(",", ":"), ensure_ascii=False)
         digest = hashlib.sha256(canonical.encode("utf-8")).hexdigest()
+        try:
+            existing = store.get_request(assignment_id, rid)
+        except StoreError as exc:
+            return error(exc.code, exc.status_code, rid)
+        # An accepted request retains its configuration snapshot while polling.
+        # Current assignment/target authorization above still applies to replays.
+        if existing is None:
+            if payload.config_revision is not None and payload.config_revision != assignment_revision(assignment):
+                return error("config_changed", 409, rid)
+            guidance = target.rubric.feedback_guidance
+            if payload.guidance:
+                guidance += "\nOptional client feedback guidance:\n" + payload.guidance
+            try:
+                resolved = resolve_input(payload, target)
+                grading_request = FeedbackRequest(
+                    target=GradingTarget(identifier=target.identifier, kind=TargetKind(target.kind),
+                                         id=payload.target_id, max_score=target.max_score),
+                    rubric=Rubric(criteria_text=target.rubric.criteria_text, feedback_guidance=guidance,
+                                  id=target.rubric.id, version=target.rubric.version,
+                                  grading_target_id=payload.target_id),
+                    resolved=resolved, analysis=target.analysis, evidence=tuple(payload.evidence),
+                    functional_test_feedback=tuple(payload.functional_test_feedback),
+                )
+            except ValueError:
+                return error("invalid_request", 422, rid)
+            try:
+                PromptBuilder().prepare(grading_request)
+            except ValueError:
+                return error("input_too_large", 413, rid)
         # No await between checking capacity, reserving quota and occupying it.
         # Replays must still work at full capacity and after quota exhaustion.
         try:
-            existing = store.get_request(assignment_id, rid)
             if existing is None and runtime.inflight >= config.max_concurrency:
                 return error("busy", 429, rid)
             record, created = store.reserve(assignment_id, rid, digest, payload.target_id,
@@ -290,6 +399,8 @@ def create_feedback_router(state_path: str | Path, *, assignment_loader,
                 result = {"engine": record.engine, "provider": record.provider,
                           "requested_model": record.model, **record.result}
                 return JSONResponse(result, headers={"Cache-Control": "no-store"})
+            if record.status == "processing" and respond_async:
+                return processing_response(rid)
             if record.status in ("processing", "interrupted"):
                 return error(record.status, 409, rid)
             code = record.error_code or "model_error"
@@ -310,43 +421,20 @@ def create_feedback_router(state_path: str | Path, *, assignment_loader,
                 done.exception()
 
         future.add_done_callback(release)
-        try:
-            response = await asyncio.wait_for(asyncio.shield(future), config.timeout_seconds)
-            if (target.max_score is not None and response.suggested_score is not None
-                    and response.suggested_score > target.max_score):
-                raise ProviderError("invalid_provider_response", "Suggested score exceeds the configured maximum.")
-            result = {
-                "request_id": rid, "status": "completed",
-                "engine": assignment.engine, "provider": assignment.provider,
-                "requested_model": assignment.model,
-                "feedback_text": response.feedback_text, "model_name": response.model_name,
-                "usage": {"input_tokens": response.input_tokens,
-                          "output_tokens": response.output_tokens},
-            }
-            if response.items:
-                result["items"] = [asdict(item) for item in response.items]
-            if target.max_score is not None:
-                result["suggested_score"] = response.suggested_score
-                result["max_score"] = target.max_score
-            store.complete(assignment_id, rid, result)
-            return JSONResponse(result, headers={"Cache-Control": "no-store"})
-        except asyncio.CancelledError:
-            # A disconnect/shutdown cannot release quota or cancel the SDK call.
-            store.fail(assignment_id, rid, code="upstream_timeout")
-            raise
-        except TimeoutError:
-            code = "upstream_timeout"
-        except ProviderError as exc:
-            code = ("upstream_timeout" if exc.code == "timeout" else
-                    "backend_auth_unavailable" if exc.code == "backend_auth_unavailable" else "model_error")
-        except Exception:
-            code = "model_error"
-        try:
-            store.fail(assignment_id, rid, code=code)
-        except Exception:
-            return error("backend_error", 500, rid)
-        LOG.warning("feedback_request_failed code=%s", code)
-        return error(code, 504 if code == "upstream_timeout" else 502, rid)
+        job = asyncio.create_task(finish_feedback(
+            future, assignment_id, rid, assignment, target, config.timeout_seconds,
+        ))
+        runtime.jobs.add(job)
+
+        def forget_job(done):
+            runtime.jobs.discard(done)
+            if not done.cancelled() and done.exception() is not None:
+                LOG.error("feedback_job_failed")
+
+        job.add_done_callback(forget_job)
+        if respond_async:
+            return processing_response(rid)
+        return await asyncio.shield(job)
 
     @router.post("/v1/feedback")
     async def feedback(request: Request):

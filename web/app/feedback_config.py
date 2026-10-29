@@ -1,5 +1,6 @@
 """Validated database configuration and backend-owned runtime state records."""
 
+from dataclasses import replace
 from datetime import datetime
 from decimal import Decimal
 from pathlib import PurePosixPath
@@ -7,9 +8,10 @@ import re
 from typing import Annotated, Any, Literal
 from uuid import UUID
 
-from pydantic import AfterValidator, BaseModel, ConfigDict, Field, field_validator, model_validator
+from pydantic import AfterValidator, BaseModel, ConfigDict, Field, TypeAdapter, field_validator, model_validator
 
-from ai_grading.models import AnalysisConfig, Score
+from ai_grading.FileResolver import FileResolver
+from ai_grading.models import AnalysisConfig, Score, TargetKind
 
 
 Identifier = Annotated[str, Field(min_length=1, max_length=128, pattern=r"^[A-Za-z0-9_.:-]+$")]
@@ -30,8 +32,8 @@ class BackendConfig(StrictModel):
     allowed_models: Annotated[dict[Engine, ModelList], Field(min_length=1)]
     max_code_chars: int = Field(default=12_000, ge=1, le=120_000)
     max_guidance_chars: int = Field(default=2_000, ge=0, le=16_000)
-    max_output_tokens: int = Field(default=1_024, ge=1, le=8_192)
-    timeout_seconds: float = Field(default=30.0, gt=0, le=300)
+    max_output_tokens: int = Field(default=16_384, ge=1, le=65_536)
+    timeout_seconds: float = Field(default=240.0, gt=0, le=300)
     max_concurrency: int = Field(default=2, ge=1, le=64)
     max_body_bytes: int = Field(default=65_536, ge=1, le=1_048_576)
 
@@ -97,13 +99,23 @@ def validate_analysis(value: AnalysisConfig) -> AnalysisConfig:
 Analysis = Annotated[AnalysisConfig, AfterValidator(validate_analysis)]
 
 
-def validate_target_scoring(target):
-    points = target.analysis.points_per_test
-    if points is not None:
-        expected = Decimal(str(points)) * len(target.analysis.expected_tests)
-        if target.max_score is None or Decimal(str(target.max_score)) != expected:
-            raise ValueError("max_score must equal points_per_test times the expected test count")
-    return target
+def resolve_target_analysis(identifier: str, kind: str, language: str,
+                            analysis: dict | AnalysisConfig) -> AnalysisConfig:
+    """Use explicit collection rules, or resolve a basic Web target's source file."""
+    value = TypeAdapter(Analysis).validate_python(analysis)
+    if value.source_globs:
+        return value
+    if kind == "FILE":
+        patterns = (FileResolver._relative_pattern(identifier),)
+    elif language.casefold() == "java":
+        patterns = tuple("**/" + name for name in sorted(
+            FileResolver._java_source_names(identifier, TargetKind(kind))))
+    elif language.casefold() == "python":
+        patterns = (FileResolver._python_source_path(identifier),)
+    else:
+        raise ValueError("Use a FILE target or specify source patterns for this language")
+    return validate_analysis(replace(value, source_globs=patterns,
+                                     max_source_files=value.max_source_files or 1))
 
 
 class RubricInput(StrictModel):
@@ -116,17 +128,27 @@ class RubricConfig(RubricInput):
     id: Identifier
 
 
-class TargetConfig(StrictModel):
+class TargetSettings(StrictModel):
+    """Target fields shared by Web forms, API creation and database reads."""
+
     identifier: str = Field(min_length=1, max_length=256, pattern=r"\S")
     kind: Literal["FILE", "METHOD", "CLASS"]
-    source_path: str = Field(min_length=1, max_length=256)
-    rubric: RubricConfig
     analysis: Analysis = Field(default_factory=AnalysisConfig)
     max_score: Score | None = None
 
     @model_validator(mode="after")
     def scoring(self):
-        return validate_target_scoring(self)
+        points = self.analysis.points_per_test
+        if points is not None:
+            expected = Decimal(str(points)) * len(self.analysis.expected_tests)
+            if self.max_score is None or Decimal(str(self.max_score)) != expected:
+                raise ValueError("max_score must equal points_per_test times the expected test count")
+        return self
+
+
+class TargetConfig(TargetSettings):
+    source_path: str = Field(min_length=1, max_length=256)
+    rubric: RubricConfig
 
 
 class AssignmentConfig(StrictModel):
@@ -151,16 +173,9 @@ class CourseInput(StrictModel):
     term: str | None = Field(default=None, max_length=128)
 
 
-class TargetInput(StrictModel):
-    identifier: str = Field(min_length=1, max_length=256, pattern=r"\S")
+class TargetInput(TargetSettings):
     kind: Literal["FILE", "METHOD", "CLASS"] = "FILE"
     rubric: RubricInput
-    analysis: Analysis = Field(default_factory=AnalysisConfig)
-    max_score: Score | None = None
-
-    @model_validator(mode="after")
-    def scoring(self):
-        return validate_target_scoring(self)
 
 
 class AssignmentCreateInput(StrictModel):

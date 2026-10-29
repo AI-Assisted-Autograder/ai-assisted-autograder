@@ -8,6 +8,7 @@ from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from decimal import Decimal
 
+from app.feedback_config import RubricInput
 from app.models import GRADING_MODES, TEST_STATUSES
 from app.repository.base import (
     Action,
@@ -39,6 +40,7 @@ from app.repository.base import (
     assignment_sort_key,
     check_assignment_fields,
     check_gradable,
+    check_target_analysis,
     check_target_fields,
     clean,
     derive_action,
@@ -607,15 +609,21 @@ class InMemoryRepository(IGradingRepository):
         identifier: str,
         kind: str,
         max_score: Decimal | None,
+        analysis_config: dict | None = None,
     ) -> uuid.UUID:
         identifier = check_target_fields(identifier, kind, max_score)
         if assignment_id not in self.assignments:
             raise NotFoundError(f"Assignment {assignment_id} not found")
+        if analysis_config:
+            analysis_config = check_target_analysis(
+                identifier, kind, self.assignments[assignment_id].language, analysis_config, max_score,
+            )
         registered = self._registered(assignment_id)
         if any(gt.identifier == identifier for gt in registered):
             raise ConflictError(f"Target {identifier!r} is already registered on this assignment")
         last = max((gt.display_order or 0 for gt in registered), default=0)
-        return self.add_grading_target(assignment_id, identifier, last + 1, kind=kind, max_score=max_score)
+        return self.add_grading_target(assignment_id, identifier, last + 1, kind=kind, max_score=max_score,
+                                       analysis_config=analysis_config)
 
     def delete_target(self, assignment_id: uuid.UUID, target_id: uuid.UUID) -> None:
         gt = self.grading_targets.get(target_id)
@@ -632,11 +640,23 @@ class InMemoryRepository(IGradingRepository):
         *,
         criteria_text: str,
         feedback_guidance: str | None,
+        analysis_config: dict | None = None,
+        max_score: Decimal | None = None,
     ) -> RubricConfig:
         criteria_text = required(criteria_text, "Criteria")
         feedback_guidance = clean(feedback_guidance)
+        RubricInput(criteria_text=criteria_text, feedback_guidance=feedback_guidance or "")
         if grading_target_id not in self.grading_targets:
             raise NotFoundError(f"Grading target {grading_target_id} not found")
+        target = self.grading_targets[grading_target_id]
+        if analysis_config is None:
+            analysis_config, max_score = target.analysis_config, target.max_score
+        check_target_fields(target.identifier, target.kind, max_score)
+        target.analysis_config = check_target_analysis(
+            target.identifier, target.kind, self.assignments[target.assignment_id].language,
+            analysis_config, max_score,
+        )
+        target.max_score = max_score
         current = self._current_rubric(grading_target_id)
         if current is not None and (current.criteria_text, current.feedback_guidance) == (
             criteria_text,

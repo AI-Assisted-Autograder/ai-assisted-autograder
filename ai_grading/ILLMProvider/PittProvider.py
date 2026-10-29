@@ -18,8 +18,8 @@ class PittProvider:
         *,
         api_key: str | None = None,
         provider: str = "PITT",
-        timeout_seconds: float = 60.0,
-        max_output_tokens: int = 4096,
+        timeout_seconds: float = 240.0,
+        max_output_tokens: int = 16_384,
         builder: PromptBuilder | None = None,
     ) -> None:
         if not model or not model.strip():
@@ -49,18 +49,21 @@ class PittProvider:
 
     def generate_feedback(self, req: FeedbackRequest) -> FeedbackResponse:
         prompt = self._builder.prepare(req)
+        payload = {
+            "model": self.model,
+            "messages": [
+                {"role": "system", "content": prompt.system_instruction},
+                {"role": "user", "content": prompt.context},
+            ],
+            "max_tokens": self._max_output_tokens,
+            "stream": False,
+        }
+        if req.analysis.temperature is not None:
+            payload["temperature"] = req.analysis.temperature
         try:
             response = self._client.post(
                 "https://api.portkey.ai/v1/chat/completions",
-                json={
-                    "model": self.model,
-                    "messages": [
-                        {"role": "system", "content": prompt.system_instruction},
-                        {"role": "user", "content": prompt.context},
-                    ],
-                    "max_tokens": self._max_output_tokens,
-                    "stream": False,
-                },
+                json=payload,
             )
         except httpx.TimeoutException:
             raise ProviderError(

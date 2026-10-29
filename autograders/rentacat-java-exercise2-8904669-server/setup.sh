@@ -1,4 +1,5 @@
 #!/usr/bin/env bash
+chmod 600 /autograder/source/assignment.token
 
 apt-get update
 apt-get -y install openjdk-11-jdk maven bash python3

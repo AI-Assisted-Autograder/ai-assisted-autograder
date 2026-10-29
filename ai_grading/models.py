@@ -63,7 +63,7 @@ class EvidenceSource:
 
 @dataclass(frozen=True, config=CONTRACT_CONFIG)
 class AnalysisConfig:
-    """Backend-owned analysis instructions and artifact selection."""
+    """Backend-owned analysis instructions, artifact selection and generation options."""
 
     mode: Literal["code_feedback", "testplan", "test_quality"] = "code_feedback"
     source_globs: tuple[Identifier, ...] = ()
@@ -73,6 +73,7 @@ class AnalysisConfig:
     evidence_sources: tuple[EvidenceSource, ...] = ()
     points_per_test: Score | None = None
     max_source_files: Annotated[int, Field(strict=True, ge=1, le=64)] | None = None
+    temperature: Annotated[float, Field(strict=True, ge=0, le=2)] | None = None
 
     def __post_init__(self) -> None:
         if len(self.expected_tests) != len(set(self.expected_tests)):

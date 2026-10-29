@@ -131,7 +131,7 @@
         <p class="empty">No rubric yet. This target cannot be graded until it has one.</p>
         {% endif %}
         <div class="card-action">
-            <a href="/assignments/{{ assignment.id }}/targets/{{ t.id }}/rubric">{{ "Edit rubric" if t.rubric else "Write rubric" }}</a>
+            <a href="/assignments/{{ assignment.id }}/targets/{{ t.id }}/rubric">{{ "Edit configuration" if t.rubric else "Configure target" }}</a>
             <form method="post" action="/assignments/{{ assignment.id }}/targets/{{ t.id }}/delete"
                 data-confirm="Delete target {{ t.identifier }} and its rubric?" onsubmit="return confirm(this.dataset.confirm)">
                 <button type="submit" class="link danger">Delete target</button>
@@ -150,7 +150,7 @@
     <label class="grow">
         Identifier
         <input name="identifier" value="{{ target_form.identifier or '' }}" required
-            placeholder="{{ 'edu.pitt.cs.Statistics#median' if assignment.language == 'JAVA' else 'calculator.add' }}">
+            placeholder="{{ 'edu.pitt.cs.Statistics#median' if assignment.language == 'JAVA' else 'calculator.py:add' if assignment.language == 'PYTHON' else 'src/main.ts' if assignment.language == 'TYPESCRIPT' else 'src/main.js' }}">
     </label>
     <label>
         Kind
@@ -164,11 +164,16 @@
         Max score (optional)
         <input name="max_score" value="{{ target_form.max_score or '' }}" inputmode="decimal">
     </label>
+    <label class="grow">
+        Primary source patterns (optional)
+        <textarea name="source_globs" rows="2" placeholder="src/**/*.java">{{ target_form.source_globs or '' }}</textarea>
+    </label>
     <button type="submit">Add target</button>
 </form>
 <p class="hint">
-    A method or class identifier names the code; its source file is found from it.
-    A file target's identifier is itself a glob, such as <code>src/**/*.java</code>, and must match exactly one file.
+    You can add a target before choosing its source files, then configure its rubric, source selection and runtime evidence.
+    Enter one submission-relative source pattern per line, or leave patterns blank to locate one file from the identifier and assignment language.
+    Source selection must be valid when you save the configuration before this target can be graded.
 </p>
 
 <h2>LLM providers</h2>

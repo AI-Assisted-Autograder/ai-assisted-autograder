@@ -46,6 +46,8 @@ def _private_auth_logs():
 
 
 class VertexProvider:
+    name = GeminiProvider.name
+
     @_private_auth_logs()
     def __init__(
         self,
@@ -54,8 +56,8 @@ class VertexProvider:
         project: str,
         location: str,
         service_account: str,
-        timeout_seconds: float = 60.0,
-        max_output_tokens: int = 4096,
+        timeout_seconds: float = 240.0,
+        max_output_tokens: int = 16_384,
     ) -> None:
         self._client = None
         try:
@@ -84,6 +86,7 @@ class VertexProvider:
                 timeout_seconds=timeout_seconds,
                 max_output_tokens=max_output_tokens,
             )
+            self.model = self._provider.model
         except Exception:
             try:
                 self.close()
@@ -106,3 +109,6 @@ class VertexProvider:
         if self._client is not None:
             self._client.close()
             self._client = None
+
+    def estimated_cost(self, request):
+        return self._provider.estimated_cost(request)

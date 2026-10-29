@@ -1,7 +1,7 @@
 """Collect configured evidence and append backend feedback to Gradescope results.
 
 This module and local_client.py use only the standard library. Assignment-specific
-file and report selection comes from the backend configuration exported at build time.
+file and report selection is read from the backend at the start of each run.
 """
 
 import argparse
@@ -14,7 +14,9 @@ import sys
 import time
 import xml.etree.ElementTree as ET
 
-from local_client import ClientError, MAX_FILES_BYTES, request_feedback, stable_request_id
+from local_client import (
+    ClientError, MAX_FILES_BYTES, get_assignment_config, request_feedback, stable_request_id,
+)
 
 
 MAX_ARTIFACT_BYTES = 2 * 1024 * 1024
@@ -64,19 +66,21 @@ def report_rows(text, format_name):
     """Yield (kind, test_id, scope, status, summary) without inferring test coverage."""
     if format_name == 'gradescope':
         results = json.loads(text)
+        visibility = results.get('visibility', results.get('test_visibility', 'visible'))
         functional_rows = [row for row in results.get('tests', [])
                            if not row.get('extra_data', {}).get('ai_feedback')]
         for row in functional_rows:
-            if row.get('visibility', results.get('test_visibility', 'visible')) != 'visible':
+            if row.get('visibility', visibility) != 'visible':
                 continue
             name = str(row.get('name', 'Unnamed functional result'))
             score, maximum = row.get('score'), row.get('max_score')
-            status = 'unknown'
-            if isinstance(score, (int, float)) and isinstance(maximum, (int, float)) and maximum > 0:
+            status = {'passed': 'pass', 'failed': 'fail'}.get(row.get('status'), 'unknown')
+            if (status == 'unknown' and isinstance(score, (int, float))
+                    and isinstance(maximum, (int, float)) and maximum > 0):
                 status = 'pass' if score >= maximum else 'fail'
             yield ('runtime', name, '', status,
                    f"Reported score: {score}/{maximum}.\n{row.get('output', '')}")
-        if not functional_rows and results.get('output'):
+        if not functional_rows and visibility == 'visible' and results.get('output'):
             yield ('runtime', 'execution', '', 'unknown', str(results['output']))
     elif format_name == 'junit':
         tree = ET.fromstring(text)
@@ -123,13 +127,14 @@ def report_rows(text, format_name):
 
 def collect_evidence(root, analysis):
     evidence = []
-    for source in analysis.get('evidence_sources', []):
+    for source_index, source in enumerate(analysis.get('evidence_sources', [])):
         label = source['label']
+        source_id = f'source-{source_index}'
         try:
             raw = read_artifact(root, source['path'])
             rows = list(report_rows(raw, source['format']))
         except (OSError, ValueError, KeyError, ET.ParseError, ClientError):
-            evidence.append({'id': label + ':unavailable', 'kind': 'diagnostic', 'source': label,
+            evidence.append({'id': source_id + ':unavailable', 'kind': 'diagnostic', 'source': label,
                              'summary': 'The configured artifact is missing, unreadable or invalid; no execution outcome can be inferred.',
                              'scope': label, 'status': 'unknown'})
             continue
@@ -142,11 +147,11 @@ def collect_evidence(root, analysis):
                 continue
             if len(summary) > MAX_SUMMARY_CHARS:
                 summary = summary[:MAX_SUMMARY_CHARS] + '\n[Evidence excerpt truncated.]'
-            evidence.append({'id': f'{label}:{index}', 'kind': kind, 'source': label,
+            evidence.append({'id': f'{source_id}:{index}', 'kind': kind, 'source': label,
                              'summary': summary, 'test_id': test_id, 'scope': scope, 'status': status})
             selected += 1
         if not selected:
-            evidence.append({'id': label + ':empty', 'kind': 'diagnostic', 'source': label,
+            evidence.append({'id': source_id + ':empty', 'kind': 'diagnostic', 'source': label,
                              'summary': 'No matching observations were present in the configured artifact; no pass or failure is inferred.',
                              'scope': label, 'status': 'unknown'})
     if len(evidence) > 256:
@@ -184,53 +189,72 @@ def add_feedback(root=Path('/autograder'), *, run_id=None):
     results_path = root / 'results/results.json'
     results = json.loads(results_path.read_text(encoding='utf-8'))
     config = json.loads((root / 'source/config.json').read_text(encoding='utf-8'))
-    manifest = json.loads((root / 'source/ai_feedback.json').read_text(encoding='utf-8'))
-    deadline = started + manifest.get('total_timeout', 300)
+    token_file = root / 'source/assignment.token'
+    deadline = started + 300
     # Re-running just the hook replaces its own rows, never functional rows.
     tests = results.setdefault('tests', [])
     previous_ai = [row for row in tests if row.get('extra_data', {}).get('ai_feedback')]
     results['tests'] = [row for row in tests if not row.get('extra_data', {}).get('ai_feedback')]
     instructor_results = []
+    unscored_feedback = []
+    try:
+        manifest = get_assignment_config(backend_url=config['backend_url'], token_file=token_file)
+    except ClientError as exc:
+        manifest = {'targets': {}}
+        unscored_feedback.append(feedback_row('AI Feedback',
+            'AI feedback is unavailable. Your functional-test score is unchanged.\n' + str(exc), {}))
     for target_id, target in manifest['targets'].items():
         name = f"AI Feedback: {target['identifier']}"
+        scored = target.get('max_score') is not None
         try:
             if time.monotonic() >= deadline:
                 raise ClientError('The total AI feedback time budget was exhausted.')
             files = collect_files(root / 'submission', target['analysis'])
             evidence = collect_evidence(root, target['analysis'])
             request_id = stable_request_id(target_id, files=files, evidence=evidence,
-                                           namespace=run_id or manifest.get('request_namespace', ''))
+                                           namespace=f"{manifest['revision']}:{run_id or ''}")
             remaining = deadline - time.monotonic()
             if remaining <= 0:
                 raise ClientError('The total AI feedback time budget was exhausted.')
             response = request_feedback(backend_url=config['backend_url'],
-                                        token_file=root / 'source/assignment.token',
+                                        token_file=token_file,
                                         target_id=target_id, files=files, evidence=evidence,
-                                        request_id=request_id, timeout=min(manifest.get('timeout', 150), remaining))
+                                        request_id=request_id, config_revision=manifest['revision'],
+                                        timeout=min(270, remaining))
             metadata = {key: response[key] for key in ('engine', 'provider', 'requested_model',
                                                       'model_name', 'request_id')}
             metadata['target_id'] = target_id
             items = response.get('items', [])
             if target['analysis']['mode'] != 'code_feedback' and not items:
                 raise ClientError('Backend returned no structured feedback for this target.')
-            if items:
+            scored = response.get('max_score') is not None or any(item.get('max_score') is not None for item in items)
+            if scored and items:
                 for item in items:
                     verdict = {'pass': 'Meets the criterion', 'fail': 'Does not meet the criterion',
                                'insufficient_evidence': 'Insufficient evidence'}[item['verdict']]
                     output = verdict + (f"\n{item['feedback']}" if item['feedback'] else '')
                     results['tests'].append(feedback_row(f"{name} / {item['test_id']}", output, metadata,
                                                         score=item.get('suggested_score'), max_score=item.get('max_score')))
-            else:
+            elif scored:
                 results['tests'].append(feedback_row(name, response['feedback_text'], metadata))
+            else:
+                unscored_feedback.append(feedback_row(name, response['feedback_text'], metadata))
             if response.get('suggested_score') is not None and not any(item.get('max_score') is not None for item in items):
                 results['tests'].append(feedback_row(f"AI Score: {target['identifier']}", response['feedback_text'], metadata,
                                                     score=response['suggested_score'], max_score=response['max_score']))
             instructor_results.append({'target_id': target_id, **response})
         except Exception as exc:
             detail = str(exc) if isinstance(exc, ClientError) else 'Could not collect or process configured feedback inputs.'
-            results['tests'].append(feedback_row(name,
+            destination = results['tests'] if scored else unscored_feedback
+            destination.append(feedback_row(name,
                 'AI feedback is unavailable. Your functional-test score is unchanged.\n' + detail,
                 {'target_id': target_id}))
+    if unscored_feedback:
+        output = '\n\n'.join(row['output'] if len(unscored_feedback) == 1 else f"{row['name']}\n{row['output']}"
+                             for row in unscored_feedback)
+        metadata = (unscored_feedback[0]['extra_data'] if len(unscored_feedback) == 1 else
+                    {'targets': [row['extra_data'] for row in unscored_feedback]})
+        results['tests'].append(feedback_row('AI Feedback', output, metadata))
     # Explicit top-level totals override Gradescope row totals. Adjust only our
     # own contribution, preserving the functional grader's original arithmetic.
     new_ai = [row for row in results['tests'] if row.get('extra_data', {}).get('ai_feedback')]
@@ -241,9 +265,10 @@ def add_feedback(root=Path('/autograder'), *, run_id=None):
     evidence_path = root / 'results/ai_evidence.json'
     evidence_path.write_text(json.dumps(instructor_results, ensure_ascii=False, indent=2) + '\n', encoding='utf-8')
     evidence_path.chmod(0o600)
-    for result in instructor_results:
-        for item in result.get('items', []):
-            print(f"Instructor AI evidence [{result['target_id']} / {item['test_id']}]: {item['evidence']}", file=sys.stderr)
+    if results.get('stdout_visibility', 'hidden') == 'hidden':
+        for result in instructor_results:
+            for item in result.get('items', []):
+                print(f"Instructor AI evidence [{result['target_id']} / {item['test_id']}]: {item['evidence']}", file=sys.stderr)
     temporary = results_path.with_suffix('.tmp')
     temporary.write_text(json.dumps(results, ensure_ascii=False, indent=2) + '\n', encoding='utf-8')
     temporary.replace(results_path)

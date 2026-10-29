@@ -110,8 +110,8 @@ def test_backend_config_applies_defaults():
 
     assert config.max_code_chars == 12_000
     assert config.max_guidance_chars == 2_000
-    assert config.max_output_tokens == 1_024
-    assert config.timeout_seconds == 30.0
+    assert config.max_output_tokens == 16_384
+    assert config.timeout_seconds == 240.0
     assert config.max_concurrency == 2
     assert config.max_body_bytes == 65_536
 

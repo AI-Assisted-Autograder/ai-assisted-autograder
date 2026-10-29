@@ -8,9 +8,9 @@ The `tests/` directory contains the project's automated tests, organized by lang
 tests/
 ├── requirements.txt
 ├── unit/
-│   ├── aigradingtest/
+│   ├── ai_grading_test/
 │   │   ...
-│   ├── webtest/
+│   ├── web_test/
 │   │   ...
 │   └── typescript/
 ```
@@ -50,7 +50,7 @@ pip install -r tests/requirements.txt
 From the project root, navigate to the AI grading test directory:
 
 ```bash
-cd tests/unit/aigradingtest
+cd tests/unit/ai_grading_test
 ```
 
 Run the tests:

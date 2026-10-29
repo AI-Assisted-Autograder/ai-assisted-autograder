@@ -10,7 +10,8 @@ from uuid import UUID
 from pydantic import TypeAdapter
 
 from .feedback_config import (
-    AssignmentConfig, Engine, ModelName, RubricConfig, TargetConfig, validate_engine_model,
+    AssignmentConfig, Engine, ModelName, RubricConfig, TargetConfig, resolve_target_analysis,
+    validate_engine_model,
 )
 from .feedback_store import StoreError
 
@@ -63,7 +64,8 @@ def read_assignment_config(repository, assignment_id: str) -> AssignmentConfig:
                 identifier=target.identifier,
                 kind=target.kind,
                 source_path=target.identifier if target.kind == "FILE" else "submitted-source",
-                analysis=target.analysis_config,
+                analysis=resolve_target_analysis(target.identifier, target.kind,
+                                                 assignment.language, target.analysis_config),
                 max_score=float(target.max_score) if target.max_score is not None else None,
                 rubric=RubricConfig(
                     id=str(rubric.id), version=rubric.version,
