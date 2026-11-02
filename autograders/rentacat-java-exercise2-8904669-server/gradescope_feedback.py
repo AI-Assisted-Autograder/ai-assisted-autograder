@@ -1,0 +1,468 @@
+"""Collect configured evidence and append backend feedback to Gradescope results.
+
+This module and local_client.py use only the standard library. Assignment-specific
+file and report selection is read from the backend at the start of each run.
+"""
+
+import argparse
+from copy import deepcopy
+from decimal import Decimal
+import hashlib
+import html
+import json
+import math
+from pathlib import Path, PurePosixPath
+import re
+import sys
+import time
+
+from local_client import (
+    ClientError, ConfigChangedError, MAX_FILES_BYTES, get_assignment_config, request_feedback,
+    stable_request_id,
+)
+
+
+MAX_ARTIFACT_BYTES = 2 * 1024 * 1024
+MAX_SUMMARY_CHARS = 3800
+RESULTS_SOURCE = 'results/results.json'
+
+
+def number(value):
+    return type(value) in (int, float) and math.isfinite(value)
+
+
+def fingerprint(value):
+    return hashlib.sha256(json.dumps(value, sort_keys=True, separators=(',', ':'),
+                                     ensure_ascii=False, allow_nan=False).encode('utf-8')).hexdigest()
+
+
+def row_status(row):
+    status = row.get('status')
+    if status:
+        return {'passed': 'pass', 'failed': 'fail'}.get(status, 'unknown')
+    score, maximum = row.get('score'), row.get('max_score')
+    if number(score) and number(maximum) and maximum > 0:
+        return 'pass' if score >= maximum else 'fail'
+    return 'unknown'
+
+
+def visible_rows(results):
+    visibility = results.get('visibility', results.get('test_visibility', 'visible'))
+    for index, row in enumerate(results.get('tests', [])):
+        if (not row.get('extra_data', {}).get('ai_feedback')
+                and row.get('visibility', visibility) == 'visible'):
+            yield index, row
+
+
+def read_artifact(root, relative, limit=MAX_ARTIFACT_BYTES):
+    path = PurePosixPath(relative)
+    if path.is_absolute() or '..' in path.parts or '\\' in relative:
+        raise ClientError("Artifact paths must stay inside the configured root.")
+    candidate = root / relative
+    candidate.resolve().relative_to(root.resolve())
+    if not candidate.is_file() or candidate.stat().st_size > limit:
+        raise ClientError("An expected artifact is missing or exceeds its size limit.")
+    return candidate.read_text(encoding="utf-8")
+
+
+def collect_files(submission, analysis):
+    primary = []
+    context = []
+    for patterns, destination in ((analysis['source_globs'], primary),
+                                  (analysis.get('context_globs', []), context)):
+        for pattern in patterns:
+            if PurePosixPath(pattern).is_absolute() or '..' in PurePosixPath(pattern).parts:
+                raise ClientError("Source patterns must be submission-relative.")
+            destination.extend(sorted(path for path in submission.glob(pattern) if path.is_file()))
+    primary = list(dict.fromkeys(primary))
+    if not primary:
+        raise ClientError("No submitted primary source matches this feedback target.")
+    maximum = analysis.get('max_source_files')
+    if maximum is not None and len(primary) > maximum:
+        raise ClientError("Multiple submitted primary sources match this feedback target; the source selection is ambiguous.")
+    files = []
+    seen = set()
+    for path in primary + context:
+        relative = path.relative_to(submission).as_posix()
+        if relative not in seen:
+            content = read_artifact(submission, relative, MAX_FILES_BYTES)
+            files.append({'path': relative, 'content': content})
+            seen.add(relative)
+    if sum(len(item['content'].encode('utf-8')) for item in files) > MAX_FILES_BYTES:
+        raise ClientError("Selected source files exceed the client input limit.")
+    return files
+
+
+def bound_evidence(evidence):
+    if len(evidence) > 256:
+        raise ClientError('The selected functional results exceed the evidence limit.')
+    for item in evidence:
+        item['summary'] = item['summary'].strip() or 'No diagnostic text was recorded for this observation.'
+    if sum(len(item['summary']) for item in evidence) > 16_000:
+        # Retain every selected identity and outcome while sharing the core's text budget.
+        per_row_limit = 16_000 // len(evidence)
+        marker = '\n[Evidence excerpt truncated.]'
+        for item in evidence:
+            summary = item['summary']
+            if len(summary) > per_row_limit:
+                summary = summary[:per_row_limit - len(marker)] + marker
+            item['summary'] = summary
+    return evidence
+
+
+def result_evidence(results, source, *, failed_only=False, blocked=()):
+    """Keep request observations stable and snapshot-bound row identities local."""
+    snapshot = fingerprint({'path': source['path'], 'label': source['label'], 'results': results})
+    evidence, mapping = [], {}
+    for index, row in visible_rows(results):
+        if index in blocked:
+            continue
+        status = row_status(row)
+        if failed_only and status != 'fail':
+            continue
+        name = str(row.get('name', 'Unnamed functional result'))
+        if source.get('include') and not any(re.search(pattern, name + '\n') for pattern in source['include']):
+            continue
+        observation = {'path': source['path'], 'source': source['label'], 'test_id': name,
+                       'score': row.get('score'), 'max_score': row.get('max_score'),
+                       'status': status, 'output': row.get('output', '')}
+        identifier = f'observation-{fingerprint(observation)}:{len(evidence)}'
+        summary = f"Reported score: {row.get('score')}/{row.get('max_score')}.\n{row.get('output', '')}"
+        if len(summary) > MAX_SUMMARY_CHARS:
+            summary = summary[:MAX_SUMMARY_CHARS] + '\n[Evidence excerpt truncated.]'
+        evidence.append({'id': identifier, 'kind': 'runtime', 'source': source['label'],
+                         'summary': summary, 'test_id': name, 'scope': '', 'status': status})
+        mapping[identifier] = {'index': index, 'result_id': f'result-{snapshot}:{index}',
+                               'row_hash': fingerprint(row)}
+    return evidence, mapping
+
+
+def collect_evidence(root, analysis, results=None, blocked=()):
+    """Only reports with row-level visibility can enter a student-facing prompt."""
+    evidence = []
+    for source in analysis.get('evidence_sources', []):
+        # Raw JUnit, coverage and text artifacts have no reliable visibility mapping.
+        if source['format'] != 'gradescope':
+            raise ClientError('Only Gradescope evidence is supported for configured AI behaviors.')
+        try:
+            if source['path'] == RESULTS_SOURCE and results is not None:
+                report, excluded = results, blocked
+            else:
+                report, _, excluded, _ = clean_results(json.loads(read_artifact(root, source['path'])))
+            rows, _ = result_evidence(report, source, blocked=excluded)
+            evidence.extend(rows)
+        except (OSError, ValueError, KeyError, ClientError):
+            raise ClientError('A configured Gradescope report is unavailable; no outcome can be inferred.') from None
+    return bound_evidence(evidence)
+
+
+def functional_evidence(results, analysis, blocked):
+    sources = analysis.get('evidence_sources', [])
+    if (len(sources) != 1 or sources[0]['format'] != 'gradescope'
+            or sources[0]['label'] != analysis.get('functional_result_source')
+            or sources[0]['path'] != RESULTS_SOURCE or sources[0].get('include')):
+        raise ClientError('Functional feedback requires the complete final Gradescope report.')
+    evidence, mapping = result_evidence(results, sources[0], failed_only=True, blocked=blocked)
+    return bound_evidence(evidence), mapping
+
+
+def appended_output(original, text, format_name, heading='AI feedback'):
+    """Treat model text as text even when the original diagnostic uses rich markup."""
+    text = re.sub(r'[\x00-\x08\x0b\x0c\x0e-\x1f\x7f]', '', text)
+    if format_name in ('html', 'simple_format'):
+        addition = '<div><strong>' + html.escape(heading) + '</strong><pre>' + html.escape(text) + '</pre></div>'
+        return original + '\n' + addition
+    if format_name == 'md':
+        longest = max((len(match.group()) for match in re.finditer(r'`+', text)), default=0)
+        fence = '`' * max(3, longest + 1)
+        return original + '\n\n' + heading + '\n\n' + fence + '\n' + text + '\n' + fence
+    reset = '\x1b[0m' if format_name == 'ansi' else ''
+    return original + reset + '\n\n' + heading + '\n' + text
+
+
+def restore_owned_output(container, metadata, key):
+    """Restore only an output whose complete generated value still matches."""
+    record = metadata.get(key)
+    if not record:
+        return True
+    if fingerprint(container.get('output', '')) != record.get('rendered_hash'):
+        return False
+    if record.get('had_output'):
+        container['output'] = record['original_output']
+    else:
+        container.pop('output', None)
+    del metadata[key]
+    return True
+
+
+def clean_results(original):
+    results = deepcopy(original)
+    previous_ai, functional, blocked, diagnostics = [], [], set(), []
+    for row in results.get('tests', []):
+        metadata = row.get('extra_data', {})
+        if metadata.get('ai_feedback'):
+            previous_ai.append(row)
+            continue
+        had_inline = 'ai_inline' in metadata
+        owners = metadata.get('ai_inline', {})
+        for target_id in reversed(list(owners)):
+            if not restore_owned_output(row, owners, target_id):
+                blocked.add(len(functional))
+                diagnostics.append({'target_id': target_id, 'error': 'The original test output changed; inline feedback was preserved without reuse.'})
+                break
+        if had_inline and not owners:
+            metadata.pop('ai_inline', None)
+        if had_inline and not metadata:
+            row.pop('extra_data', None)
+        functional.append(row)
+    results['tests'] = functional
+    for key in ('score', 'max_score'):
+        if number(results.get(key)):
+            results[key] = float(Decimal(str(results[key])) - sum(
+                (Decimal(str(row[key])) for row in previous_ai if number(row.get(key))), Decimal(0)))
+    metadata = results.get('extra_data', {})
+    had_grading = 'ai_grading' in metadata or 'ai_grading_notice' in metadata
+    if not restore_owned_output(results, metadata, 'ai_grading_notice'):
+        diagnostics.append({'error': 'The submission output changed; the existing AI notice was preserved.'})
+    metadata.pop('ai_grading', None)
+    if had_grading and not metadata:
+        results.pop('extra_data', None)
+    return results, previous_ai, blocked, diagnostics
+
+
+def grading_rows(target_id, target, revision, response=None, error=None):
+    configured = target['analysis'].get('grading_items', [])
+    if not configured:
+        raise ClientError('AI grading requires configured scoring items.')
+    returned = response.get('items', []) if response is not None else []
+    by_id = {item['test_id']: item for item in returned}
+    if response is not None and (len(by_id) != len(returned) or set(by_id) != {item['id'] for item in configured}):
+        raise ClientError('Backend scoring items do not match the configured criteria.')
+    rows = []
+    for index, criterion in enumerate(configured, 1):
+        item = by_id.get(criterion['id'])
+        score, maximum = None, criterion['points']
+        if not number(maximum) or maximum <= 0:
+            raise ClientError('A scoring item has an invalid maximum.')
+        if item is not None:
+            verdict = item['verdict']
+            score = maximum if verdict == 'pass' else 0 if verdict == 'fail' else None
+            if item.get('max_score') != maximum or item.get('suggested_score') != score:
+                raise ClientError('Backend scores do not match the configured scoring rules.')
+            feedback = item['feedback']
+        else:
+            feedback = error or 'AI grading did not return a usable result.'
+        pending = score is None
+        output = ('Pending regrade. The displayed zero is a provisional placeholder, not a failing verdict.'
+                  if pending else 'Meets the criterion.' if score == maximum else 'Does not meet the criterion.')
+        if feedback:
+            output += '\n' + feedback
+        metadata = {'ai_feedback': True, 'target_id': target_id, 'criterion_id': criterion['id'],
+                    'revision': revision, 'grading_status': 'pending_regrade' if pending else 'complete',
+                    'actual_score': score}
+        if response is not None:
+            metadata['request_id'] = response['request_id']
+        label = criterion.get('label', f'Criterion {index}')
+        rows.append({'name': f"AI grading: {target['identifier']} / {label}",
+                     'score': 0 if pending else score, 'max_score': maximum,
+                     'visibility': 'visible', 'output_format': 'text', 'output': output,
+                     'extra_data': metadata})
+    return rows
+
+
+def apply_inline(results, target_id, revision, response, mapping):
+    items = response.get('failure_feedback', [])
+    ids = [item['evidence_id'] for item in items]
+    if len(ids) != len(set(ids)) or set(ids) != set(mapping):
+        raise ClientError('Backend explanations do not match the selected failed tests.')
+    for item in items:
+        if not isinstance(item.get('feedback'), str) or not item['feedback'].strip():
+            raise ClientError('Backend returned an empty functional-test explanation.')
+    updates = []
+    for item in items:
+        location = mapping[item['evidence_id']]
+        row = results['tests'][location['index']]
+        if fingerprint(row) != location['row_hash']:
+            raise ClientError('A selected functional row changed; no inline feedback was applied.')
+        original = row.get('output', '')
+        rendered = appended_output(original, item['feedback'], row.get('output_format', results.get('test_output_format', 'text')))
+        metadata = {
+            'had_output': 'output' in row, 'original_output': original,
+            'rendered_hash': fingerprint(rendered), 'evidence_id': item['evidence_id'],
+            'result_id': location['result_id'],
+            'revision': revision, 'request_id': response['request_id'],
+        }
+        updates.append((row, rendered, metadata))
+    for row, rendered, metadata in updates:
+        row.setdefault('extra_data', {}).setdefault('ai_inline', {})[target_id] = metadata
+        row['output'] = rendered
+
+
+def finalize_grading(results, revision, *, unknown=False):
+    rows = [row for row in results['tests'] if row.get('extra_data', {}).get('ai_feedback')]
+    if not rows and not unknown:
+        return
+    confirmed = sum((Decimal(str(row['score'])) for row in rows), Decimal(0))
+    maximum = sum((Decimal(str(row['max_score'])) for row in rows), Decimal(0))
+    pending = sum(row['extra_data'].get('grading_status') == 'pending_regrade' for row in rows)
+    functional = Decimal(str(results['score'])) if number(results.get('score')) else sum(
+        (Decimal(str(row['score'])) for row in results['tests']
+         if not row.get('extra_data', {}).get('ai_feedback') and number(row.get('score'))), Decimal(0))
+    provisional = functional + confirmed
+    for key, addition in (('score', confirmed), ('max_score', maximum)):
+        if number(results.get(key)):
+            results[key] = float(Decimal(str(results[key])) + addition)
+    incomplete = bool(pending or unknown)
+    results.setdefault('extra_data', {})['ai_grading'] = {
+        'revision': revision, 'grading_status': 'pending_regrade' if incomplete else 'complete',
+        'confirmed_score': float(confirmed), 'max_score': None if unknown else float(maximum),
+        'pending_count': pending, 'final_score': None if incomplete else float(confirmed),
+        'provisional_total': float(provisional), 'final_total': None if incomplete else float(provisional),
+    }
+    if incomplete:
+        if unknown and not rows:
+            message = ('AI configuration unavailable; any configured AI grades are unverified '
+                       'and the displayed grade may be provisional.')
+        else:
+            message = ('AI grading incomplete. Provisional grade only. '
+                       f'Confirmed AI points: {confirmed}; '
+                       + ('the full AI maximum could not be verified.' if unknown else f'full AI maximum: {maximum}; {pending} item(s) pending regrade.')
+                       + ' Pending items display zero temporarily and retain their full maximum. '
+                       'The displayed total and exported numeric grade are provisional until regrading completes.')
+        metadata = results['extra_data']
+        if 'ai_grading_notice' not in metadata:
+            original = results.get('output', '')
+            rendered = appended_output(original, message, results.get('output_format', 'simple_format'), 'AI grading status')
+            metadata['ai_grading_notice'] = {'had_output': 'output' in results, 'original_output': original,
+                                            'rendered_hash': fingerprint(rendered)}
+            results['output'] = rendered
+
+
+def add_feedback(root=Path('/autograder'), *, run_id=None):
+    root = Path(root)
+    results_path = root / RESULTS_SOURCE
+    raw_results = results_path.read_bytes()
+    original = json.loads(raw_results)
+    base, previous_ai, blocked, cleanup_diagnostics = clean_results(original)
+    config = json.loads((root / 'source/config.json').read_text(encoding='utf-8'))
+    token_file = root / 'source/assignment.token'
+    deadline = time.monotonic() + 300
+    manifest = None
+    records = []
+    results = deepcopy(base)
+    unknown_grading = False
+    for attempt in range(2):
+        results = deepcopy(base)
+        records = list(cleanup_diagnostics)
+        unknown_grading = False
+        try:
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                raise ClientError('The total AI time budget was exhausted.')
+            manifest = get_assignment_config(backend_url=config['backend_url'], token_file=token_file,
+                                             timeout=min(30, remaining))
+            feedback_targets = [target for target in manifest['targets'].values()
+                                if target['analysis'].get('behavior') == 'functional_test_feedback']
+            if len(feedback_targets) > 1:
+                raise ClientError('Only one functional-test feedback target is supported per assignment.')
+            for target_id, target in manifest['targets'].items():
+                analysis = target['analysis']
+                behavior = analysis.get('behavior')
+                if behavior not in ('ai_grading', 'functional_test_feedback'):
+                    records.append({'target_id': target_id, 'error': 'This legacy target must be migrated to an explicit AI behavior.'})
+                    unknown_grading = unknown_grading or target.get('max_score') is not None
+                    continue
+                try:
+                    if behavior == 'functional_test_feedback':
+                        evidence, mapping = functional_evidence(base, analysis, blocked)
+                        if not evidence:
+                            continue
+                    else:
+                        evidence = collect_evidence(root, analysis, base, blocked)
+                    if time.monotonic() >= deadline:
+                        raise ClientError('The total AI time budget was exhausted.')
+                    files = collect_files(root / 'submission', analysis)
+                    request_id = stable_request_id(target_id, files=files, evidence=evidence,
+                                                   namespace=f"{manifest['revision']}:{run_id or ''}")
+                    remaining = deadline - time.monotonic()
+                    if remaining <= 0:
+                        raise ClientError('The total AI time budget was exhausted.')
+                    response = request_feedback(backend_url=config['backend_url'], token_file=token_file,
+                                                target_id=target_id, files=files, evidence=evidence,
+                                                request_id=request_id, config_revision=manifest['revision'],
+                                                timeout=min(270, remaining))
+                    if behavior == 'ai_grading':
+                        results['tests'].extend(grading_rows(target_id, target, manifest['revision'], response))
+                    else:
+                        apply_inline(results, target_id, manifest['revision'], response, mapping)
+                    records.append({'target_id': target_id, **response})
+                except ConfigChangedError:
+                    raise
+                except Exception as exc:
+                    detail = str(exc) if isinstance(exc, ClientError) else 'Could not collect or process the configured AI inputs.'
+                    records.append({'target_id': target_id, 'error': detail})
+                    if behavior == 'ai_grading':
+                        results['tests'].extend(grading_rows(target_id, target, manifest['revision'], error=detail))
+            break
+        except ConfigChangedError:
+            if attempt == 0:
+                continue
+            failure = 'Assignment configuration changed again. No mixed-version AI result was applied.'
+        except Exception as exc:
+            failure = str(exc) if isinstance(exc, ClientError) else 'Could not load a valid assignment configuration.'
+        # A failed refresh cannot publish results staged under an older revision.
+        results = deepcopy(base)
+        records = list(cleanup_diagnostics) + [{'error': failure}]
+        unknown_grading = (manifest is None
+                           or any(number(row.get('max_score')) and row['max_score'] > 0 for row in previous_ai)
+                           or any(target['analysis'].get('behavior') == 'ai_grading' or target.get('max_score') is not None
+                                  for target in manifest['targets'].values()))
+        if manifest is not None:
+            for target_id, target in manifest['targets'].items():
+                if target['analysis'].get('behavior') == 'ai_grading':
+                    results['tests'].extend(grading_rows(target_id, target, manifest['revision'], error=failure))
+                elif target.get('max_score') is not None:
+                    unknown_grading = True
+        else:
+            for old in previous_ai:
+                if number(old.get('max_score')) and old['max_score'] > 0:
+                    row = deepcopy(old)
+                    row['score'] = 0
+                    row['output'] = 'Pending regrade. The displayed zero is provisional. ' + failure
+                    row['extra_data'].update(grading_status='pending_regrade', actual_score=None)
+                    results['tests'].append(row)
+        break
+    finalize_grading(results, manifest['revision'] if manifest is not None else None,
+                     unknown=unknown_grading)
+    # Never apply an explanation or score to a different functional-result snapshot.
+    if results_path.read_bytes() != raw_results:
+        raise ClientError('Functional results changed during AI processing; no AI result was applied.')
+    evidence_path = root / 'results/ai_evidence.json'
+    evidence_path.write_text(json.dumps(records, ensure_ascii=False, indent=2, allow_nan=False) + '\n', encoding='utf-8')
+    evidence_path.chmod(0o600)
+    temporary = results_path.with_suffix('.tmp')
+    temporary.write_text(json.dumps(results, ensure_ascii=False, indent=2, allow_nan=False) + '\n', encoding='utf-8')
+    temporary.replace(results_path)
+    if results.get('stdout_visibility', 'hidden') == 'hidden':
+        for record in records:
+            target = record.get('target_id', 'assignment')
+            if record.get('error'):
+                print(f"Instructor AI diagnostic [{target}]: {record['error']}")
+            for item in (*record.get('items', []), *record.get('failure_feedback', [])):
+                identifier = item.get('test_id', item.get('evidence_id', ''))
+                print(f"Instructor AI evidence [{target} / {identifier}]: {item['evidence']}")
+
+
+def main():
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument('--root', type=Path, default=Path('/autograder'))
+    parser.add_argument('--run-id', help='New namespace for an independent run; reuse it for retries')
+    args = parser.parse_args()
+    try:
+        add_feedback(args.root, run_id=args.run_id)
+    except Exception:
+        print('AI feedback unavailable: the original functional result was preserved.', file=sys.stderr)
+
+
+if __name__ == '__main__':
+    main()

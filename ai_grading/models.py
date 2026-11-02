@@ -1,6 +1,7 @@
 """The grading module's contract, independent of database tables and task state."""
 
 from dataclasses import field
+from decimal import Decimal
 from enum import Enum
 from math import isclose
 from typing import Annotated, Literal
@@ -62,8 +63,21 @@ class EvidenceSource:
 
 
 @dataclass(frozen=True, config=CONTRACT_CONFIG)
+class GradingItem:
+    """One instructor-owned requirement and its configured maximum points."""
+
+    id: Annotated[str, Field(min_length=1, max_length=256, pattern=r"\S")]
+    requirement: FeedbackText
+    points: Annotated[float, Field(strict=True, gt=0, allow_inf_nan=False)]
+
+    def __post_init__(self) -> None:
+        if Decimal(str(self.points)).normalize().as_tuple().exponent < -2:
+            raise ValueError("grading item points support at most two decimal places")
+
+
+@dataclass(frozen=True, config=CONTRACT_CONFIG)
 class AnalysisConfig:
-    """Backend-owned analysis instructions and artifact selection."""
+    """Backend-owned analysis instructions, artifact selection and generation options."""
 
     mode: Literal["code_feedback", "testplan", "test_quality"] = "code_feedback"
     source_globs: tuple[Identifier, ...] = ()
@@ -73,6 +87,14 @@ class AnalysisConfig:
     evidence_sources: tuple[EvidenceSource, ...] = ()
     points_per_test: Score | None = None
     max_source_files: Annotated[int, Field(strict=True, ge=1, le=64)] | None = None
+    temperature: Annotated[float, Field(strict=True, ge=0, le=2)] | None = None
+    behavior: Literal["ai_grading", "functional_test_feedback"] | None = None
+    grading_items: tuple[GradingItem, ...] = ()
+    functional_result_source: Identifier | None = None
+    attempt_id: Annotated[str, Field(
+        min_length=36, max_length=36,
+        pattern=r"^[0-9a-fA-F]{8}(?:-[0-9a-fA-F]{4}){3}-[0-9a-fA-F]{12}$",
+    )] | None = None
 
     def __post_init__(self) -> None:
         if len(self.expected_tests) != len(set(self.expected_tests)):
@@ -82,6 +104,15 @@ class AnalysisConfig:
             raise ValueError("evidence source labels must be distinct")
         if self.points_per_test is not None and (self.mode != "testplan" or not self.expected_tests):
             raise ValueError("per-test points require testplan mode and expected tests")
+        ids = [item.id for item in self.grading_items]
+        if len(ids) != len(set(ids)):
+            raise ValueError("grading item identifiers must be distinct")
+        if self.grading_items and self.behavior != "ai_grading":
+            raise ValueError("grading items require AI grading behavior")
+        if self.behavior is not None and (self.points_per_test is not None or self.expected_tests):
+            raise ValueError("explicit behaviors cannot use legacy per-test scoring configuration")
+        if self.functional_result_source is not None and self.behavior != "functional_test_feedback":
+            raise ValueError("a functional result source requires functional-test feedback behavior")
 
 
 @dataclass(frozen=True, config=CONTRACT_CONFIG)
@@ -138,6 +169,24 @@ class FeedbackRequest:
             total = self.analysis.points_per_test * len(self.analysis.expected_tests)
             if self.target.max_score is None or not isclose(self.target.max_score, total):
                 raise ValueError("target maximum must equal the configured per-test total")
+        if self.analysis.behavior is not None and self.functional_test_feedback:
+            raise ValueError("explicit behaviors require scoped execution evidence")
+        if self.analysis.behavior == "ai_grading":
+            if not self.analysis.grading_items:
+                raise ValueError("AI grading requires configured grading items")
+            total = sum((Decimal(str(item.points)) for item in self.analysis.grading_items), Decimal(0))
+            if self.target.max_score is None or Decimal(str(self.target.max_score)) != total:
+                raise ValueError("target maximum must equal the configured grading item total")
+        if self.analysis.behavior == "functional_test_feedback":
+            if self.target.max_score is not None:
+                raise ValueError("functional-test feedback cannot assign points")
+            source = next((source for source in self.analysis.evidence_sources
+                           if source.label == self.analysis.functional_result_source), None)
+            if source is None or source.format != "gradescope":
+                raise ValueError("functional-test feedback requires a Gradescope result source")
+            if not any(item.kind == "runtime" and item.status == "fail"
+                       and item.source == source.label for item in self.evidence):
+                raise ValueError("functional-test feedback requires failed functional rows")
 
 
 @dataclass(frozen=True, config=CONTRACT_CONFIG)
@@ -160,6 +209,15 @@ class FeedbackItem:
 
 
 @dataclass(frozen=True, config=CONTRACT_CONFIG)
+class FailureFeedbackItem:
+    """An explanation for one existing failed row, without a new grade or verdict."""
+
+    evidence_id: Identifier
+    feedback: FeedbackText
+    evidence: FeedbackText
+
+
+@dataclass(frozen=True, config=CONTRACT_CONFIG)
 class FeedbackResponse:
     """One provider's result, before comparison, selection, and persistence.
 
@@ -176,6 +234,8 @@ class FeedbackResponse:
     output_tokens: Count | None = None
     rubric_id: Identifier | None = field(default=None, kw_only=True)
     items: tuple[FeedbackItem, ...] = ()
+    failure_feedback: tuple[FailureFeedbackItem, ...] = ()
+    grading_status: Literal["complete", "pending_regrade"] = "complete"
 
 
 @dataclass(frozen=True, config=CONTRACT_CONFIG)

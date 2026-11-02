@@ -8,7 +8,7 @@ The project consists of a web application, an AI feedback backend, and a Gradesc
 
 ## Key Features
 
-- **Instructor Interface:** View assignments, submissions, grading targets, rubrics, test results, and AI feedback.
+- **Instructor Interface:** Configure assignments, grading targets and rubrics; view submissions, test results and stored AI feedback.
 - **Automated Testing:** Use functional test results to inform AI-generated feedback.
 - **AI Feedback:** Generate feedback using configurable AI providers and models.
 - **Gradescope Integration:** Authenticate with Gradescope and trigger autograder reruns.
@@ -29,13 +29,15 @@ The system has three main application components and a shared database.
 
 ### How the Components Work Together
 
-1. Instructors configure assignments, grading targets, and rubrics through the web application.
-2. The Gradescope integration retrieves eligible submissions through the Web API.
-3. The integration authorizes each submission for grading and triggers an autograder rerun.
-4. The grading workflow uses source code, test results, and rubric information to generate AI feedback.
-5. Feedback is returned to Gradescope, while the web application records submission and grading information in PostgreSQL.
+1. Instructors configure assignments, grading targets and rubrics through the Web forms.
+2. The autograder container fetches its assignment configuration from the backend, then sends source code and runtime evidence for AI feedback.
+3. The backend authenticates the assignment token, enforces quota and calls the configured provider using DB-owned grading instructions.
+4. The container displays feedback and configured AI scores in Gradescope, preserving functional-test scores when AI is unavailable.
 
-Nightly assignments follow the scheduled workflow, while immediate assignments can follow a separate grading path.
+The assignment-token feedback path keeps runtime state outside PostgreSQL and does
+not write submission, test-result or feedback records to the DB. The nightly
+integration manages eligibility and reruns through separate Web endpoints; it is
+not yet connected to this feedback path.
 
 ![Component Architecture](docs/architecture/rendered/01-component.png)
 

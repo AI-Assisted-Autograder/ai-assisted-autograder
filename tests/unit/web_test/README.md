@@ -41,7 +41,7 @@ pip install -r tests/requirements.txt
 Navigate to the web test directory:
 
 ```bash
-cd tests/unit/webtest
+cd tests/unit/web_test
 ```
 
 Run the tests:

@@ -1021,7 +1021,10 @@ def test_create_target_rejects_bad_fields(backend, identifier, kind, max_score):
 def test_delete_target_removes_it_and_its_rubrics(backend):
     aid = backend.add_assignment("IMMEDIATE", (("add", 1), ("divide", 2)))
     tid = backend.repo.get_assignment_config(aid).targets[0].id
-    backend.repo.upsert_rubric(tid, criteria_text="Returns the sum.", feedback_guidance=None)
+    backend.repo.upsert_rubric(
+        tid, criteria_text="Returns the sum.", feedback_guidance=None,
+        analysis_config={"source_globs": ["calculator.py"]},
+    )
     backend.repo.upsert_rubric(tid, criteria_text="Returns the sum of two ints.", feedback_guidance=None)
 
     backend.repo.delete_target(aid, tid)
@@ -1056,7 +1059,10 @@ def test_upsert_rubric_versions_rather_than_overwrites(backend):
     aid = backend.add_assignment("IMMEDIATE", (("add", 1),))
     tid = backend.repo.get_assignment_config(aid).targets[0].id
 
-    first = backend.repo.upsert_rubric(tid, criteria_text=" Returns the sum. ", feedback_guidance="  ")
+    first = backend.repo.upsert_rubric(
+        tid, criteria_text=" Returns the sum. ", feedback_guidance="  ",
+        analysis_config={"source_globs": ["calculator.py"]},
+    )
     second = backend.repo.upsert_rubric(tid, criteria_text="Returns the sum.", feedback_guidance="Be brief.")
 
     assert (first.version, first.criteria_text, first.feedback_guidance) == (1, "Returns the sum.", None)
@@ -1068,7 +1074,10 @@ def test_upsert_rubric_versions_rather_than_overwrites(backend):
 def test_upsert_rubric_keeps_feedback_pointing_at_its_version(backend):
     aid, sid = started(backend, targets=(("add", 1),))
     tid = backend.repo.get_assignment_config(aid).targets[0].id
-    v1 = backend.repo.upsert_rubric(tid, criteria_text="old", feedback_guidance=None)
+    v1 = backend.repo.upsert_rubric(
+        tid, criteria_text="old", feedback_guidance=None,
+        analysis_config={"source_globs": ["calculator.py"]},
+    )
     backend.repo.save_feedback(sid, "add", result_for(v1.id, selected=0))
 
     backend.repo.upsert_rubric(tid, criteria_text="new", feedback_guidance=None)
@@ -1080,7 +1089,10 @@ def test_upsert_rubric_keeps_feedback_pointing_at_its_version(backend):
 def test_upsert_rubric_unchanged_text_adds_no_version(backend):
     aid = backend.add_assignment("IMMEDIATE", (("add", 1),))
     tid = backend.repo.get_assignment_config(aid).targets[0].id
-    first = backend.repo.upsert_rubric(tid, criteria_text="Returns the sum.", feedback_guidance=None)
+    first = backend.repo.upsert_rubric(
+        tid, criteria_text="Returns the sum.", feedback_guidance=None,
+        analysis_config={"source_globs": ["calculator.py"]},
+    )
 
     again = backend.repo.upsert_rubric(tid, criteria_text="Returns the sum.\n", feedback_guidance="")
 
@@ -1092,7 +1104,10 @@ def test_upsert_rubric_continues_after_seeded_versions(backend):
     backend.add_rubric(aid, "add", version=3, criteria_text="seeded")
     tid = backend.repo.get_assignment_config(aid).targets[0].id
 
-    assert backend.repo.upsert_rubric(tid, criteria_text="edited", feedback_guidance=None).version == 4
+    assert backend.repo.upsert_rubric(
+        tid, criteria_text="edited", feedback_guidance=None,
+        analysis_config={"source_globs": ["calculator.py"]},
+    ).version == 4
 
 
 def test_upsert_rubric_needs_criteria(backend):

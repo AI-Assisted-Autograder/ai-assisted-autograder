@@ -1,4 +1,0 @@
-# Same versions as the existing ai_grading component, Gemini dependencies only.
-pydantic==2.13.5
-httpx==0.28.1
-google-genai==2.24.0

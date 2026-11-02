@@ -2,7 +2,7 @@
 
 ## Overview
 
-The AI Grading tests are located in `tests/unit/aigradingtest`.
+The AI Grading tests are located in `tests/unit/ai_grading_test`.
 
 The tests use a `FakeProvider`, so they do not make calls to real LLM providers.
 
@@ -43,7 +43,7 @@ pip install -r tests/requirements.txt
 Navigate to the AI Grading test directory:
 
 ```bash
-cd tests/unit/aigradingtest
+cd tests/unit/ai_grading_test
 ```
 
 Run the tests:

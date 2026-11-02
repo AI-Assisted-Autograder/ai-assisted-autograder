@@ -15,6 +15,22 @@ export const selectorMap = {
   rerunSuccess: /autograder.*(queued|started|success)|rerun.*(queued|started|success)/i,
 } as const;
 
+export type AutograderState = 'RUNNING' | 'COMPLETE' | 'FAILED' | 'UNKNOWN';
+
+/** Classifies the visible submission-page state without treating a click as completion. */
+export function classifyAutograderState(bodyText: string): AutograderState {
+  if (/(?:autograder|grader).*(?:failed|error)/i.test(bodyText)) {
+    return 'FAILED';
+  }
+  if (/autograder.*(?:hasn't finished running|still running|is running|queued|started)/i.test(bodyText)) {
+    return 'RUNNING';
+  }
+  if (/autograder results/i.test(bodyText)) {
+    return 'COMPLETE';
+  }
+  return 'UNKNOWN';
+}
+
 export class GradescopePlatform implements ILearningPlatform {
   public constructor(private readonly page: Page) {}
 
@@ -74,11 +90,43 @@ export class GradescopePlatform implements ILearningPlatform {
       : selectorMap.rerunSuccess;
     await expect(this.page.getByText(successPattern).first()).toBeVisible({ timeout: 15_000 });
 
+    await this.waitForAutograderCompletion();
+
     return {
       submissionId: locator.submissionId,
       clicked: true,
       confirmed,
       url: this.page.url(),
     };
+  }
+
+  private async waitForAutograderCompletion(): Promise<void> {
+    const timeoutMs = this.readPositiveInteger('GRADESCOPE_RERUN_TIMEOUT_MS', 300_000);
+    const pollIntervalMs = this.readPositiveInteger('GRADESCOPE_RERUN_POLL_INTERVAL_MS', 5_000);
+    const deadline = Date.now() + timeoutMs;
+
+    while (Date.now() <= deadline) {
+      const bodyText = await this.page.locator('body').innerText();
+      const state = classifyAutograderState(bodyText);
+      if (state === 'FAILED') {
+        throw new Error('Gradescope autograder reported a failure while processing the rerun.');
+      }
+      if (state === 'COMPLETE') {
+        return;
+      }
+
+      if (Date.now() + pollIntervalMs > deadline) {
+        break;
+      }
+      await this.page.waitForTimeout(pollIntervalMs);
+      await this.page.reload({ waitUntil: 'domcontentloaded' });
+    }
+
+    throw new Error(`Gradescope autograder did not finish within ${timeoutMs} ms.`);
+  }
+
+  private readPositiveInteger(name: string, fallback: number): number {
+    const value = Number.parseInt(process.env[name] ?? '', 10);
+    return Number.isFinite(value) && value > 0 ? value : fallback;
   }
 }

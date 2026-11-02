@@ -234,11 +234,9 @@ __marimo__/
 ai_grading/.local-feedback/
 application_default_credentials.json
 *service-account*.json
-# Generated Gradescope upload files (including its private assignment token).
-ai_grading/autograder-vertex-feedback/vertex autograder.zip
-ai_grading/autograder-vertex-feedback/assignment.token
-ai_grading/autograder-vertex-feedback/config.json
-ai_grading/autograder-vertex-feedback/local_client.py
-ai_grading/autograder-vertex-feedback/github/
-ai_grading/autograder-vertex-feedback/compile_error.prefix
-ai_grading/autograder-vertex-feedback/compile_error.postfix
+# Private autograder connection files and generated upload archives.
+autograders/**/*.zip
+autograders/**/assignment.token
+autograders/**/config.json
+autograders/**/deploy_key
+autograders/**/.gemini.json
