@@ -219,3 +219,8 @@ button.danger { color: var(--failed-fg); }
     main { padding: 1rem; }
     header.site { padding: 0.8rem 1rem; }
 }
+
+header.site form.signed-in { margin-left: auto; display: flex; gap: 0.8rem; align-items: baseline; }
+.login { max-width: 380px; margin: 3rem auto 0; }
+.login .hint { margin-top: 0.8rem; }
+.login form.form { max-width: none; }

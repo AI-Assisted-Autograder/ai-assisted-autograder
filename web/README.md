@@ -49,9 +49,11 @@ cd web
 [ -f .env ] || cp .env.example .env
 docker compose up --build -d
 docker compose exec web python -m app.seed
+docker compose exec web python -m app.manage_instructors add you@example.edu
 ```
 
-Then open http://localhost:8000. Click an assignment to see its
+The last command prompts for a password (at least 12 characters). Then
+open http://localhost:8000 and sign in. Click an assignment to see its
 submissions, targets and rubrics, then a submission to see its test
 results and each provider's feedback. `bob@example.edu` on Project 1 has
 a target in each state: feedback given, failed and opted out.
@@ -327,6 +329,7 @@ global providers are managed separately. `app.seed` also supplies sample data:
 | `grading_target` | Method, class or file graded within an assignment | `identifier` is unique within the assignment (AD-3); `display_order` orders feedback; `analysis_config` defines source selection, evidence and testplan settings. |
 | `rubric` | Version of a target's rubric | Versions are kept; at most one per target has `is_current`. |
 | `llm_provider_config` | Provider and model to ask | Global, not per assignment. At most one `is_primary`; disabled rows are skipped. |
+| `instructor` | Account that can sign in to the UI | Not in the data model diagram (OQ-9). `email` is stored lowercased and unique; `password_hash` is scrypt. Managed with `app.manage_instructors`. |
 
 Runtime, written as submissions are tested and graded:
 
@@ -377,6 +380,8 @@ read the generated file before committing it.
 
 ```
 app/
+  auth.py        Instructor sign-in: /login, /logout, password hashing, the UI route guard
+  manage_instructors.py  CLI to add, list, deactivate and reset instructor accounts
   config.py      Settings read from .env (including optional FEEDBACK_STATE_PATH)
   db.py          SQLAlchemy engine and SessionLocal
   feedback.py    Feedback router and standalone local entry point
@@ -398,8 +403,8 @@ migrations/      Alembic migrations
 
 Server-rendered pages: `app/ui.py` routes, Jinja2 templates, and HTMX
 available for partial updates. The pages call the repository directly
-rather than the JSON API, so each operation is written once. Read-only
-so far, with no login yet (OQ-9):
+rather than the JSON API, so each operation is written once. Every page
+needs a signed-in instructor (see "Instructor sign-in" below):
 
 | Page | Shows |
 | --- | --- |
@@ -410,6 +415,39 @@ so far, with no login yet (OQ-9):
 The routes get the repository from `get_repository`, which the tests in
 `test_ui.py` override with an `InMemoryRepository`. LLM output is
 rendered with Jinja2's autoescaping, never as raw HTML.
+
+### Instructor sign-in
+
+`/login` takes an email and password; there is no sign-up page, so
+accounts are made from the command line:
+
+```bash
+docker compose exec web python -m app.manage_instructors add ada@pitt.edu --name "Ada Lovelace"
+docker compose exec web python -m app.manage_instructors passwd ada@pitt.edu
+docker compose exec web python -m app.manage_instructors deactivate ada@pitt.edu
+docker compose exec web python -m app.manage_instructors list
+```
+
+For a script, add `--password-stdin` and pipe the password into
+`docker compose exec -T`.
+
+- A signed-in session is a signed cookie (`autograder_session`, HttpOnly,
+  SameSite=Lax) holding the instructor's id. It expires after 12 hours
+  without a request.
+- Each request looks the account up again, so deactivating an account or
+  changing its password signs that instructor out everywhere.
+- Set `SESSION_SECRET` in `.env` on any shared server; without it a random
+  key is used and each restart signs everyone out. Set
+  `SESSION_COOKIE_SECURE=true` once the site is served over HTTPS.
+- After 10 failed sign-ins from one address in 15 minutes, that address is
+  refused until the window passes (kept in memory, for the single worker).
+- Every instructor can see and edit every course; per-course access is not
+  built yet.
+- `/internal/*` and `/v1/feedback` are not affected; they keep their own
+  tokens. `/health` and `/static` stay public.
+
+Tests (`test_ui.py`) override `require_instructor`; `test_auth.py` covers
+sign-in itself with an `InMemoryInstructorStore`.
 
 ## Repository layer
 
@@ -532,13 +570,15 @@ different database.
 Done: the schema and migrations, the full repository (SQL and in
 memory) with tests, the sample data script, the internal endpoints the
 nightly trigger calls (shared-token auth), authenticated assignment creation and
-configuration reads, and instructor forms for assignments, targets and rubrics. The optional AI
+configuration reads, instructor forms for assignments, targets and rubrics, and
+instructor sign-in. The optional AI
 feedback API selects Vertex, Pitt or Gemini API from PostgreSQL configuration
 and retains assignment tokens, quota and replay state in JSON (see above). It
 does not persist feedback or participate in the submission/nightly lifecycle.
 
 Not done yet: instructor feedback rating and the results dashboard (waiting on
-OQ-1); instructor login (OQ-9); and deployment.
+OQ-1); per-course access for instructors (sign-in itself is done, OQ-9); and
+deployment.
 
 ## Known limitations
 

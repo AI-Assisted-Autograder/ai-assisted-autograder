@@ -1,13 +1,17 @@
+import logging
+import secrets
 from dataclasses import asdict
 from typing import Literal
 from uuid import UUID
 
 from fastapi import Depends, FastAPI, Header, HTTPException, Query, Response
 from fastapi.staticfiles import StaticFiles
+from starlette.middleware.sessions import SessionMiddleware
 from pydantic import BaseModel, ValidationError
 from sqlalchemy import func, select, text
 from sqlalchemy.exc import IntegrityError
 
+from app.auth import router as auth_router
 from app.config import settings
 from app.db import SessionLocal, engine
 from .feedback_assignment import MAX_CONFIG_BYTES, primary_model_config, read_assignment_config
@@ -24,7 +28,20 @@ from app.ui import router as ui_router
 
 app = FastAPI(title="AI-Assisted Autograder")
 
+if not settings.session_secret:
+    logging.getLogger(__name__).warning(
+        "SESSION_SECRET is not set; using a random key, so restarts sign instructors out")
+app.add_middleware(
+    SessionMiddleware,
+    secret_key=settings.session_secret or secrets.token_urlsafe(32),
+    session_cookie="autograder_session",
+    max_age=12 * 60 * 60,  # idle limit: the cookie is re-signed on each request
+    same_site="lax",       # browsers don't send it on cross-site form posts (CSRF)
+    https_only=settings.session_cookie_secure,
+)
+
 app.mount("/static", StaticFiles(directory="app/static"), name="static")
+app.include_router(auth_router)
 app.include_router(ui_router)
 grading_repository = SqlGradingRepository(SessionLocal)
 

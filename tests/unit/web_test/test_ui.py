@@ -7,17 +7,21 @@ from decimal import Decimal
 import pytest
 from fastapi.testclient import TestClient
 
+from app.auth import InstructorAccount, require_instructor
 from app.main import app
 from app.repository import FeedbackResult, InMemoryRepository, ProviderFeedback, SubmissionRef
 from app.ui import get_repository
 
 SUBMITTED = datetime(2026, 10, 1, 14, 30, tzinfo=timezone.utc)
+SIGNED_IN = InstructorAccount(uuid.uuid4(), "ada@example.edu", "Ada", "unused", True)
 
 
 @pytest.fixture
 def repo():
     repo = InMemoryRepository()
     app.dependency_overrides[get_repository] = lambda: repo
+    # Sign-in has its own tests (test_auth.py); here every request is signed in.
+    app.dependency_overrides[require_instructor] = lambda: SIGNED_IN
     yield repo
     app.dependency_overrides.clear()
 

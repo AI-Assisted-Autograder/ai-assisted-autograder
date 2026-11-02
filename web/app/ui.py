@@ -16,6 +16,7 @@ from fastapi.concurrency import run_in_threadpool
 from fastapi.responses import RedirectResponse
 from fastapi.templating import Jinja2Templates
 
+from app.auth import require_instructor
 from app.db import SessionLocal
 from app.models import GRADING_MODES, TARGET_KINDS
 from app.repository import (
@@ -27,7 +28,8 @@ from app.repository import (
     TargetStatus,
 )
 
-router = APIRouter()
+# Every page here needs a signed-in instructor; /login itself is in app.auth.
+router = APIRouter(dependencies=[Depends(require_instructor)])
 templates = Jinja2Templates(directory="app/templates")
 
 _repository = SqlGradingRepository(SessionLocal)
