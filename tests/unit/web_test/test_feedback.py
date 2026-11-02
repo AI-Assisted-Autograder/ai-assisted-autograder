@@ -33,6 +33,7 @@ def make_target(
     return SimpleNamespace(
         source_path=source_path,
         analysis=SimpleNamespace(
+            behavior=None,
             source_globs=source_globs or (source_path,),
             context_globs=context_globs,
             max_source_files=max_source_files,
