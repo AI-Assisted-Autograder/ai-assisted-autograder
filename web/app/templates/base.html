@@ -10,7 +10,13 @@
 <body>
     <header class="site">
         <a class="brand" href="/">AI-Assisted Autograder</a>
+        {% if request.state.instructor %}
         <nav><a href="/">Assignments</a></nav>
+        <form class="signed-in" method="post" action="/logout">
+            <span class="sub">{{ request.state.instructor.label }}</span>
+            <button type="submit" class="link">Sign out</button>
+        </form>
+        {% endif %}
     </header>
     <main>
         {% block content %}{% endblock %}

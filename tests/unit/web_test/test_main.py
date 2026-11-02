@@ -1,4 +1,5 @@
 
+import uuid
 from unittest.mock import MagicMock, patch
 
 import pytest
@@ -6,6 +7,7 @@ from fastapi import HTTPException
 
 from web.app import main
 from app.repository import InMemoryRepository
+from app.auth import InstructorAccount, require_instructor
 from app.ui import get_repository
 
 
@@ -150,6 +152,8 @@ def test_index_uses_in_memory_repository_override():
 
     app = main.app
     app.dependency_overrides[get_repository] = lambda: InMemoryRepository()
+    app.dependency_overrides[require_instructor] = lambda: InstructorAccount(
+        uuid.uuid4(), "ada@example.edu", None, "unused", True)
 
     try:
         with TestClient(app) as client:
