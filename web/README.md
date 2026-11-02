@@ -178,7 +178,11 @@ URL in `config.json` and an assignment token, not a duplicated assignment JSON.
 
 ### Request lifecycle
 
-The shared connector binds each request to the configuration revision it fetched.
+The shared connector generates a fresh run UUID for each submission execution,
+including individual reruns and Regrade All. It combines this UUID with the
+submission ID when available, target inputs and the fetched configuration revision
+to derive request IDs. Polling within a run reuses its request ID; an explicit
+`--run-id` supports intentional replay of the same submission and inputs.
 Rubric, analysis, model or prompt-version changes produce new request IDs on the
 next run. New requests with stale revisions return `409 config_changed` before
 reserving quota. Accepted requests retain their original configuration while

@@ -15,6 +15,7 @@ from pathlib import Path, PurePosixPath
 import re
 import sys
 import time
+import uuid
 
 from local_client import (
     ClientError, ConfigChangedError, MAX_FILES_BYTES, get_assignment_config, request_feedback,
@@ -340,9 +341,23 @@ def finalize_grading(results, revision, *, unknown=False):
 
 def add_feedback(root=Path('/autograder'), *, run_id=None):
     root = Path(root)
+    if run_id is None:
+        run_id = uuid.uuid4().hex
+    submission_id = None
+    try:
+        metadata = json.loads(read_artifact(root, 'submission_metadata.json'))
+        identifier = metadata.get('id') if isinstance(metadata, dict) else None
+        if (type(identifier) is int and identifier > 0
+                or isinstance(identifier, str) and re.fullmatch(r'[0-9]+', identifier)):
+            submission_id = str(identifier)
+    except (OSError, ValueError, ClientError):
+        pass
+    run_context = {'submission_id': submission_id, 'run_id': run_id}
     results_path = root / RESULTS_SOURCE
     raw_results = results_path.read_bytes()
     original = json.loads(raw_results)
+    if original.get('stdout_visibility', 'hidden') == 'hidden':
+        print(f"Instructor AI run: {json.dumps(run_context)}")
     base, previous_ai, blocked, cleanup_diagnostics = clean_results(original)
     config = json.loads((root / 'source/config.json').read_text(encoding='utf-8'))
     token_file = root / 'source/assignment.token'
@@ -372,6 +387,7 @@ def add_feedback(root=Path('/autograder'), *, run_id=None):
                     records.append({'target_id': target_id, 'error': 'This legacy target must be migrated to an explicit AI behavior.'})
                     unknown_grading = unknown_grading or target.get('max_score') is not None
                     continue
+                request_id = None
                 try:
                     if behavior == 'functional_test_feedback':
                         evidence, mapping = functional_evidence(base, analysis, blocked)
@@ -383,7 +399,7 @@ def add_feedback(root=Path('/autograder'), *, run_id=None):
                         raise ClientError('The total AI time budget was exhausted.')
                     files = collect_files(root / 'submission', analysis)
                     request_id = stable_request_id(target_id, files=files, evidence=evidence,
-                                                   namespace=f"{manifest['revision']}:{run_id or ''}")
+                                                   namespace=f"{manifest['revision']}:{submission_id or ''}:{run_id}")
                     remaining = deadline - time.monotonic()
                     if remaining <= 0:
                         raise ClientError('The total AI time budget was exhausted.')
@@ -400,7 +416,10 @@ def add_feedback(root=Path('/autograder'), *, run_id=None):
                     raise
                 except Exception as exc:
                     detail = str(exc) if isinstance(exc, ClientError) else 'Could not collect or process the configured AI inputs.'
-                    records.append({'target_id': target_id, 'error': detail})
+                    record = {'target_id': target_id, 'error': detail}
+                    if request_id is not None:
+                        record['request_id'] = request_id
+                    records.append(record)
                     if behavior == 'ai_grading':
                         results['tests'].extend(grading_rows(target_id, target, manifest['revision'], error=detail))
             break
@@ -437,6 +456,8 @@ def add_feedback(root=Path('/autograder'), *, run_id=None):
     # Never apply an explanation or score to a different functional-result snapshot.
     if results_path.read_bytes() != raw_results:
         raise ClientError('Functional results changed during AI processing; no AI result was applied.')
+    for record in records:
+        record.update(run_context)
     evidence_path = root / 'results/ai_evidence.json'
     evidence_path.write_text(json.dumps(records, ensure_ascii=False, indent=2, allow_nan=False) + '\n', encoding='utf-8')
     evidence_path.chmod(0o600)
@@ -446,6 +467,8 @@ def add_feedback(root=Path('/autograder'), *, run_id=None):
     if results.get('stdout_visibility', 'hidden') == 'hidden':
         for record in records:
             target = record.get('target_id', 'assignment')
+            if record.get('request_id'):
+                print(f"Instructor AI request [{target}]: {record['request_id']}")
             if record.get('error'):
                 print(f"Instructor AI diagnostic [{target}]: {record['error']}")
             for item in (*record.get('items', []), *record.get('failure_feedback', [])):
@@ -456,7 +479,7 @@ def add_feedback(root=Path('/autograder'), *, run_id=None):
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument('--root', type=Path, default=Path('/autograder'))
-    parser.add_argument('--run-id', help='New namespace for an independent run; reuse it for retries')
+    parser.add_argument('--run-id', help='Override the automatic per-run UUID for intentional replay of the same submission and inputs')
     args = parser.parse_args()
     try:
         add_feedback(args.root, run_id=args.run_id)

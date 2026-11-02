@@ -67,20 +67,21 @@ client/hook copies, `config.json` with only `backend_url`, and a private
 add the reusable files and hook to their functional grader; Web ZIP injection is
 not implemented. Keep credentials and generated upload ZIPs outside Git.
 
-The connector hashes source content, grading-relevant observations and the
-configuration revision into its request ID. Runtime metadata such as
-`execution_time` does not affect reuse. Unchanged inputs/configuration reuse
-completed results. Rubric,
-analysis, model or prompt-version changes use a new revision on the next run,
-without repackaging. New requests with a stale revision are rejected before
-reserving quota; accepted requests can still be polled or replayed after a
-configuration edit, subject to current assignment and target access.
+The connector generates a fresh run UUID each time it starts. Both a single
+submission rerun and Regrade All therefore create independent AI attempts for
+each eligible submission, without additional configuration. Request IDs include
+this UUID, the submission ID when available, source content, grading-relevant
+observations and the configuration revision. Targets, configuration refreshes and
+HTTP polling share the same run UUID. Missing submission metadata does not prevent
+local runs. Existing instructor diagnostics record the run and request IDs.
 
-To request fresh AI results, select **Start a new AI attempt** in the configuration
-form, save, and rerun the submission in Gradescope. This changes the assignment's
-revision for all targets; it does not start grading automatically. Alternatively,
-use `gradescope_feedback.py --run-id NEW_ID` for an independent trial. Reuse the
-same run ID for retries.
+Use `gradescope_feedback.py --run-id ORIGINAL_RUN_ID` only to intentionally replay
+the same submission, inputs and configuration. Runtime metadata such as
+`execution_time` does not affect reuse. Rubric, analysis, model or prompt-version
+changes use a new revision without repackaging. New requests with a stale revision
+are rejected before reserving quota; accepted requests can still be polled or
+replayed after a configuration edit, subject to current assignment and target
+access. Independent attempts consume new calls; polling and replay do not.
 
 ## Use the backend
 
