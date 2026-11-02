@@ -197,15 +197,17 @@ def create_target(
     assignment_id: uuid.UUID,
     identifier: Annotated[str, Form()] = "",
     kind: Annotated[str, Form()] = "",
-    max_score: Annotated[str, Form()] = "",
+    behavior: Annotated[str, Form()] = "ai_grading",
     source_globs: Annotated[str, Form()] = "",
     repo: IGradingRepository = Depends(get_repository),
 ):
-    form = {"identifier": identifier, "kind": kind, "max_score": max_score, "source_globs": source_globs}
+    form = {"identifier": identifier, "kind": kind, "behavior": behavior, "source_globs": source_globs}
     try:
+        if behavior not in ("ai_grading", "functional_test_feedback"):
+            raise ValueError("Choose AI grading or Functional-test feedback")
         patterns = [line.strip() for line in source_globs.splitlines() if line.strip()]
-        repo.create_target(assignment_id, identifier=identifier, kind=kind, max_score=parse_score(max_score),
-                           analysis_config={"source_globs": patterns} if patterns else None)
+        repo.create_target(assignment_id, identifier=identifier, kind=kind, max_score=None,
+                           analysis_config={"behavior": behavior, "source_globs": patterns})
     except NotFoundError:
         return not_found(request, "That assignment does not exist.")
     except (ValueError, ConflictError) as error:
@@ -250,21 +252,28 @@ def rubric_page(
     if form is None:
         current = target.rubric
         analysis = target.analysis_config
+        behavior = analysis.get("behavior") or ("ai_grading" if target.max_score is not None else "functional_test_feedback")
+        sources = analysis.get("evidence_sources", [])
+        functional_source = analysis.get("functional_result_source")
         form = {
             "criteria_text": (current and current.criteria_text) or "",
             "feedback_guidance": (current and current.feedback_guidance) or "",
             "analysis_mode": analysis.get("mode", "code_feedback"),
+            "behavior": behavior,
+            "functional_result_source": functional_source,
+            "grading_items": analysis.get("grading_items") or [
+                {"id": identifier, "requirement": "", "points": analysis.get("points_per_test")}
+                for identifier in analysis.get("expected_tests", [])
+            ],
+            "legacy_test_plan": analysis.get("test_plan", "") if not analysis.get("behavior") else "",
             "source_globs": "\n".join(analysis.get("source_globs", [])),
             "context_globs": "\n".join(analysis.get("context_globs", [])),
             "test_plan": analysis.get("test_plan", ""),
-            "expected_tests": "\n".join(analysis.get("expected_tests", [])),
-            "points_per_test": analysis.get("points_per_test"),
             "max_source_files": analysis.get("max_source_files"),
             "temperature": analysis.get("temperature"),
-            "max_score": target.max_score,
             "evidence_sources": [
                 {**source, "include": "\n".join(source.get("include", []))}
-                for source in analysis.get("evidence_sources", [])
+                for source in sources
             ],
         }
     return templates.TemplateResponse(
@@ -310,17 +319,22 @@ async def save_rubric(
 ):
     data = await request.form()
     form = {**dict(data), "criteria_text": criteria_text, "feedback_guidance": feedback_guidance,
-            "evidence_sources": []}
+            "evidence_sources": [], "grading_items": []}
     try:
         config = await run_in_threadpool(repo.get_assignment_config, assignment_id)
     except NotFoundError:
         return not_found(request, "That assignment does not exist.")
     # So a target cannot be edited under another assignment's URL.
-    if not any(t.id == target_id for t in config.targets):
+    current_target = next((target for target in config.targets if target.id == target_id), None)
+    if current_target is None:
         return not_found(request, "That grading target does not exist.")
+    form.setdefault("test_plan", current_target.analysis_config.get("test_plan", ""))
     try:
         options = {}
-        if "analysis_mode" in data:
+        if "behavior" in data:
+            behavior = form["behavior"]
+            if behavior not in ("ai_grading", "functional_test_feedback"):
+                raise ValueError("Choose AI grading or Functional-test feedback")
             form["evidence_sources"] = [
                 {"format": fmt, "path": path.strip(), "label": label.strip(), "include": include}
                 for fmt, path, label, include in zip(
@@ -329,24 +343,43 @@ async def save_rubric(
                 ) if path.strip() or label.strip() or include.strip()
             ]
             analysis = {
-                "mode": form["analysis_mode"],
-                "test_plan": form.get("test_plan", ""),
+                "behavior": behavior,
+                "test_plan": form["test_plan"],
+                "attempt_id": (str(uuid.uuid4()) if form.get("new_ai_attempt") == "1"
+                               else current_target.analysis_config.get("attempt_id")),
+                "mode": form.get("analysis_mode", "code_feedback") if behavior == "ai_grading" else "code_feedback",
                 "evidence_sources": [
                     {**source, "include": [line.strip() for line in source["include"].splitlines() if line.strip()]}
                     for source in form["evidence_sources"]
                 ],
             }
-            for key in ("source_globs", "context_globs", "expected_tests"):
+            if behavior == "ai_grading":
+                form["grading_items"] = [
+                    {"id": item_id.strip() or str(uuid.uuid4()), "requirement": requirement.strip(), "points": points}
+                    for item_id, requirement, points in zip(data.getlist("item_id"),
+                        data.getlist("item_requirement"), data.getlist("item_points"), strict=True)
+                ]
+                analysis["grading_items"] = []
+                for item in form["grading_items"]:
+                    points = parse_score(item["points"], "Item points")
+                    if points is None or points <= 0 or points.normalize().as_tuple().exponent < -2:
+                        raise ValueError("Item points must be positive with at most two decimal places")
+                    analysis["grading_items"].append({**item, "points": float(points)})
+                default_background = "Evaluate the configured items using the supplied student source and permitted evidence."
+            else:
+                analysis["functional_result_source"] = form.get("functional_result_source", "").strip()
+                default_background = "Explain the reported functional-test failures using the supplied student source and permitted evidence."
+            criteria_text = criteria_text.strip() or default_background
+            for key in ("source_globs", "context_globs"):
                 analysis[key] = [line.strip() for line in form.get(key, "").splitlines() if line.strip()]
-            for key in ("points_per_test", "temperature"):
-                value = parse_score(form.get(key, ""), key.replace("_", " "))
-                analysis[key] = float(value) if value is not None else None
+            temperature = parse_score(form.get("temperature", ""), "temperature")
+            analysis["temperature"] = float(temperature) if temperature is not None else None
             limit = form.get("max_source_files", "").strip()
             analysis["max_source_files"] = int(limit) if limit else None
-            options = {"analysis_config": analysis, "max_score": parse_score(form.get("max_score", ""))}
+            options = {"analysis_config": analysis, "max_score": None}
         await run_in_threadpool(repo.upsert_rubric, target_id, criteria_text=criteria_text,
                                 feedback_guidance=feedback_guidance, **options)
-    except ValueError as error:
+    except (ValueError, ConflictError) as error:
         message, status = form_error(error)
         return await run_in_threadpool(rubric_page, request, repo, assignment_id, target_id, form, message, status)
     return see_other(f"/assignments/{assignment_id}#targets")

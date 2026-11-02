@@ -615,8 +615,8 @@ class InMemoryRepository(IGradingRepository):
         if assignment_id not in self.assignments:
             raise NotFoundError(f"Assignment {assignment_id} not found")
         if analysis_config:
-            analysis_config = check_target_analysis(
-                identifier, kind, self.assignments[assignment_id].language, analysis_config, max_score,
+            analysis_config, max_score = check_target_analysis(
+                identifier, kind, self.assignments[assignment_id].language, analysis_config, max_score, draft=True,
             )
         registered = self._registered(assignment_id)
         if any(gt.identifier == identifier for gt in registered):
@@ -652,10 +652,16 @@ class InMemoryRepository(IGradingRepository):
         if analysis_config is None:
             analysis_config, max_score = target.analysis_config, target.max_score
         check_target_fields(target.identifier, target.kind, max_score)
-        target.analysis_config = check_target_analysis(
+        analysis_config, max_score = check_target_analysis(
             target.identifier, target.kind, self.assignments[target.assignment_id].language,
             analysis_config, max_score,
         )
+        if analysis_config.get("behavior") == "functional_test_feedback" and any(
+            other.id != target.id and other.analysis_config.get("behavior") == "functional_test_feedback"
+            and self._current_rubric(other.id) is not None for other in self._registered(target.assignment_id)
+        ):
+            raise ConflictError("An assignment supports only one active Functional-test feedback target")
+        target.analysis_config = analysis_config
         target.max_score = max_score
         current = self._current_rubric(grading_target_id)
         if current is not None and (current.criteria_text, current.feedback_guidance) == (

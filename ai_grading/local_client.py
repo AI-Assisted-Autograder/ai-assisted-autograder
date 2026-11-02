@@ -8,6 +8,7 @@ imports a Google SDK, discovers ADC, or falls back to a model endpoint.
 from __future__ import annotations
 
 import argparse
+from decimal import Decimal
 import hashlib
 from http.client import HTTPException
 import json
@@ -32,6 +33,12 @@ MAX_FILES_BYTES = 256 * 1024
 
 class ClientError(Exception):
     """An error with a deliberately safe, user-facing message."""
+
+
+class ConfigChangedError(ClientError):
+    """Inputs must be collected again using the current assignment revision."""
+
+    code = "config_changed"
 
 
 class _NoRedirects(HTTPRedirectHandler):
@@ -237,6 +244,19 @@ def request_feedback(
             try:
                 response = opener.open(request, timeout=min(remaining, 30))
             except HTTPError as error:
+                if error.code == 409:
+                    try:
+                        raw_error = error.read(MAX_RESPONSE_BYTES + 1)
+                        problem = json.loads(raw_error) if len(raw_error) <= MAX_RESPONSE_BYTES else None
+                    except (ValueError, OSError):
+                        problem = None
+                    finally:
+                        error.close()
+                    if (isinstance(problem, dict) and problem.get("request_id") == identifier
+                            and isinstance(problem.get("error"), dict)
+                            and problem["error"].get("code") == "config_changed"):
+                        raise ConfigChangedError("Assignment configuration changed; collect inputs again.") from None
+                    raise _safe_http_error(409) from None
                 if error.code != 429:
                     error.close()
                     raise _safe_http_error(error.code) from None
@@ -323,12 +343,35 @@ def request_feedback(
                 raise ValueError
         if len({item["test_id"] for item in clean_items}) != len(clean_items):
             raise ValueError
+        failures = result.get("failure_feedback", [])
+        if not isinstance(failures, list):
+            raise ValueError
+        clean_failures = []
+        for item in failures:
+            if (not isinstance(item, dict) or set(item) != {"evidence_id", "feedback", "evidence"}
+                    or any(not isinstance(item[key], str) or not item[key].strip() for key in item)):
+                raise ValueError
+            clean_failures.append(dict(item))
+        if len({item["evidence_id"] for item in clean_failures}) != len(clean_failures):
+            raise ValueError
         # Only explicitly supported fields cross the client boundary.
         safe = {"request_id": identifier, "feedback_text": result["feedback_text"],
                 "engine": engine, "provider": provider, "requested_model": requested_model,
                 "model_name": result["model_name"], "usage": usage}
         if "items" in result:
             safe["items"] = clean_items
+        if "failure_feedback" in result:
+            if clean_items or "max_score" in result:
+                raise ValueError
+            safe["failure_feedback"] = clean_failures
+        if "behavior" in result:
+            if result["behavior"] not in {"ai_grading", "functional_test_feedback"}:
+                raise ValueError
+            safe["behavior"] = result["behavior"]
+        if "grading_status" in result:
+            if result["grading_status"] not in {"complete", "pending_regrade"}:
+                raise ValueError
+            safe["grading_status"] = result["grading_status"]
         if "max_score" in result:
             maximum, score = result["max_score"], result.get("suggested_score")
             if (type(maximum) not in (int, float) or not math.isfinite(maximum) or maximum < 0
@@ -336,6 +379,36 @@ def request_feedback(
                         or not math.isfinite(score) or not 0 <= score <= maximum))):
                 raise ValueError
             safe.update(max_score=maximum, suggested_score=score)
+        behavior = safe.get("behavior")
+        if behavior == "functional_test_feedback":
+            expected = {item["id"] for item in (evidence or [])
+                        if item.get("kind") == "runtime" and item.get("status") == "fail"}
+            if (not clean_failures or "items" in result or "suggested_score" in result
+                    or "max_score" in result or safe.get("grading_status") != "complete"
+                    or {item["evidence_id"] for item in clean_failures} != expected):
+                raise ValueError
+        elif behavior == "ai_grading":
+            if not clean_items or "failure_feedback" in result or "max_score" not in safe:
+                raise ValueError
+            for item in clean_items:
+                maximum = item.get("max_score")
+                if maximum is None or maximum <= 0:
+                    raise ValueError
+                expected_score = (maximum if item["verdict"] == "pass" else
+                                  0 if item["verdict"] == "fail" else None)
+                if item.get("suggested_score") != expected_score:
+                    raise ValueError
+            pending = any(item["verdict"] == "insufficient_evidence" for item in clean_items)
+            maximum = sum((Decimal(str(item["max_score"])) for item in clean_items), Decimal(0))
+            total = None if pending else sum(
+                (Decimal(str(item["suggested_score"])) for item in clean_items), Decimal(0))
+            if (safe.get("grading_status") != ("pending_regrade" if pending else "complete")
+                    or Decimal(str(safe["max_score"])) != maximum
+                    or (safe["suggested_score"] is None) != pending
+                    or (not pending and Decimal(str(safe["suggested_score"])) != total)):
+                raise ValueError
+        elif "failure_feedback" in result or "grading_status" in result:
+            raise ValueError
         return safe
     except (UnicodeError, ValueError, TypeError):
         raise ClientError("Backend returned an invalid response.") from None
@@ -366,11 +439,25 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--evidence-json", type=Path, help="JSON array of runtime or coverage evidence")
     parser.add_argument("--target-id", default="example")
     parser.add_argument("--guidance", help="Optional feedback preference, subject to backend limits")
-    parser.add_argument("--request-id", help="New ID for each independent trial; reuse an ID for retries. Default: stable content hash")
+    parser.add_argument("--request-id", help="Explicit attempt ID; requires --config-revision. Reuse both unchanged for retries")
+    parser.add_argument("--config-revision", help="Revision used to prepare inputs; required with --request-id, otherwise fetched before reading files")
     parser.add_argument("--timeout", type=float, default=270)
     parser.add_argument("--json", action="store_true", help="Print the safe response fields as JSON")
     args = parser.parse_args(argv)
+    if args.request_id is not None and args.config_revision is None:
+        parser.error("--request-id requires the original --config-revision; reuse the pair printed before the first call")
+    if args.config_revision is not None and not re.fullmatch(r"[0-9a-f]{64}", args.config_revision):
+        parser.error("--config-revision must be the 64-character revision returned by the backend")
+    if args.request_id is not None and not re.fullmatch(r"[A-Za-z0-9._:-]{1,128}", args.request_id):
+        parser.error("--request-id must contain 1-128 letters, digits, dots, underscores, colons, or hyphens")
     try:
+        backend_url = args.backend_url or _backend_from_config(args.config)
+        revision = args.config_revision
+        if revision is None:
+            manifest = get_assignment_config(backend_url=backend_url, token_file=args.token_file)
+            if args.target_id not in manifest["targets"]:
+                raise ClientError("Target is not available in this assignment configuration.")
+            revision = manifest["revision"]
         code = None
         files = None
         if args.code_file:
@@ -380,15 +467,20 @@ def main(argv: list[str] | None = None) -> int:
         else:
             files = json.loads(args.files_json.read_text(encoding="utf-8"))
         evidence = json.loads(args.evidence_json.read_text(encoding="utf-8")) if args.evidence_json else None
+        identifier = args.request_id or stable_request_id(
+            args.target_id, code, args.guidance, files=files, evidence=evidence, namespace=revision,
+        )
+        print(f"Retry with --request-id {identifier} --config-revision {revision}", file=sys.stderr, flush=True)
         result = request_feedback(
-            backend_url=args.backend_url or _backend_from_config(args.config),
+            backend_url=backend_url,
             token_file=args.token_file,
             code=code,
             files=files,
             evidence=evidence,
             target_id=args.target_id,
             guidance=args.guidance,
-            request_id=args.request_id,
+            request_id=identifier,
+            config_revision=revision,
             timeout=args.timeout,
         )
         if args.json:
@@ -399,6 +491,14 @@ def main(argv: list[str] | None = None) -> int:
             print("Requested model:", result["requested_model"])
             print("Model:", result["model_name"])
             print(result["feedback_text"])
+            for item in result.get("items", []):
+                score = item.get("suggested_score")
+                label = "Pending regrade" if score is None else str(score)
+                print(f"{item['test_id']}: {label} / {item.get('max_score')}")
+                if item["feedback"]:
+                    print(item["feedback"])
+            for item in result.get("failure_feedback", []):
+                print(f"{item['evidence_id']}: {item['feedback']}")
             if result["usage"] is not None:
                 print("Usage:", json.dumps(result["usage"], sort_keys=True))
         return 0

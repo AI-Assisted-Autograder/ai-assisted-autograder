@@ -84,7 +84,8 @@ def assignment_revision(assignment) -> str:
     """Bind collected inputs and replay IDs to the grading configuration."""
     content = {"assignment": assignment.model_dump(mode="json"),
                "prompts": [PromptBuilder.version, PromptBuilder.extended_version,
-                           PromptBuilder.per_test_version]}
+                           PromptBuilder.per_test_version, PromptBuilder.grading_version,
+                           PromptBuilder.functional_version]}
     canonical = json.dumps(content, sort_keys=True, separators=(",", ":"), ensure_ascii=False)
     return hashlib.sha256(canonical.encode("utf-8")).hexdigest()
 
@@ -106,11 +107,21 @@ def resolve_input(payload: FeedbackInput, target) -> ResolvedSource:
     else:
         resolved = ResolvedSource(source_file=CodeFile(path=target.source_path, content=payload.code))
     sources = {source.label: source for source in target.analysis.evidence_sources}
+    if target.analysis.behavior is not None and payload.functional_test_feedback:
+        raise ValueError("use scoped evidence for configured behaviors")
     kinds = {"gradescope": "runtime", "junit": "runtime", "jacoco": "coverage", "text": "diagnostic"}
     for item in payload.evidence:
         source = sources.get(item.source)
         if source is None:
             raise ValueError("evidence source is outside the configured target")
+        if target.analysis.behavior is not None:
+            # Opaque logs have no row visibility or reliable student-facing scope.
+            if source.format != "gradescope" or item.kind != "runtime":
+                raise ValueError("student feedback requires scoped Gradescope observations")
+            if target.analysis.behavior == "functional_test_feedback" and (
+                source.label != target.analysis.functional_result_source or item.status != "fail"
+            ):
+                raise ValueError("functional feedback requires the selected failed rows")
         if (item.kind == "diagnostic" and item.status == "unknown"
                 and item.test_id is None and item.scope == source.label):
             continue
@@ -226,9 +237,17 @@ def create_feedback_router(state_path: str | Path, *, assignment_loader,
                 "identifier": target.identifier, "kind": target.kind,
                 "source_path": target.source_path, "max_score": target.max_score,
                 "analysis": {key: analysis[key] for key in (
-                    "mode", "source_globs", "context_globs", "evidence_sources", "max_source_files",
+                    "mode", "behavior", "functional_result_source", "source_globs", "context_globs",
+                    "evidence_sources", "max_source_files",
                 )},
             }
+            targets[target_id]["analysis"]["grading_items"] = [
+                {"id": item.id, "points": item.points,
+                 "label": (f"Criterion {index}" if re.fullmatch(
+                     r"[0-9a-fA-F]{8}(?:-[0-9a-fA-F]{4}){3}-[0-9a-fA-F]{12}", item.id,
+                 ) else item.id)}
+                for index, item in enumerate(target.analysis.grading_items, 1)
+            ]
         return JSONResponse({"assignment_id": assignment.id,
                              "revision": assignment_revision(assignment), "targets": targets},
                             headers={"Cache-Control": "no-store"})
@@ -277,6 +296,11 @@ def create_feedback_router(state_path: str | Path, *, assignment_loader,
             }
             if response.items:
                 result["items"] = [asdict(item) for item in response.items]
+            if target.analysis.behavior is not None:
+                result["behavior"] = target.analysis.behavior
+                result["grading_status"] = response.grading_status
+            if response.failure_feedback:
+                result["failure_feedback"] = [asdict(item) for item in response.failure_feedback]
             if target.max_score is not None:
                 result["suggested_score"] = response.suggested_score
                 result["max_score"] = target.max_score
@@ -335,6 +359,14 @@ def create_feedback_router(state_path: str | Path, *, assignment_loader,
             assignment = await load_assignment(assignment_id)
         except StoreError as exc:
             return error(exc.code, exc.status_code, rid)
+        try:
+            existing = store.get_request(assignment_id, rid)
+        except StoreError as exc:
+            return error(exc.code, exc.status_code, rid)
+        # A new stale request must refresh even if its target was removed.
+        if (existing is None and payload.config_revision is not None
+                and payload.config_revision != assignment_revision(assignment)):
+            return error("config_changed", 409, rid)
         target = assignment.targets.get(payload.target_id)
         if target is None:
             return error("target_forbidden", 403, rid)
@@ -353,15 +385,11 @@ def create_feedback_router(state_path: str | Path, *, assignment_loader,
         canonical = json.dumps(content,
                                sort_keys=True, separators=(",", ":"), ensure_ascii=False)
         digest = hashlib.sha256(canonical.encode("utf-8")).hexdigest()
-        try:
-            existing = store.get_request(assignment_id, rid)
-        except StoreError as exc:
-            return error(exc.code, exc.status_code, rid)
         # An accepted request retains its configuration snapshot while polling.
         # Current assignment/target authorization above still applies to replays.
         if existing is None:
-            if payload.config_revision is not None and payload.config_revision != assignment_revision(assignment):
-                return error("config_changed", 409, rid)
+            if target.analysis.behavior is not None and payload.config_revision is None:
+                return error("invalid_request", 422, rid)
             guidance = target.rubric.feedback_guidance
             if payload.guidance:
                 guidance += "\nOptional client feedback guidance:\n" + payload.guidance

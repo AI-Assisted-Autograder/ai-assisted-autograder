@@ -7,7 +7,7 @@ from decimal import Decimal
 
 from pydantic import TypeAdapter
 
-from ..models import FeedbackItem, FeedbackRequest, FeedbackResponse, Score
+from ..models import FailureFeedbackItem, FeedbackItem, FeedbackRequest, FeedbackResponse, Score
 from .ILLMProvider import ProviderError
 
 
@@ -24,8 +24,58 @@ def parse_feedback(
     """Validate model output; code owns verdict IDs, scores and serialization."""
     try:
         items = ()
+        failure_feedback = ()
         suggested_score = None
-        if request.analysis.mode == "code_feedback":
+        grading_status = "complete"
+        if request.analysis.behavior is not None:
+            if len(output) > 64_000:
+                raise ValueError("structured feedback exceeds the response limit")
+            document = json.loads(output)
+            if request.analysis.behavior == "functional_test_feedback":
+                if (not isinstance(document, dict) or set(document) != {"failure_feedback"}
+                        or not isinstance(document["failure_feedback"], list)):
+                    raise ValueError("functional feedback requires only failure explanations")
+                failure_feedback = TypeAdapter(tuple[FailureFeedbackItem, ...]).validate_python(
+                    document["failure_feedback"],
+                )
+                expected = [item.id for item in request.evidence
+                            if item.source == request.analysis.functional_result_source
+                            and item.kind == "runtime" and item.status == "fail"]
+                ids = [item.evidence_id for item in failure_feedback]
+                if not expected or len(ids) != len(set(ids)) or set(ids) != set(expected):
+                    raise ValueError("functional feedback must match every selected failed row")
+                by_id = {item.evidence_id: item for item in failure_feedback}
+                failure_feedback = tuple(by_id[identifier] for identifier in expected)
+                feedback_text = "Explanations for failed functional tests."
+            else:
+                if (not isinstance(document, dict) or set(document) != {"items"}
+                        or not isinstance(document["items"], list)):
+                    raise ValueError("AI grading requires only grading verdicts")
+                if any(not isinstance(item, dict)
+                       or set(item) != {"test_id", "verdict", "feedback", "evidence"}
+                       for item in document["items"]):
+                    raise ValueError("model verdicts must not contain scoring or extra fields")
+                items = TypeAdapter(tuple[FeedbackItem, ...]).validate_python(document["items"])
+                ids = [item.test_id for item in items]
+                expected = request.analysis.grading_items
+                if (not expected or len(ids) != len(set(ids))
+                        or set(ids) != {item.id for item in expected}):
+                    raise ValueError("AI verdicts must match every configured grading item")
+                by_id = {item.test_id: item for item in items}
+                items = tuple(replace(
+                    by_id[configured.id], max_score=configured.points,
+                    suggested_score=(configured.points if by_id[configured.id].verdict == "pass"
+                                     else 0.0 if by_id[configured.id].verdict == "fail" else None),
+                ) for configured in expected)
+                if all(item.suggested_score is not None for item in items):
+                    suggested_score = float(sum(
+                        (Decimal(str(item.suggested_score)) for item in items), Decimal(0),
+                    ))
+                    feedback_text = "AI grading completed."
+                else:
+                    grading_status = "pending_regrade"
+                    feedback_text = "AI grading incomplete; pending regrade."
+        elif request.analysis.mode == "code_feedback":
             score_line, separator, feedback_text = output.partition("\n")
             match = re.fullmatch(r"SCORE: (NONE|[0-9]+(?:\.[0-9]+)?)\r?", score_line)
             if not separator or match is None:
@@ -89,6 +139,8 @@ def parse_feedback(
             input_tokens=input_tokens,
             output_tokens=output_tokens,
             items=items,
+            failure_feedback=failure_feedback,
+            grading_status=grading_status,
         )
     except ValueError:
         raise ProviderError(

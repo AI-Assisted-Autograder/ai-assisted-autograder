@@ -239,6 +239,8 @@ class SqlGradingRepository(IGradingRepository):
 
     def get_assignment_config(self, assignment_id: uuid.UUID) -> AssignmentConfig:
         with self._sessions.begin() as s:
+            # Targets, rubrics and the selected provider must describe one DB snapshot.
+            s.connection(execution_options={"isolation_level": "REPEATABLE READ"})
             a = s.get(Assignment, assignment_id)
             if a is None:
                 raise NotFoundError(f"Assignment {assignment_id} not found")
@@ -586,8 +588,8 @@ class SqlGradingRepository(IGradingRepository):
             if assignment is None:
                 raise NotFoundError(f"Assignment {assignment_id} not found")
             if analysis_config:
-                analysis_config = check_target_analysis(
-                    identifier, kind, assignment.language, analysis_config, max_score,
+                analysis_config, max_score = check_target_analysis(
+                    identifier, kind, assignment.language, analysis_config, max_score, draft=True,
                 )
             last = s.scalar(
                 select(func.max(GradingTarget.display_order)).where(GradingTarget.assignment_id == assignment_id)
@@ -633,17 +635,29 @@ class SqlGradingRepository(IGradingRepository):
         feedback_guidance = clean(feedback_guidance)
         RubricInput(criteria_text=criteria_text, feedback_guidance=feedback_guidance or "")
         with self._sessions.begin() as s:
-            # Locked so two saves at once cannot both take version n+1.
+            assignment_id = s.scalar(select(GradingTarget.assignment_id).where(GradingTarget.id == grading_target_id))
+            if assignment_id is None:
+                raise NotFoundError(f"Grading target {grading_target_id} not found")
+            # Serialize activation across targets before locking an individual target.
+            assignment = s.get(Assignment, assignment_id, with_for_update=True)
             target = s.get(GradingTarget, grading_target_id, with_for_update=True)
             if target is None:
                 raise NotFoundError(f"Grading target {grading_target_id} not found")
             if analysis_config is None:
                 analysis_config, max_score = target.analysis_config, target.max_score
             check_target_fields(target.identifier, target.kind, max_score)
-            target.analysis_config = check_target_analysis(
-                target.identifier, target.kind, s.get(Assignment, target.assignment_id).language,
+            analysis_config, max_score = check_target_analysis(
+                target.identifier, target.kind, assignment.language,
                 analysis_config, max_score,
             )
+            if analysis_config.get("behavior") == "functional_test_feedback":
+                others = s.scalars(select(GradingTarget).join(Rubric).where(
+                    GradingTarget.assignment_id == assignment_id,
+                    GradingTarget.id != grading_target_id, Rubric.is_current,
+                ))
+                if any(other.analysis_config.get("behavior") == "functional_test_feedback" for other in others):
+                    raise ConflictError("An assignment supports only one active Functional-test feedback target")
+            target.analysis_config = analysis_config
             target.max_score = max_score
             current = s.scalar(
                 select(Rubric).where(Rubric.grading_target_id == grading_target_id, Rubric.is_current)

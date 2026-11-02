@@ -58,9 +58,34 @@ class GeminiProvider:
         """Return validated feedback; output token usage includes Gemini thoughts."""
         prompt = self._builder.prepare(req)
         response_json_schema = None
-        if (req.analysis.points_per_test is not None
+        if req.analysis.behavior == "functional_test_feedback":
+            expected = [item.id for item in req.evidence
+                        if item.source == req.analysis.functional_result_source
+                        and item.kind == "runtime" and item.status == "fail"]
+            response_json_schema = {
+                "type": "object",
+                "properties": {
+                    "failure_feedback": {
+                        "type": "array", "minItems": len(expected), "maxItems": len(expected),
+                        "items": {
+                            "type": "object",
+                            "properties": {
+                                "evidence_id": {"type": "string", "enum": expected},
+                                "feedback": {"type": "string"},
+                                "evidence": {"type": "string"},
+                            },
+                            "required": ["evidence_id", "feedback", "evidence"],
+                            "additionalProperties": False,
+                        },
+                    },
+                },
+                "required": ["failure_feedback"], "additionalProperties": False,
+            }
+        elif (req.analysis.behavior == "ai_grading" or req.analysis.points_per_test is not None
                 or (req.analysis.mode == "test_quality" and req.target.max_score is None)):
-            expected_tests = list(req.analysis.expected_tests)
+            expected_tests = ([item.id for item in req.analysis.grading_items]
+                              if req.analysis.behavior == "ai_grading"
+                              else list(req.analysis.expected_tests))
             # Scores belong to the backend, not the model's response contract.
             response_json_schema = {
                 "type": "object",
@@ -87,6 +112,9 @@ class GeminiProvider:
                 "required": ["feedback_text", "items"],
                 "additionalProperties": False,
             }
+            if req.analysis.behavior == "ai_grading":
+                del response_json_schema["properties"]["feedback_text"]
+                response_json_schema["required"] = ["items"]
             if expected_tests:
                 items_schema = response_json_schema["properties"]["items"]
                 items_schema["minItems"] = items_schema["maxItems"] = len(expected_tests)
@@ -99,7 +127,8 @@ class GeminiProvider:
                     system_instruction=prompt.system_instruction,
                     http_options=self._http_options,
                     response_mime_type=(
-                        "text/plain" if req.analysis.mode == "code_feedback" else "application/json"
+                        "text/plain" if req.analysis.behavior is None and req.analysis.mode == "code_feedback"
+                        else "application/json"
                     ),
                     response_json_schema=response_json_schema,
                     max_output_tokens=self._max_output_tokens,
