@@ -204,8 +204,8 @@
         resultSource.replaceChildren(new Option('Choose the final Gradescope report', ''));
         sources.querySelectorAll('.evidence-source').forEach(source => {
             const format = source.querySelector('[name="evidence_format"]').value;
-            const path = source.querySelector('[name="evidence_path"]').value.trim();
-            const label = source.querySelector('[name="evidence_label"]').value.trim();
+            const path = source.querySelector('[name="evidence_path"]').value;
+            const label = source.querySelector('[name="evidence_label"]').value;
             if (format === 'gradescope' && path === 'results/results.json' && label) {
                 resultSource.add(new Option(label, label, false, label === selected));
             }

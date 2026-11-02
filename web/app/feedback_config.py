@@ -12,7 +12,8 @@ from uuid import UUID
 from pydantic import AfterValidator, BaseModel, ConfigDict, Field, TypeAdapter, field_validator, model_validator
 
 from ai_grading.FileResolver import FileResolver
-from ai_grading.models import AnalysisConfig, Score, TargetKind
+from ai_grading.PromptBuilder import PromptBuilder
+from ai_grading.models import AnalysisConfig, GradingTarget, Rubric, Score, TargetKind
 
 
 Identifier = Annotated[str, Field(min_length=1, max_length=128, pattern=r"^[A-Za-z0-9_.:-]+$")]
@@ -143,6 +144,16 @@ class TargetSettings(StrictModel):
     analysis: Analysis = Field(default_factory=AnalysisConfig)
     max_score: Score | None = None
 
+    def validate_rubric(self, rubric: RubricInput) -> None:
+        if self.analysis.behavior is not None:
+            PromptBuilder().validate_configuration(
+                rubric=Rubric(criteria_text=rubric.criteria_text,
+                              feedback_guidance=rubric.feedback_guidance),
+                target=GradingTarget(identifier=self.identifier, kind=TargetKind(self.kind),
+                                     max_score=self.max_score),
+                analysis=self.analysis,
+            )
+
     @model_validator(mode="after")
     def scoring(self):
         if self.analysis.behavior == "ai_grading":
@@ -177,6 +188,11 @@ class TargetConfig(TargetSettings):
     source_path: str = Field(min_length=1, max_length=256)
     rubric: RubricConfig
 
+    @model_validator(mode="after")
+    def prompt_budget(self):
+        self.validate_rubric(self.rubric)
+        return self
+
 
 class AssignmentConfig(StrictModel):
     id: Identifier
@@ -210,6 +226,7 @@ class TargetInput(TargetSettings):
     def explicit_behavior(self):
         if self.analysis.behavior is None:
             raise ValueError("New targets require analysis.behavior: ai_grading or functional_test_feedback")
+        self.validate_rubric(self.rubric)
         return self
 
 

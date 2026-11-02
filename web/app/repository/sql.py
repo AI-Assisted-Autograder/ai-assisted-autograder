@@ -633,7 +633,7 @@ class SqlGradingRepository(IGradingRepository):
     ) -> RubricConfig:
         criteria_text = required(criteria_text, "Criteria")
         feedback_guidance = clean(feedback_guidance)
-        RubricInput(criteria_text=criteria_text, feedback_guidance=feedback_guidance or "")
+        rubric_input = RubricInput(criteria_text=criteria_text, feedback_guidance=feedback_guidance or "")
         with self._sessions.begin() as s:
             assignment_id = s.scalar(select(GradingTarget.assignment_id).where(GradingTarget.id == grading_target_id))
             if assignment_id is None:
@@ -648,7 +648,7 @@ class SqlGradingRepository(IGradingRepository):
             check_target_fields(target.identifier, target.kind, max_score)
             analysis_config, max_score = check_target_analysis(
                 target.identifier, target.kind, assignment.language,
-                analysis_config, max_score,
+                analysis_config, max_score, rubric=rubric_input,
             )
             if analysis_config.get("behavior") == "functional_test_feedback":
                 others = s.scalars(select(GradingTarget).join(Rubric).where(

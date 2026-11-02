@@ -645,7 +645,7 @@ class InMemoryRepository(IGradingRepository):
     ) -> RubricConfig:
         criteria_text = required(criteria_text, "Criteria")
         feedback_guidance = clean(feedback_guidance)
-        RubricInput(criteria_text=criteria_text, feedback_guidance=feedback_guidance or "")
+        rubric_input = RubricInput(criteria_text=criteria_text, feedback_guidance=feedback_guidance or "")
         if grading_target_id not in self.grading_targets:
             raise NotFoundError(f"Grading target {grading_target_id} not found")
         target = self.grading_targets[grading_target_id]
@@ -654,7 +654,7 @@ class InMemoryRepository(IGradingRepository):
         check_target_fields(target.identifier, target.kind, max_score)
         analysis_config, max_score = check_target_analysis(
             target.identifier, target.kind, self.assignments[target.assignment_id].language,
-            analysis_config, max_score,
+            analysis_config, max_score, rubric=rubric_input,
         )
         if analysis_config.get("behavior") == "functional_test_feedback" and any(
             other.id != target.id and other.analysis_config.get("behavior") == "functional_test_feedback"

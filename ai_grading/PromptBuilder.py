@@ -203,7 +203,7 @@ class PromptBuilder:
         rubric: Rubric,
         guidance: str,
         functional_test_feedback: Sequence[str],
-        resolved: ResolvedSource,
+        resolved: ResolvedSource | None,
         *,
         target: GradingTarget | None = None,
         analysis: AnalysisConfig | None = None,
@@ -227,22 +227,24 @@ class PromptBuilder:
             evidence = tuple(item for item in evidence
                              if item.source == analysis.functional_result_source
                              and item.kind == "runtime" and item.status == "fail")
-            if not evidence:
+            if not evidence and resolved is not None:
                 raise GradingInputError("functional-test feedback requires failed functional rows")
         if any(len(item.summary) > self.max_feedback_chars for item in evidence):
             raise GradingInputError("evidence summary exceeds max_feedback_chars")
         if (sum(len(item.summary) for item in evidence) + sum(map(len, functional_test_feedback))
                 > self.max_target_feedback_chars):
             raise GradingInputError("execution evidence exceeds max_target_feedback_chars")
-        extended = bool(resolved.context_files or evidence or analysis != AnalysisConfig())
-        source_context = asdict(resolved)
-        if extended:
-            for source in (source_context["source_file"], *source_context["context_files"]):
-                source["content"] = "\n".join(
-                    f"{number}: {line}" for number, line in enumerate(source["content"].splitlines(), 1)
-                )
-        else:
-            source_context.pop("context_files")
+        extended = bool((resolved is not None and resolved.context_files)
+                        or evidence or analysis != AnalysisConfig())
+        source_context = asdict(resolved) if resolved is not None else None
+        if source_context is not None:
+            if extended:
+                for source in (source_context["source_file"], *source_context["context_files"]):
+                    source["content"] = "\n".join(
+                        f"{number}: {line}" for number, line in enumerate(source["content"].splitlines(), 1)
+                    )
+            else:
+                source_context.pop("context_files")
         context = {
             "target": asdict(target) if target is not None else None,
             "rubric": {
@@ -296,6 +298,12 @@ class PromptBuilder:
         if len(prompt.text) > self.max_context_chars:
             raise GradingInputError("grading context exceeds max_context_chars")
         return prompt
+
+    def validate_configuration(self, *, rubric: Rubric, target: GradingTarget,
+                               analysis: AnalysisConfig) -> None:
+        """Reject instructor content that cannot fit before collecting runtime inputs."""
+        self._prepare(rubric, rubric.feedback_guidance, (), None,
+                      target=target, analysis=analysis)
 
     def prepare(self, req: FeedbackRequest) -> PreparedPrompt:
         return self._prepare(

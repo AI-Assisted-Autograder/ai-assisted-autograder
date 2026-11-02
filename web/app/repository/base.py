@@ -18,7 +18,7 @@ from enum import Enum
 
 from pydantic import TypeAdapter
 
-from app.feedback_config import Analysis, TargetSettings, resolve_target_analysis
+from app.feedback_config import Analysis, RubricInput, TargetSettings, resolve_target_analysis
 from app.models import GRADING_MODES, TARGET_KINDS
 
 
@@ -486,7 +486,8 @@ def check_target_fields(identifier: str, kind: str, max_score: Decimal | None) -
 
 
 def check_target_analysis(identifier: str, kind: str, language: str, analysis: dict,
-                          max_score: Decimal | None, *, draft: bool = False) -> tuple[dict, Decimal | None]:
+                          max_score: Decimal | None, *, draft: bool = False,
+                          rubric: RubricInput | None = None) -> tuple[dict, Decimal | None]:
     value = TypeAdapter(Analysis).validate_python(analysis)
     if draft:
         incomplete = (value.behavior == "ai_grading" and not value.grading_items
@@ -501,6 +502,8 @@ def check_target_analysis(identifier: str, kind: str, language: str, analysis: d
         identifier=identifier, kind=kind, max_score=max_score,
         analysis=value,
     )
+    if rubric is not None:
+        settings.validate_rubric(rubric)
     return asdict(settings.analysis), to_decimal(settings.max_score)
 
 

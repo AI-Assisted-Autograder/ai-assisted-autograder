@@ -205,15 +205,15 @@ def create_target(
     try:
         if behavior not in ("ai_grading", "functional_test_feedback"):
             raise ValueError("Choose AI grading or Functional-test feedback")
-        patterns = [line.strip() for line in source_globs.splitlines() if line.strip()]
-        repo.create_target(assignment_id, identifier=identifier, kind=kind, max_score=None,
-                           analysis_config={"behavior": behavior, "source_globs": patterns})
+        patterns = [line for line in source_globs.splitlines() if line.strip()]
+        target_id = repo.create_target(assignment_id, identifier=identifier, kind=kind, max_score=None,
+                                      analysis_config={"behavior": behavior, "source_globs": patterns})
     except NotFoundError:
         return not_found(request, "That assignment does not exist.")
     except (ValueError, ConflictError) as error:
         message, status = form_error(error)
         return assignment_page(request, repo, assignment_id, form, message, status)
-    return see_other(f"/assignments/{assignment_id}#targets")
+    return see_other(f"/assignments/{assignment_id}/targets/{target_id}/rubric")
 
 
 @router.post("/assignments/{assignment_id}/targets/{target_id}/delete")
@@ -336,7 +336,7 @@ async def save_rubric(
             if behavior not in ("ai_grading", "functional_test_feedback"):
                 raise ValueError("Choose AI grading or Functional-test feedback")
             form["evidence_sources"] = [
-                {"format": fmt, "path": path.strip(), "label": label.strip(), "include": include}
+                {"format": fmt, "path": path, "label": label, "include": include}
                 for fmt, path, label, include in zip(
                     data.getlist("evidence_format"), data.getlist("evidence_path"),
                     data.getlist("evidence_label"), data.getlist("evidence_include"), strict=True,
@@ -347,15 +347,15 @@ async def save_rubric(
                 "test_plan": form["test_plan"],
                 "attempt_id": (str(uuid.uuid4()) if form.get("new_ai_attempt") == "1"
                                else current_target.analysis_config.get("attempt_id")),
-                "mode": form.get("analysis_mode", "code_feedback") if behavior == "ai_grading" else "code_feedback",
+                "mode": form.get("analysis_mode", current_target.analysis_config.get("mode", "code_feedback")),
                 "evidence_sources": [
-                    {**source, "include": [line.strip() for line in source["include"].splitlines() if line.strip()]}
+                    {**source, "include": [line for line in source["include"].splitlines() if line.strip()]}
                     for source in form["evidence_sources"]
                 ],
             }
             if behavior == "ai_grading":
                 form["grading_items"] = [
-                    {"id": item_id.strip() or str(uuid.uuid4()), "requirement": requirement.strip(), "points": points}
+                    {"id": item_id or str(uuid.uuid4()), "requirement": requirement, "points": points}
                     for item_id, requirement, points in zip(data.getlist("item_id"),
                         data.getlist("item_requirement"), data.getlist("item_points"), strict=True)
                 ]
@@ -367,11 +367,11 @@ async def save_rubric(
                     analysis["grading_items"].append({**item, "points": float(points)})
                 default_background = "Evaluate the configured items using the supplied student source and permitted evidence."
             else:
-                analysis["functional_result_source"] = form.get("functional_result_source", "").strip()
+                analysis["functional_result_source"] = form.get("functional_result_source", "")
                 default_background = "Explain the reported functional-test failures using the supplied student source and permitted evidence."
             criteria_text = criteria_text.strip() or default_background
             for key in ("source_globs", "context_globs"):
-                analysis[key] = [line.strip() for line in form.get(key, "").splitlines() if line.strip()]
+                analysis[key] = [line for line in form.get(key, "").splitlines() if line.strip()]
             temperature = parse_score(form.get("temperature", ""), "temperature")
             analysis["temperature"] = float(temperature) if temperature is not None else None
             limit = form.get("max_source_files", "").strip()
