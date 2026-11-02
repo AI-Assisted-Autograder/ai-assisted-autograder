@@ -431,6 +431,12 @@ def test_assignment_create_requires_exactly_one_course_source():
             {
                 "identifier": "target-1",
                 "rubric": {"criteria_text": "Correctness"},
+                "analysis": {
+                    "behavior": "ai_grading",
+                    "grading_items": [
+                        {"id": "correctness", "requirement": "Returns the sum.", "points": 5},
+                    ],
+                },
             }
         ],
     }
@@ -457,10 +463,22 @@ def test_assignment_create_rejects_duplicate_target_identifiers():
                 {
                     "identifier": "same",
                     "rubric": {"criteria_text": "Correctness"},
+                    "analysis": {
+                        "behavior": "ai_grading",
+                        "grading_items": [
+                            {"id": "correctness", "requirement": "Returns the sum.", "points": 5},
+                        ],
+                    },
                 },
                 {
                     "identifier": "same",
                     "rubric": {"criteria_text": "Style"},
+                    "analysis": {
+                        "behavior": "ai_grading",
+                        "grading_items": [
+                            {"id": "style", "requirement": "Uses descriptive names.", "points": 5},
+                        ],
+                    },
                 },
             ],
         )

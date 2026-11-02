@@ -118,11 +118,20 @@
         <header>
             <code class="target">{{ t.identifier }}</code>
             <span class="badge muted">{{ t.kind | title }}</span>
+            {% if t.analysis_config.get('behavior') %}<span class="badge muted">{{ 'AI grading' if t.analysis_config.behavior == 'ai_grading' else 'Functional-test feedback' }}</span>{% endif %}
             {% if t.max_score is not none %}<span class="score">{{ t.max_score | number }} {{ "pt" if t.max_score == 1 else "pts" }}</span>{% endif %}
         </header>
         {% if t.rubric %}
-        <h3>Rubric <span class="sub">version {{ t.rubric.version }}</span></h3>
+        <h3>Common background <span class="sub">version {{ t.rubric.version }}</span></h3>
         {{ long_text(t.rubric.criteria_text or "(no criteria)") }}
+        {% if t.analysis_config.get('grading_items') %}
+        <h3>Grading items</h3>
+        <ol>
+            {% for item in t.analysis_config.grading_items %}
+            <li><code>{{ item.id }}</code> — {{ item.points }} points{{ long_text(item.requirement) }}</li>
+            {% endfor %}
+        </ol>
+        {% endif %}
         {% if t.rubric.feedback_guidance %}
         <h3>Feedback guidance</h3>
         {{ long_text(t.rubric.feedback_guidance) }}
@@ -160,18 +169,22 @@
             {% endfor %}
         </select>
     </label>
-    <label class="narrow">
-        Max score (optional)
-        <input name="max_score" value="{{ target_form.max_score or '' }}" inputmode="decimal">
+    <label>
+        Behavior
+        <select name="behavior" required>
+            <option value="ai_grading" {% if target_form.behavior == 'ai_grading' %}selected{% endif %}>AI grading</option>
+            <option value="functional_test_feedback" {% if target_form.behavior == 'functional_test_feedback' %}selected{% endif %}>Functional-test feedback</option>
+        </select>
     </label>
     <label class="grow">
         Primary source patterns (optional)
         <textarea name="source_globs" rows="2" placeholder="src/**/*.java">{{ target_form.source_globs or '' }}</textarea>
     </label>
-    <button type="submit">Add target</button>
+    <button type="submit">Continue to configuration</button>
 </form>
 <p class="hint">
-    You can add a target before choosing its source files, then configure its rubric, source selection and runtime evidence.
+    Continue to configure source selection, public assignment context, runtime evidence and grading items or functional-test feedback.
+    An assignment supports one active Functional-test feedback target, covering all eligible failed tests.
     Enter one submission-relative source pattern per line, or leave patterns blank to locate one file from the identifier and assignment language.
     Source selection must be valid when you save the configuration before this target can be graded.
 </p>

@@ -265,27 +265,26 @@ def test_create_assignment_missing_field_is_400(client, repo):
     assert repo.assignments == {}
 
 
-def test_add_target_redirects_back(client, repo):
+def test_add_target_redirects_to_configuration(client, repo):
     aid = repo.add_assignment("IMMEDIATE", name="Calc")
 
     response = client.post(
         f"/assignments/{aid}/targets",
-        data={"identifier": "add", "kind": "METHOD", "max_score": "5"},
+        data={"identifier": "add", "kind": "METHOD", "behavior": "ai_grading"},
         follow_redirects=False,
     )
 
     assert response.status_code == 303
-    assert response.headers["location"] == f"/assignments/{aid}#targets"
     (target,) = repo.get_assignment_config(aid).targets
-    assert (target.identifier, target.kind, target.max_score) == ("add", "METHOD", Decimal("5"))
+    assert response.headers["location"] == f"/assignments/{aid}/targets/{target.id}/rubric"
+    assert (target.identifier, target.kind, target.max_score) == ("add", "METHOD", None)
+    assert target.analysis_config["behavior"] == "ai_grading"
 
 
 @pytest.mark.parametrize(
     "data, status, message",
     [
-        ({"identifier": "add", "kind": "METHOD", "max_score": "five"}, 400, "Max score must be a number"),
-        ({"identifier": "add", "kind": "METHOD", "max_score": "NaN"}, 400, "Max score must be a number"),
-        ({"identifier": "existing", "kind": "METHOD", "max_score": ""}, 409, "already registered"),
+        ({"identifier": "existing", "kind": "METHOD", "behavior": "ai_grading"}, 409, "already registered"),
     ],
 )
 def test_add_target_errors_reshow_the_page(client, repo, data, status, message):
@@ -315,7 +314,7 @@ def test_rubric_form_prefills_current_rubric(client, repo):
     assert response.status_code == 200
     assert "Returns the sum.</textarea>" in response.text
     assert "Be brief.</textarea>" in response.text
-    assert "Rubric version 2" in response.text
+    assert "Common background version 2" in response.text
 
 
 def test_save_rubric_creates_a_version(client, repo):
@@ -324,13 +323,46 @@ def test_save_rubric_creates_a_version(client, repo):
 
     response = client.post(
         f"/assignments/{aid}/targets/{tid}/rubric",
-        data={"criteria_text": "Returns the sum.", "feedback_guidance": ""},
+        data={
+            "criteria_text": "Calculator assignment.", "feedback_guidance": "",
+            "behavior": "ai_grading", "source_globs": "calculator.py",
+            "item_id": "sum", "item_requirement": "Returns the sum.", "item_points": "5",
+        },
         follow_redirects=False,
     )
 
     assert response.status_code == 303
-    rubric = repo.get_assignment_config(aid).targets[0].rubric
-    assert (rubric.version, rubric.criteria_text, rubric.feedback_guidance) == (1, "Returns the sum.", None)
+    target = repo.get_assignment_config(aid).targets[0]
+    rubric = target.rubric
+    assert (rubric.version, rubric.criteria_text, rubric.feedback_guidance) == (1, "Calculator assignment.", None)
+    assert target.max_score == Decimal("5")
+    assert target.analysis_config["grading_items"] == (
+        {"id": "sum", "requirement": "Returns the sum.", "points": 5.0},
+    )
+
+
+@pytest.mark.parametrize("points", ["five", "NaN"])
+def test_save_rubric_invalid_item_points_reshows_the_form(client, repo, points):
+    aid = repo.add_assignment("IMMEDIATE", name="Calc")
+    tid = repo.add_grading_target(aid, "add", 1)
+
+    response = client.post(
+        f"/assignments/{aid}/targets/{tid}/rubric",
+        data={
+            "criteria_text": "Calculator assignment.",
+            "behavior": "ai_grading", "source_globs": "calculator.py",
+            "item_id": "sum", "item_requirement": "Returns the sum.", "item_points": points,
+        },
+    )
+
+    assert response.status_code == 400
+    assert "Item points must be a number" in response.text
+    assert f'value="{points}"' in response.text
+    assert "Returns the sum.</textarea>" in response.text
+    target = repo.get_assignment_config(aid).targets[0]
+    assert target.rubric is None
+    assert target.max_score is None
+    assert target.analysis_config == {}
 
 
 def test_save_rubric_without_criteria_is_400(client, repo):

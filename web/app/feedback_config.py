@@ -3,6 +3,7 @@
 from dataclasses import replace
 from datetime import datetime
 from decimal import Decimal
+import math
 from pathlib import PurePosixPath
 import re
 from typing import Annotated, Any, Literal
@@ -11,7 +12,8 @@ from uuid import UUID
 from pydantic import AfterValidator, BaseModel, ConfigDict, Field, TypeAdapter, field_validator, model_validator
 
 from ai_grading.FileResolver import FileResolver
-from ai_grading.models import AnalysisConfig, Score, TargetKind
+from ai_grading.PromptBuilder import PromptBuilder
+from ai_grading.models import AnalysisConfig, GradingTarget, Rubric, Score, TargetKind
 
 
 Identifier = Annotated[str, Field(min_length=1, max_length=128, pattern=r"^[A-Za-z0-9_.:-]+$")]
@@ -72,16 +74,18 @@ def validate_relative_path(value: str) -> str:
 
 
 def validate_analysis(value: AnalysisConfig) -> AnalysisConfig:
-    if value.mode == "testplan" and not value.expected_tests:
+    if value.behavior is None and value.mode == "testplan" and not value.expected_tests:
         raise ValueError("testplan analysis requires expected test identifiers")
     if (len(value.source_globs) + len(value.context_globs) > 64
             or len(value.evidence_sources) > 64 or len(value.expected_tests) > 256
-            or len(value.test_plan) > 64_000):
+            or len(value.test_plan) > 64_000 or len(value.grading_items) > 256):
         raise ValueError("analysis configuration exceeds its limits")
     for pattern in (*value.source_globs, *value.context_globs):
         validate_relative_path(pattern)
     for source in value.evidence_sources:
         validate_relative_path(source.path)
+        if value.behavior is not None and source.format != "gradescope":
+            raise ValueError("AI grading and Functional-test feedback support only Gradescope result sources; JUnit, JaCoCo and text reports are not supported")
         if len(source.label) > 256 or len(source.include) > 64:
             raise ValueError("evidence source exceeds its limits")
         for pattern in source.include:
@@ -93,6 +97,10 @@ def validate_analysis(value: AnalysisConfig) -> AnalysisConfig:
                 raise ValueError("invalid evidence selector") from None
     if any(len(identifier) > 256 for identifier in value.expected_tests):
         raise ValueError("expected test identifier is too long")
+    if any(len(item.id) > 256 or len(item.requirement) > 16_000 for item in value.grading_items):
+        raise ValueError("grading item exceeds its limits")
+    if sum(len(item.requirement) for item in value.grading_items) > 64_000:
+        raise ValueError("grading requirements exceed the context limit")
     return value
 
 
@@ -136,8 +144,38 @@ class TargetSettings(StrictModel):
     analysis: Analysis = Field(default_factory=AnalysisConfig)
     max_score: Score | None = None
 
+    def validate_rubric(self, rubric: RubricInput) -> None:
+        if self.analysis.behavior is not None:
+            PromptBuilder().validate_configuration(
+                rubric=Rubric(criteria_text=rubric.criteria_text,
+                              feedback_guidance=rubric.feedback_guidance),
+                target=GradingTarget(identifier=self.identifier, kind=TargetKind(self.kind),
+                                     max_score=self.max_score),
+                analysis=self.analysis,
+            )
+
     @model_validator(mode="after")
     def scoring(self):
+        if self.analysis.behavior == "ai_grading":
+            if not self.analysis.grading_items:
+                raise ValueError("AI grading requires at least one grading item")
+            maximum = sum((Decimal(str(item.points)) for item in self.analysis.grading_items), Decimal(0))
+            if not math.isfinite(float(maximum)):
+                raise ValueError("The grading item total must be finite")
+            if self.max_score is not None and Decimal(str(self.max_score)) != maximum:
+                raise ValueError("max_score must equal the sum of grading item points")
+            self.max_score = float(maximum)
+        elif self.analysis.behavior == "functional_test_feedback":
+            if self.max_score is not None:
+                raise ValueError("Functional-test feedback cannot configure points")
+            if len(self.analysis.evidence_sources) != 1:
+                raise ValueError("Functional-test feedback requires exactly one evidence source: the selected final Gradescope report")
+            source = next((source for source in self.analysis.evidence_sources
+                           if source.label == self.analysis.functional_result_source), None)
+            if source is None or source.format != "gradescope" or source.path != "results/results.json":
+                raise ValueError("Functional-test feedback requires final Gradescope results at results/results.json")
+            if source.include:
+                raise ValueError("The functional result source must cover all eligible failed tests")
         points = self.analysis.points_per_test
         if points is not None:
             expected = Decimal(str(points)) * len(self.analysis.expected_tests)
@@ -149,6 +187,11 @@ class TargetSettings(StrictModel):
 class TargetConfig(TargetSettings):
     source_path: str = Field(min_length=1, max_length=256)
     rubric: RubricConfig
+
+    @model_validator(mode="after")
+    def prompt_budget(self):
+        self.validate_rubric(self.rubric)
+        return self
 
 
 class AssignmentConfig(StrictModel):
@@ -165,6 +208,8 @@ class AssignmentConfig(StrictModel):
         validate_engine_model(self.engine, self.model)
         if self.engine != "pitt" and self.provider != "GOOGLE":
             raise ValueError("Google engines require provider GOOGLE")
+        if sum(target.analysis.behavior == "functional_test_feedback" for target in self.targets.values()) > 1:
+            raise ValueError("An assignment supports only one active Functional-test feedback target")
         return self
 
 
@@ -176,6 +221,13 @@ class CourseInput(StrictModel):
 class TargetInput(TargetSettings):
     kind: Literal["FILE", "METHOD", "CLASS"] = "FILE"
     rubric: RubricInput
+
+    @model_validator(mode="after")
+    def explicit_behavior(self):
+        if self.analysis.behavior is None:
+            raise ValueError("New targets require analysis.behavior: ai_grading or functional_test_feedback")
+        self.validate_rubric(self.rubric)
+        return self
 
 
 class AssignmentCreateInput(StrictModel):
@@ -195,6 +247,8 @@ class AssignmentCreateInput(StrictModel):
         identifiers = [target.identifier for target in self.targets]
         if len(identifiers) != len(set(identifiers)):
             raise ValueError("Target identifiers must be unique within the assignment")
+        if sum(target.analysis.behavior == "functional_test_feedback" for target in self.targets) > 1:
+            raise ValueError("An assignment supports only one active Functional-test feedback target")
         return self
 
 
