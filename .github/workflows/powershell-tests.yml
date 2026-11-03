@@ -15,16 +15,6 @@ jobs:
       - name: Checkout repository
         uses: actions/checkout@v4
 
-      - name: Install PowerShell
-        shell: bash
-        run: |
-          mkdir -p "$HOME/pwsh"
-          curl -L https://aka.ms/powershell-release?tag=stable \
-            -o "$HOME/pwsh/powershell.tar.gz"
-          tar -xzf "$HOME/pwsh/powershell.tar.gz" -C "$HOME/pwsh"
-          chmod +x "$HOME/pwsh/pwsh"
-          echo "$HOME/pwsh" >> "$GITHUB_PATH"
-
       - name: Verify PowerShell
         shell: pwsh
         run: |
@@ -33,6 +23,7 @@ jobs:
       - name: Install Pester
         shell: pwsh
         run: |
+          Set-PSRepository PSGallery -InstallationPolicy Trusted
           Install-Module Pester -RequiredVersion 6.2.0 -Force -Scope CurrentUser
 
       - name: Run PowerShell tests
