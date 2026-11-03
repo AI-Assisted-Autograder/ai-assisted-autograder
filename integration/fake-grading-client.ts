@@ -9,7 +9,7 @@ export class FakeGradingClient implements IGradingClient {
   public readonly authorizedSubmissionIds: string[] = [];
   public readonly recordedResults: Array<{
     submissionId: string;
-    status: 'AUTHORIZED' | 'RERUN_SUCCEEDED' | 'RERUN_FAILED';
+    status: 'AUTHORIZED' | 'RERUN_SUBMITTED' | 'RERUN_SUCCEEDED' | 'RERUN_FAILED';
     errorMessage?: string;
   }> = [];
   public finishedSummary: TriggerRunSummary | undefined;
@@ -31,7 +31,7 @@ export class FakeGradingClient implements IGradingClient {
 
   public async recordSubmissionResult(
     submissionId: string,
-    status: 'AUTHORIZED' | 'RERUN_SUCCEEDED' | 'RERUN_FAILED',
+    status: 'AUTHORIZED' | 'RERUN_SUBMITTED' | 'RERUN_SUCCEEDED' | 'RERUN_FAILED',
     errorMessage?: string,
   ): Promise<void> {
     this.recordedResults.push({ submissionId, status, errorMessage });

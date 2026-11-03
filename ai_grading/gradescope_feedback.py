@@ -14,7 +14,9 @@ import sys
 import time
 import xml.etree.ElementTree as ET
 
-from local_client import ClientError, MAX_FILES_BYTES, request_feedback, stable_request_id
+from local_client import (
+    ClientError, MAX_FILES_BYTES, complete_submission, request_feedback, stable_request_id,
+)
 
 
 MAX_ARTIFACT_BYTES = 2 * 1024 * 1024
@@ -178,6 +180,32 @@ def feedback_row(name, output, metadata, *, score=None, max_score=None):
             'extra_data': {'ai_feedback': True, **metadata}}
 
 
+def read_submission_context(root):
+    """Read the current Gradescope run identity, if this is a real autograder run."""
+    path = root / 'submission_metadata.json'
+    if not path.is_file():
+        return None
+    try:
+        metadata = json.loads(path.read_text(encoding='utf-8'))
+        platform_submission_id = str(metadata['id'])
+        submitted_at = metadata['created_at']
+        if not isinstance(submitted_at, str) or not submitted_at.strip():
+            raise ValueError
+        student_identifier = None
+        users = metadata.get('users') or []
+        if users and isinstance(users[0], dict):
+            student_identifier = users[0].get('email') or users[0].get('id')
+            if student_identifier is not None:
+                student_identifier = str(student_identifier)
+        return {
+            'platform_submission_id': platform_submission_id,
+            'submitted_at': submitted_at,
+            'student_identifier': student_identifier,
+        }
+    except (OSError, UnicodeError, TypeError, KeyError, ValueError, json.JSONDecodeError):
+        raise ClientError('Gradescope submission metadata is missing or invalid.') from None
+
+
 def add_feedback(root=Path('/autograder'), *, run_id=None):
     started = time.monotonic()
     root = Path(root)
@@ -185,6 +213,7 @@ def add_feedback(root=Path('/autograder'), *, run_id=None):
     results = json.loads(results_path.read_text(encoding='utf-8'))
     config = json.loads((root / 'source/config.json').read_text(encoding='utf-8'))
     manifest = json.loads((root / 'source/ai_feedback.json').read_text(encoding='utf-8'))
+    submission_context = read_submission_context(root)
     deadline = started + manifest.get('total_timeout', 300)
     # Re-running just the hook replaces its own rows, never functional rows.
     tests = results.setdefault('tests', [])
@@ -206,7 +235,11 @@ def add_feedback(root=Path('/autograder'), *, run_id=None):
             response = request_feedback(backend_url=config['backend_url'],
                                         token_file=root / 'source/assignment.token',
                                         target_id=target_id, files=files, evidence=evidence,
-                                        request_id=request_id, timeout=min(manifest.get('timeout', 150), remaining))
+                                        request_id=request_id,
+                                        platform_submission_id=(submission_context or {}).get('platform_submission_id'),
+                                        submitted_at=(submission_context or {}).get('submitted_at'),
+                                        student_identifier=(submission_context or {}).get('student_identifier'),
+                                        timeout=min(manifest.get('timeout', 150), remaining))
             metadata = {key: response[key] for key in ('engine', 'provider', 'requested_model',
                                                       'model_name', 'request_id')}
             metadata['target_id'] = target_id
@@ -231,6 +264,16 @@ def add_feedback(root=Path('/autograder'), *, run_id=None):
             results['tests'].append(feedback_row(name,
                 'AI feedback is unavailable. Your functional-test score is unchanged.\n' + detail,
                 {'target_id': target_id}))
+    if submission_context:
+        try:
+            complete_submission(
+                backend_url=config['backend_url'], token_file=root / 'source/assignment.token',
+                **submission_context,
+            )
+        except ClientError as exc:
+            # Keep the official results file intact, but leave the DB guard unset
+            # so the next scheduled run can safely retry the unfinished work.
+            print(f'AI completion was not recorded in the grading database: {exc}', file=sys.stderr)
     # Explicit top-level totals override Gradescope row totals. Adjust only our
     # own contribution, preserving the functional grader's original arithmetic.
     new_ai = [row for row in results['tests'] if row.get('extra_data', {}).get('ai_feedback')]

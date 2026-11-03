@@ -14,6 +14,7 @@ export type RerunResult = {
 export interface ILearningPlatform {
   authenticate(): Promise<void>;
   triggerRerun(locator: SubmissionLocator): Promise<RerunResult>;
+  waitForRerun(locator: SubmissionLocator): Promise<void>;
 }
 
 export type TriggerRunSummary = {
@@ -30,7 +31,7 @@ export interface IGradingClient {
   authorizeForGrading(submissionId: string): Promise<void>;
   recordSubmissionResult(
     submissionId: string,
-    status: 'AUTHORIZED' | 'RERUN_SUCCEEDED' | 'RERUN_FAILED',
+    status: 'AUTHORIZED' | 'RERUN_SUBMITTED' | 'RERUN_SUCCEEDED' | 'RERUN_FAILED',
     errorMessage?: string,
   ): Promise<void>;
   finishRun(summary: TriggerRunSummary): Promise<void>;

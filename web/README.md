@@ -134,10 +134,12 @@ uvicorn app.main:app --reload
 ## AI feedback API (database configuration)
 
 The Web Docker service reads assignment, target, rubric and the primary engine/model
-configuration from PostgreSQL. Feedback is displayed in Gradescope, with optional
-DB-configured scoring; this path does not write submissions, test results or feedback
-to DB or participate in nightly scheduling. JSON retains backend policy, assignment
-token hashes, call quota and replay responses. The backend supports three engines:
+configuration from PostgreSQL. During a Gradescope autograder run, the hook sends
+submission metadata with each feedback request. The API then stores provider
+feedback and target completion in PostgreSQL; a final `ai-complete` call sets the
+submission completion guard only when no AI-needed target is still waiting. JSON
+retains backend policy, assignment token hashes, call quota and replay responses.
+The backend supports three engines:
 
 | Engine | Credentials on the backend | Model |
 | --- | --- | --- |
@@ -161,7 +163,8 @@ Web settings does not export provider keys; Compose injects them automatically.
 | --- | --- | --- |
 | `POST /internal/assignments` | `X-Internal-Token` | Create an assignment, targets and current rubrics atomically |
 | `GET /internal/assignments/{id}/config` | `X-Internal-Token` | Read current AI configuration |
-| `POST /v1/feedback` | Assignment Bearer token | Generate feedback; enabled after runtime initialization |
+| `POST /v1/feedback` | Assignment Bearer token | Generate and persist feedback for one submission target |
+| `POST /v1/submissions/{platform_submission_id}/ai-complete` | Assignment Bearer token | Set the completion guard after all targets finish |
 
 Use `/docs` for request schemas and to create a test assignment. For example:
 
@@ -577,16 +580,15 @@ different database.
 Done: the schema and migrations, the full repository (SQL and in
 memory) with tests, the sample data script, the internal endpoints the
 nightly trigger calls (shared-token auth), authenticated assignment creation and
-configuration reads, and the read-only instructor pages. The optional AI
-feedback API selects Vertex, Pitt or Gemini API from PostgreSQL configuration
-and retains assignment tokens, quota and replay state in JSON (see above). It
-does not persist feedback or participate in the submission/nightly lifecycle.
+configuration reads, read-only instructor pages, and the Gradescope-to-database
+feedback write-back path. The AI feedback API selects Vertex, Pitt or Gemini API
+from PostgreSQL configuration, retains assignment tokens/quota/replay state in
+JSON, and persists target feedback plus the final submission completion guard.
 
-Not done yet: the REST API the container calls, with per-assignment token
-auth (the schema has no token column yet); in the instructor UI, the
-forms for assignments, targets and rubrics, feedback rating and the
-results dashboard (waiting on OQ-1); instructor login (OQ-9); and
-deployment.
+Not done yet: in the instructor UI, the forms for assignments, targets and
+rubrics, feedback rating and the results dashboard (waiting on OQ-1);
+instructor login (OQ-9); and deployment of this updated package to the live
+server.
 
 ## Known limitations
 

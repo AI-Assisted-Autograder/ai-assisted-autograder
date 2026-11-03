@@ -23,4 +23,10 @@ export class FakePlatform implements ILearningPlatform {
       url: locator.platformSubmissionUrl,
     };
   }
+
+  public async waitForRerun(locator: SubmissionLocator): Promise<void> {
+    if (this.failingSubmissionIds.has(locator.submissionId)) {
+      throw new Error(`fake rerun failure for ${locator.submissionId}`);
+    }
+  }
 }

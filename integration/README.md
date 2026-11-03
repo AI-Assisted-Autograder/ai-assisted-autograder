@@ -39,14 +39,15 @@ The current implementation is a rerun prototype:
   adapters.
 - `FakePlatform` and `FakeGradingClient` provide browser-free test doubles for
   orchestration tests.
-- `NightlyTrigger` runs the orchestration order: authorize a submission first,
-  then click the rerun button.
+- `NightlyTrigger` authorizes and submits every pending rerun first, then polls
+  the accepted reruns in a separate completion phase.
 - `GradingApiClient` reads pending `NIGHTLY` submissions, starts an audit run,
   authorizes submissions, and writes the aggregate result back to the Web API.
 - The intended batch flow is database-driven: the Web API returns each eligible
-  submission's `course_id`, `assignment_id`, `submission_id`, and platform URL;
-  `NightlyTrigger` processes those records one at a time and sends each URL to
-  `GradescopePlatform` for a rerun.
+  submission's assignment, submission ID, and platform URL. The trigger first
+  submits all accepted records, records `RERUN_SUBMITTED`, and only then waits
+  for completion. A slow autograder therefore does not block submission of the
+  remaining batch.
 - The Web API permits only one `RUNNING` nightly cycle at a time and records
   each submission's authorization, success, or failure separately.
 - `nightly-runner.ts` is the scheduler entrypoint. A cron or GitHub Actions
@@ -79,9 +80,10 @@ The platform adapter also accepts only HTTPS URLs under
 `www.gradescope.com`.
 
 After clicking `Rerun Autograder`, the adapter waits for a visible success
-message instead of treating the click itself as proof that Gradescope accepted
-the request. If the site uses different wording, set a regular expression in
-`GRADESCOPE_RERUN_SUCCESS_TEXT`.
+message before recording `RERUN_SUBMITTED`; the click itself is not treated as
+proof that Gradescope accepted the request. Completion polling happens after
+the submission phase. If the site uses different wording, set a regular
+expression in `GRADESCOPE_RERUN_SUCCESS_TEXT`.
 
 ## Direct rerun test
 
@@ -137,8 +139,27 @@ database query
   -> authorize the submission in the API
   -> open the Gradescope submission with Playwright
   -> More -> Rerun Autograder -> confirm
-  -> record success or failure for that submission
+  -> record RERUN_SUBMITTED
+  -> poll all accepted reruns
+  -> record final success or failure for each submission
 ```
+
+After Gradescope starts the autograder, the AI hook completes the other half of
+the flow. It reads `/autograder/submission_metadata.json`, sends the platform
+submission ID and timestamp with each `/v1/feedback` request, and the Web API
+stores the selected `AiFeedback` plus the target completion state. When all
+configured targets have either succeeded or been recorded as failed, the hook
+calls:
+
+```text
+POST /v1/submissions/{platform_submission_id}/ai-complete
+```
+
+The endpoint sets the database `ai_graded_submitted_at` guard only when no
+AI-needed target is still waiting. This is what allows the Web UI to show the
+submission as graded and prevents the nightly query from selecting it again.
+The endpoint is protected by the same per-assignment Bearer token used by
+`/v1/feedback`; it is not a public unauthenticated write endpoint.
 
 The course ID scopes the query, while the assignment ID and platform
 submission URL identify the exact Gradescope page. Credentials are shared by
@@ -214,8 +235,9 @@ submission records and should be tested with a controlled assignment first.
 
 After clicking `Rerun Autograder`, the adapter polls the submission page until
 Gradescope shows completed autograder results. A queued or started message is
-not recorded as final success. Configure the wait with
-`GRADESCOPE_RERUN_TIMEOUT_MS` (default five minutes) and
+not recorded as final success. The default wait is 30 minutes because a real
+rerun includes the full autograder and AI feedback phases. Configure it with
+`GRADESCOPE_RERUN_TIMEOUT_MS` (default `1800000`) and
 `GRADESCOPE_RERUN_POLL_INTERVAL_MS` (default five seconds).
 
 The login test is read-only with respect to Gradescope. The rerun test changes

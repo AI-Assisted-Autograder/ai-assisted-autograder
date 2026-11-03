@@ -4,6 +4,7 @@ import asyncio
 from concurrent.futures import ThreadPoolExecutor
 from contextlib import asynccontextmanager
 from dataclasses import asdict
+from datetime import datetime
 import hashlib
 import json
 import logging
@@ -13,6 +14,7 @@ import re
 from types import SimpleNamespace
 import threading
 import time
+from uuid import UUID
 
 from fastapi import APIRouter, FastAPI, Request
 from fastapi.responses import JSONResponse
@@ -26,6 +28,7 @@ from ai_grading.PromptBuilder import PromptBuilder
 from ai_grading.ILLMProvider.ILLMProvider import ProviderError
 from .feedback_store import JsonStore, StoreError
 from .feedback_config import validate_relative_path
+from .repository.base import FeedbackResult, ProviderFeedback, SubmissionRef
 
 LOG = logging.getLogger(__name__)
 MESSAGES = {
@@ -47,6 +50,15 @@ MESSAGES = {
 }
 
 
+class SubmissionContext(BaseModel):
+    """The platform identity needed to connect feedback to one DB row."""
+
+    model_config = ConfigDict(extra="forbid", strict=True)
+    platform_submission_id: str = Field(min_length=1, max_length=256, pattern=r"^\S+$")
+    submitted_at: datetime
+    student_identifier: str | None = Field(default=None, max_length=512)
+
+
 class FeedbackInput(BaseModel):
     model_config = ConfigDict(extra="forbid", strict=True)
     request_id: str = Field(min_length=1, max_length=128, pattern=r"^[A-Za-z0-9_.:-]+$")
@@ -56,6 +68,9 @@ class FeedbackInput(BaseModel):
     evidence: list[Evidence] = Field(default_factory=list, max_length=256)
     guidance: str | None = ""
     functional_test_feedback: list[str] = Field(default_factory=list)
+    # Present in a Gradescope autograder run.  It is optional so the feedback
+    # endpoint remains usable for local/provider-only calls.
+    submission: SubmissionContext | None = None
 
     @model_validator(mode="after")
     def source_and_evidence(self):
@@ -72,6 +87,11 @@ class FeedbackInput(BaseModel):
                     or len(item.scope) > 512 or len(item.summary) > 4_000):
                 raise ValueError("evidence exceeds its limits")
         return self
+
+
+class AiCompleteInput(BaseModel):
+    model_config = ConfigDict(extra="forbid", strict=True)
+    submission: SubmissionContext
 
 
 def matches_path(path: str, patterns: tuple[str, ...]) -> bool:
@@ -140,7 +160,7 @@ def default_provider_factory(config, assignment):
 
 
 def create_feedback_router(state_path: str | Path, *, assignment_loader,
-                           provider_factory=None) -> APIRouter:
+                           provider_factory=None, grading_repository=None) -> APIRouter:
     factory = provider_factory or default_provider_factory
     runtime = SimpleNamespace()
 
@@ -175,6 +195,55 @@ def create_feedback_router(state_path: str | Path, *, assignment_loader,
             store.close()
 
     router = APIRouter(lifespan=lifespan)
+
+    def db_submission(assignment_id, payload: SubmissionContext):
+        if grading_repository is None:
+            return None
+        ref = SubmissionRef(
+            assignment_id=UUID(assignment_id),
+            platform_submission_id=payload.platform_submission_id,
+            submitted_at=payload.submitted_at,
+            student_identifier=payload.student_identifier,
+        )
+        submission_id = grading_repository.upsert_submission(ref)
+        grading_repository.create_targets_default_needed(submission_id)
+        return submission_id
+
+    def persist_feedback(assignment_id, assignment, payload, target, result):
+        """Write one successful provider response to the grading repository."""
+        if grading_repository is None or payload.submission is None:
+            return None
+        submission_id = db_submission(assignment_id, payload.submission)
+        usage = result.get("usage") or {}
+        response = ProviderFeedback(
+            provider=result.get("provider", assignment.provider),
+            model_name=result["model_name"],
+            body=result["feedback_text"],
+            prompt_version="v1",
+            suggested_score=result.get("suggested_score"),
+            input_tokens=usage.get("input_tokens"),
+            output_tokens=usage.get("output_tokens"),
+        )
+        grading_repository.save_feedback(
+            submission_id,
+            target.identifier,
+            FeedbackResult(
+                rubric_id=UUID(str(target.rubric.id)),
+                responses=(response,),
+                selected_index=0,
+                selection_reason="single configured provider response",
+            ),
+        )
+        return submission_id
+
+    def persist_failure(assignment_id, assignment, payload, target, message):
+        if grading_repository is None or payload.submission is None:
+            return
+        try:
+            submission_id = db_submission(assignment_id, payload.submission)
+            grading_repository.mark_target_failed(submission_id, target.identifier, message)
+        except Exception:
+            LOG.warning("feedback_failure_not_recorded", exc_info=True)
 
     async def read_body(request, limit):
         body = bytearray()
@@ -328,6 +397,17 @@ def create_feedback_router(state_path: str | Path, *, assignment_loader,
             if target.max_score is not None:
                 result["suggested_score"] = response.suggested_score
                 result["max_score"] = target.max_score
+            # Persist the selected AI response before acknowledging completion.
+            # The separate ai-complete call is made only after every target has
+            # been processed by the Gradescope hook.
+            if payload.submission is not None and grading_repository is not None:
+                try:
+                    await asyncio.to_thread(
+                        persist_feedback, assignment_id, assignment, payload, target, result,
+                    )
+                except Exception:
+                    store.fail(assignment_id, rid, code="backend_error")
+                    return error("backend_error", 500, rid)
             store.complete(assignment_id, rid, result)
             return JSONResponse(result, headers={"Cache-Control": "no-store"})
         except asyncio.CancelledError:
@@ -345,6 +425,10 @@ def create_feedback_router(state_path: str | Path, *, assignment_loader,
             store.fail(assignment_id, rid, code=code)
         except Exception:
             return error("backend_error", 500, rid)
+        if payload.submission is not None and grading_repository is not None:
+            await asyncio.to_thread(
+                persist_failure, assignment_id, assignment, payload, target, code,
+            )
         LOG.warning("feedback_request_failed code=%s", code)
         return error(code, 504 if code == "upstream_timeout" else 502, rid)
 
@@ -357,6 +441,52 @@ def create_feedback_router(state_path: str | Path, *, assignment_loader,
         except Exception:
             LOG.error("backend_error")
             return error("backend_error", 500)
+
+    @router.post("/v1/submissions/{platform_submission_id}/ai-complete")
+    async def ai_complete(platform_submission_id: str, request: Request):
+        """Set the AD-9 completion guard after all target calls finish."""
+        store = runtime.store
+        headers = request.headers.getlist("authorization")
+        if len(headers) != 1:
+            return error("unauthorized", 401)
+        scheme, _, token = headers[0].partition(" ")
+        if scheme.lower() != "bearer" or not token or len(token) > 256 or not token.isascii():
+            return error("unauthorized", 401)
+        try:
+            assignment_id = store.authenticate(token)
+            raw = await asyncio.wait_for(read_body(request, store.config.max_body_bytes),
+                                         timeout=store.config.timeout_seconds)
+            payload = AiCompleteInput.model_validate_json(raw)
+        except StoreError as exc:
+            return error(exc.code, exc.status_code)
+        except Exception:
+            return error("invalid_request", 422)
+        if payload.submission.platform_submission_id != platform_submission_id:
+            return error("invalid_request", 422)
+        if grading_repository is None:
+            return error("backend_error", 503)
+        try:
+            assignment = await asyncio.to_thread(assignment_loader, assignment_id)
+            if assignment.id != assignment_id or not assignment.enabled:
+                return error("assignment_forbidden", 403)
+            submission_id = await asyncio.to_thread(db_submission, assignment_id, payload.submission)
+            complete = await asyncio.to_thread(
+                grading_repository.mark_ai_complete_if_all_done, submission_id,
+            )
+        except StoreError as exc:
+            return error(exc.code, exc.status_code)
+        except Exception:
+            LOG.error("ai_completion_failed", exc_info=True)
+            return error("backend_error", 503)
+        if not complete:
+            return JSONResponse(
+                {"status": "waiting", "submission_id": platform_submission_id},
+                status_code=409, headers={"Cache-Control": "no-store"},
+            )
+        return JSONResponse(
+            {"status": "completed", "submission_id": platform_submission_id},
+            headers={"Cache-Control": "no-store"},
+        )
 
     return router
 

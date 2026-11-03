@@ -286,7 +286,7 @@ class TriggerRunSubmission(Base):
     __tablename__ = "trigger_run_submission"
     __table_args__ = (
         UniqueConstraint("trigger_run_id", "submission_id"),
-        one_of("status", ("AUTHORIZED", "RERUN_SUCCEEDED", "RERUN_FAILED")),
+        one_of("status", ("AUTHORIZED", "RERUN_SUBMITTED", "RERUN_SUCCEEDED", "RERUN_FAILED")),
     )
 
     id: Mapped[uuid.UUID] = uuid_pk()

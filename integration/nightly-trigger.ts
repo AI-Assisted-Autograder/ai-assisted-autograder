@@ -13,6 +13,7 @@ export class NightlyTrigger {
     const summary: TriggerRunSummary = { found: 0, authorized: 0, rerun: 0, failed: 0 };
     await this.client.startRun();
     let runError: unknown;
+    const submitted: SubmissionLocator[] = [];
 
     try {
       await this.platform.authenticate();
@@ -26,7 +27,28 @@ export class NightlyTrigger {
           summary.authorized += 1;
           await this.client.recordSubmissionResult(submission.submissionId, 'AUTHORIZED');
           await this.platform.triggerRerun(submission);
+          submitted.push(submission);
           summary.rerun += 1;
+          await this.client.recordSubmissionResult(submission.submissionId, 'RERUN_SUBMITTED');
+        } catch (error) {
+          summary.failed += 1;
+          const message = error instanceof Error ? error.message : String(error);
+          try {
+            await this.client.recordSubmissionResult(
+              submission.submissionId,
+              'RERUN_FAILED',
+              message,
+            );
+          } catch (recordError) {
+            console.error('Could not record submission failure:', recordError);
+          }
+        }
+      }
+
+      // Submit every accepted rerun before waiting for any one autograder.
+      for (const submission of submitted) {
+        try {
+          await this.platform.waitForRerun(submission);
           await this.client.recordSubmissionResult(submission.submissionId, 'RERUN_SUCCEEDED');
         } catch (error) {
           summary.failed += 1;

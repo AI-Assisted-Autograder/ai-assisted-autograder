@@ -35,6 +35,7 @@ if settings.feedback_state_path:
         assignment_loader=lambda assignment_id: read_assignment_config(
             grading_repository, assignment_id,
         ),
+        grading_repository=grading_repository,
     ))
 
 
@@ -188,7 +189,7 @@ class TriggerRunFinishRequest(BaseModel):
 
 
 class TriggerRunSubmissionRequest(BaseModel):
-    status: Literal["AUTHORIZED", "RERUN_SUCCEEDED", "RERUN_FAILED"]
+    status: Literal["AUTHORIZED", "RERUN_SUBMITTED", "RERUN_SUCCEEDED", "RERUN_FAILED"]
     error_message: str | None = None
 
 

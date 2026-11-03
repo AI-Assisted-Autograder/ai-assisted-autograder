@@ -71,7 +71,7 @@ export class HttpGradingClient implements IGradingClient {
 
   public async recordSubmissionResult(
     submissionId: string,
-    status: 'AUTHORIZED' | 'RERUN_SUCCEEDED' | 'RERUN_FAILED',
+    status: 'AUTHORIZED' | 'RERUN_SUBMITTED' | 'RERUN_SUCCEEDED' | 'RERUN_FAILED',
     errorMessage?: string,
   ): Promise<void> {
     const response = await fetch(

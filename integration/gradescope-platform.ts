@@ -90,8 +90,6 @@ export class GradescopePlatform implements ILearningPlatform {
       : selectorMap.rerunSuccess;
     await expect(this.page.getByText(successPattern).first()).toBeVisible({ timeout: 15_000 });
 
-    await this.waitForAutograderCompletion();
-
     return {
       submissionId: locator.submissionId,
       clicked: true,
@@ -100,8 +98,17 @@ export class GradescopePlatform implements ILearningPlatform {
     };
   }
 
+  public async waitForRerun(locator: SubmissionLocator): Promise<void> {
+    await this.page.goto(locator.platformSubmissionUrl);
+    await this.waitForAutograderCompletion();
+  }
+
   private async waitForAutograderCompletion(): Promise<void> {
-    const timeoutMs = this.readPositiveInteger('GRADESCOPE_RERUN_TIMEOUT_MS', 300_000);
+    // Gradescope reruns the full autograder, including dependency setup,
+    // functional tests, and the AI feedback hook. Five minutes was too short
+    // for the real Exercise 4 batch, so the default is now 30 minutes while
+    // remaining configurable for controlled tests.
+    const timeoutMs = this.readPositiveInteger('GRADESCOPE_RERUN_TIMEOUT_MS', 1_800_000);
     const pollIntervalMs = this.readPositiveInteger('GRADESCOPE_RERUN_POLL_INTERVAL_MS', 5_000);
     const deadline = Date.now() + timeoutMs;
 
