@@ -11,6 +11,37 @@ export type RerunResult = {
   url: string;
 };
 
+export type FailureKind =
+  | 'AUTHENTICATION'
+  | 'DATABASE'
+  | 'AI_FEEDBACK'
+  | 'AUTOGRADER'
+  | 'TIMEOUT'
+  | 'RERUN_TRIGGER'
+  | 'UNKNOWN';
+
+export type SubmissionFailure = {
+  submissionId: string;
+  phase: 'authorization' | 'trigger' | 'completion';
+  kind: FailureKind;
+  message: string;
+};
+
+export type SubmissionOutcomeStatus =
+  | 'AUTHORIZED'
+  | 'RERUN_SUBMITTED'
+  | 'RERUN_SUCCEEDED'
+  | 'AUTHORIZATION_FAILED'
+  | 'RERUN_TRIGGER_FAILED'
+  | 'RERUN_COMPLETION_FAILED';
+
+export type SubmissionOutcome = {
+  submissionId: string;
+  status: SubmissionOutcomeStatus;
+  kind?: FailureKind;
+  message?: string;
+};
+
 export interface ILearningPlatform {
   authenticate(): Promise<void>;
   triggerRerun(locator: SubmissionLocator): Promise<RerunResult>;
@@ -23,6 +54,9 @@ export type TriggerRunSummary = {
   rerun: number;
   failed: number;
   fatalError?: string;
+  failures?: SubmissionFailure[];
+  outcomes?: SubmissionOutcome[];
+  auditErrors?: string[];
 };
 
 export interface IGradingClient {

@@ -41,6 +41,20 @@ The current implementation is a rerun prototype:
   orchestration tests.
 - `NightlyTrigger` authorizes and submits every pending rerun first, then polls
   the accepted reruns in a separate completion phase.
+- Each submission failure now includes a phase (authorization, trigger, or
+  completion) and a coarse kind such as DATABASE, TIMEOUT, AI_FEEDBACK, or
+  AUTOGRADER. These labels help operations triage failures; the backend remains
+  the source of truth for AI grading state.
+- A successful Gradescope click is counted as a submitted rerun even if the
+  follow-up audit write fails. The summary exposes that problem as auditErrors
+  so a database/API compatibility issue cannot be reported as a false
+  Gradescope failure.
+- The runner also emits an outcome timeline per submission:
+  AUTHORIZED -> RERUN_SUBMITTED -> RERUN_SUCCEEDED on the normal path.
+  Failures are labeled AUTHORIZATION_FAILED, RERUN_TRIGGER_FAILED, or
+  RERUN_COMPLETION_FAILED. RERUN_SUCCEEDED means the Gradescope/autograder
+  phase completed; it does not by itself prove that every AI target produced
+  feedback.
 - `GradingApiClient` reads pending `NIGHTLY` submissions, starts an audit run,
   authorizes submissions, and writes the aggregate result back to the Web API.
 - The intended batch flow is database-driven: the Web API returns each eligible
@@ -144,6 +158,22 @@ database query
   -> record final success or failure for each submission
 ```
 
+Gradescope reruns are submission-level operations: the browser can rerun a
+whole submission, not one individual AI target. A target is the backend's
+logical grading scope (for example, one configured file or group of files),
+not a separate Gradescope rerun button. The current integration therefore
+supports selecting and rerunning submissions, while the Web API/backend owns
+target-level AI status and retry decisions. Target-only retry is intentionally
+not claimed until the backend exposes a target-level failed-query and retry
+contract.
+
+For that reason, a platform outcome and an AI outcome must not be conflated:
+the integration can report that Gradescope finished, while the backend must
+report whether each AI target succeeded, failed, or needs retry. The current
+HTTP contract still writes the per-submission error message and aggregate run
+counts; persistent failure categories and target retry metadata require the
+corresponding backend fields and endpoints.
+
 After Gradescope starts the autograder, the AI hook completes the other half of
 the flow. It reads `/autograder/submission_metadata.json`, sends the platform
 submission ID and timestamp with each `/v1/feedback` request, and the Web API
@@ -233,6 +263,11 @@ also been validated with local sample records, but sample IDs are not real
 Gradescope submissions. A full production batch run requires real imported
 submission records and should be tested with a controlled assignment first.
 
+The unit tests also verify that the trigger submits all pending submissions
+before waiting, continues after an individual failure, classifies failures by
+phase, and does not turn a post-click audit-write error into a false rerun
+failure.
+
 After clicking `Rerun Autograder`, the adapter polls the submission page until
 Gradescope shows completed autograder results. A queued or started message is
 not recorded as final success. The default wait is 30 minutes because a real
@@ -242,6 +277,72 @@ rerun includes the full autograder and AI feedback phases. Configure it with
 
 The login test is read-only with respect to Gradescope. The rerun test changes
 Gradescope state and must be run only for an intentionally selected submission.
+
+## Running the nightly trigger on another machine
+
+The nightly trigger can run from any machine that has Node.js, Chromium, and
+network access to both the Web API and Gradescope. The Web API/database and the
+Playwright runner are separate components; starting one does not automatically
+start the other.
+
+Install the runner dependencies from the repository root:
+
+```powershell
+npm ci
+npx playwright install chromium
+```
+
+Configure the runner through environment variables. Do not commit these values
+or place them in a tracked README or TypeScript file:
+
+```powershell
+$env:GRADING_API_URL="http://127.0.0.1:8000"
+$env:INTEGRATION_API_TOKEN="the Web API internal token"
+$env:GRADESCOPE_COURSE_ID="the course ID used to build submission URLs"
+$env:GRADESCOPE_ALLOW_RERUN="1"
+```
+
+For a headless server, use a server-side authenticated Playwright state file:
+
+```powershell
+$env:GRADESCOPE_STORAGE_STATE="/run/secrets/gradescope.json"
+$env:HEADFUL="0"
+```
+
+The state file must be created securely on the server by running the
+one-time login helper. Never commit `.auth/gradescope.json`, copy it into the
+repository, or print its contents. The Gradescope account must have instructor
+access to the selected course and assignment.
+
+Run one controlled cycle manually:
+
+```powershell
+npm run typecheck
+npm run nightly:trigger
+```
+
+The command prints a JSON summary containing the number found, authorized,
+submitted, and failed, plus per-submission outcomes. It may trigger real
+Gradescope reruns when `GRADESCOPE_ALLOW_RERUN=1` is set, so use a controlled
+NIGHTLY assignment first.
+
+For a server deployment, run only one nightly runner at a time and redirect
+output to a protected log file:
+
+```bash
+mkdir -p logs
+npm run nightly:trigger >> logs/nightly-trigger.log 2>&1
+```
+
+The Windows Task Scheduler scripts in `scripts/` can register the same command
+on Windows. On Linux/Oracle, use the server's approved cron or systemd
+configuration instead of creating duplicate schedulers.
+
+The log currently contains the detailed integration outcome timeline. The
+database stores the existing submission/run status and error message, but it
+does not yet persist every `failure_kind`, phase, or retry field. Those fields
+require the corresponding backend schema and API changes before they can be
+displayed reliably to all users.
 
 ## Windows nightly scheduling
 

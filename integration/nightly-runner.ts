@@ -11,9 +11,11 @@ async function main(): Promise<void> {
 
   const browser = await chromium.launch({ headless: process.env.HEADFUL !== '1' });
   try {
-    const page = await browser.newPage({
+    const context = await browser.newContext({
       baseURL: process.env.GRADESCOPE_BASE_URL ?? 'https://www.gradescope.com',
+      storageState: process.env.GRADESCOPE_STORAGE_STATE || undefined,
     });
+    const page = await context.newPage();
     const summary = await new NightlyTrigger(
       new HttpGradingClient(),
       new GradescopePlatform(page),

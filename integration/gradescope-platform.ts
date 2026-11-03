@@ -35,6 +35,14 @@ export class GradescopePlatform implements ILearningPlatform {
   public constructor(private readonly page: Page) {}
 
   public async authenticate(): Promise<void> {
+    // Reuse a saved Playwright session when available. If it has expired,
+    // navigating to /account redirects to /login and the credential fallback
+    // below refreshes the session.
+    await this.page.goto('/account');
+    if (/\/account(?:[/?#]|$)/.test(this.page.url())) {
+      return;
+    }
+
     const username = process.env.GRADESCOPE_USERNAME;
     const password = process.env.GRADESCOPE_PASSWORD;
     if (!username || !password) {

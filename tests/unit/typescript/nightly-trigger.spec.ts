@@ -27,7 +27,15 @@ test('NightlyTrigger authorizes and reruns every pending submission', async () =
   expect(platform.authenticated).toBe(true);
   expect(platform.rerunCalls).toHaveLength(2);
   expect(client.authorizedSubmissionIds).toEqual(['submission-1', 'submission-2']);
-  expect(summary).toEqual({ found: 2, authorized: 2, rerun: 2, failed: 0 });
+  expect(summary).toMatchObject({ found: 2, authorized: 2, rerun: 2, failed: 0 });
+  expect(summary.outcomes).toEqual([
+    { submissionId: 'submission-1', status: 'AUTHORIZED' },
+    { submissionId: 'submission-1', status: 'RERUN_SUBMITTED' },
+    { submissionId: 'submission-2', status: 'AUTHORIZED' },
+    { submissionId: 'submission-2', status: 'RERUN_SUBMITTED' },
+    { submissionId: 'submission-1', status: 'RERUN_SUCCEEDED' },
+    { submissionId: 'submission-2', status: 'RERUN_SUCCEEDED' },
+  ]);
   expect(client.finishedSummary).toEqual(summary);
 });
 
@@ -38,10 +46,54 @@ test('NightlyTrigger records one failure and continues with later submissions', 
   const summary = await new NightlyTrigger(client, platform).run();
 
   expect(platform.rerunCalls).toHaveLength(2);
-  expect(summary).toEqual({ found: 2, authorized: 2, rerun: 1, failed: 1 });
+  expect(summary).toMatchObject({
+    found: 2,
+    authorized: 2,
+    rerun: 1,
+    failed: 1,
+    failures: [{
+      submissionId: 'submission-1',
+      phase: 'trigger',
+      kind: 'RERUN_TRIGGER',
+      message: 'fake rerun failure for submission-1',
+    }],
+  });
+  expect(summary.outcomes).toContainEqual({
+    submissionId: 'submission-1',
+    status: 'RERUN_TRIGGER_FAILED',
+    kind: 'RERUN_TRIGGER',
+    message: 'fake rerun failure for submission-1',
+  });
   expect(client.recordedResults).toContainEqual({
     submissionId: 'submission-1',
     status: 'RERUN_FAILED',
     errorMessage: 'fake rerun failure for submission-1',
   });
+});
+
+test('NightlyTrigger keeps a real rerun successful when only its audit write fails', async () => {
+  const client = new FakeGradingClient(submissions, 'RERUN_SUBMITTED');
+  const platform = new FakePlatform();
+
+  const summary = await new NightlyTrigger(client, platform).run();
+
+  expect(platform.rerunCalls).toHaveLength(2);
+  expect(summary).toMatchObject({
+    found: 2,
+    authorized: 2,
+    rerun: 2,
+    failed: 0,
+    auditErrors: [
+      'submission-1: fake audit failure for RERUN_SUBMITTED',
+      'submission-2: fake audit failure for RERUN_SUBMITTED',
+    ],
+  });
+  expect(summary.outcomes).toEqual([
+    { submissionId: 'submission-1', status: 'AUTHORIZED' },
+    { submissionId: 'submission-1', status: 'RERUN_SUBMITTED' },
+    { submissionId: 'submission-2', status: 'AUTHORIZED' },
+    { submissionId: 'submission-2', status: 'RERUN_SUBMITTED' },
+    { submissionId: 'submission-1', status: 'RERUN_SUCCEEDED' },
+    { submissionId: 'submission-2', status: 'RERUN_SUCCEEDED' },
+  ]);
 });

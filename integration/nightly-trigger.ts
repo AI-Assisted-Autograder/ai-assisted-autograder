@@ -1,4 +1,12 @@
-import type { IGradingClient, ILearningPlatform, SubmissionLocator, TriggerRunSummary } from './interfaces';
+import type {
+  IGradingClient,
+  ILearningPlatform,
+  SubmissionFailure,
+  SubmissionLocator,
+  SubmissionOutcomeStatus,
+  TriggerRunSummary,
+} from './interfaces';
+import { classifyFailure } from './failure-classification';
 
 export type { TriggerRunSummary } from './interfaces';
 
@@ -26,22 +34,28 @@ export class NightlyTrigger {
           await this.client.authorizeForGrading(submission.submissionId);
           summary.authorized += 1;
           await this.client.recordSubmissionResult(submission.submissionId, 'AUTHORIZED');
+          this.recordOutcome(summary, submission.submissionId, 'AUTHORIZED');
+        } catch (error) {
+          await this.recordFailure(summary, submission, 'authorization', error);
+          continue;
+        }
+
+        try {
           await this.platform.triggerRerun(submission);
           submitted.push(submission);
           summary.rerun += 1;
+          this.recordOutcome(summary, submission.submissionId, 'RERUN_SUBMITTED');
+        } catch (error) {
+          await this.recordFailure(summary, submission, 'trigger', error);
+          continue;
+        }
+
+        // Audit failure must not turn a confirmed Gradescope click into a
+        // false rerun failure. The platform action already happened.
+        try {
           await this.client.recordSubmissionResult(submission.submissionId, 'RERUN_SUBMITTED');
         } catch (error) {
-          summary.failed += 1;
-          const message = error instanceof Error ? error.message : String(error);
-          try {
-            await this.client.recordSubmissionResult(
-              submission.submissionId,
-              'RERUN_FAILED',
-              message,
-            );
-          } catch (recordError) {
-            console.error('Could not record submission failure:', recordError);
-          }
+          this.recordAuditError(summary, submission, error);
         }
       }
 
@@ -50,18 +64,9 @@ export class NightlyTrigger {
         try {
           await this.platform.waitForRerun(submission);
           await this.client.recordSubmissionResult(submission.submissionId, 'RERUN_SUCCEEDED');
+          this.recordOutcome(summary, submission.submissionId, 'RERUN_SUCCEEDED');
         } catch (error) {
-          summary.failed += 1;
-          const message = error instanceof Error ? error.message : String(error);
-          try {
-            await this.client.recordSubmissionResult(
-              submission.submissionId,
-              'RERUN_FAILED',
-              message,
-            );
-          } catch (recordError) {
-            console.error('Could not record submission failure:', recordError);
-          }
+          await this.recordFailure(summary, submission, 'completion', error);
         }
       }
     } catch (error) {
@@ -80,5 +85,65 @@ export class NightlyTrigger {
     }
 
     return summary;
+  }
+
+  private async recordFailure(
+    summary: TriggerRunSummary,
+    submission: SubmissionLocator,
+    phase: 'authorization' | 'trigger' | 'completion',
+    error: unknown,
+  ): Promise<void> {
+    summary.failed += 1;
+    const message = error instanceof Error ? error.message : String(error);
+    (summary.failures ??= []).push({
+      submissionId: submission.submissionId,
+      phase,
+      kind: classifyFailure(message),
+      message,
+    });
+    const status: SubmissionOutcomeStatus =
+      phase === 'authorization'
+        ? 'AUTHORIZATION_FAILED'
+        : phase === 'trigger'
+          ? 'RERUN_TRIGGER_FAILED'
+          : 'RERUN_COMPLETION_FAILED';
+    this.recordOutcome(summary, submission.submissionId, status, classifyFailure(message), message);
+    try {
+      await this.client.recordSubmissionResult(
+        submission.submissionId,
+        'RERUN_FAILED',
+        message,
+      );
+    } catch (recordError) {
+      this.recordAuditError(summary, submission, recordError);
+    }
+  }
+
+  private recordOutcome(
+    summary: TriggerRunSummary,
+    submissionId: string,
+    status: SubmissionOutcomeStatus,
+    kind?: SubmissionFailure['kind'],
+    message?: string,
+  ): void {
+    const outcome = { submissionId, status } as {
+      submissionId: string;
+      status: SubmissionOutcomeStatus;
+      kind?: SubmissionFailure['kind'];
+      message?: string;
+    };
+    if (kind !== undefined) outcome.kind = kind;
+    if (message !== undefined) outcome.message = message;
+    (summary.outcomes ??= []).push(outcome);
+  }
+
+  private recordAuditError(
+    summary: TriggerRunSummary,
+    submission: SubmissionLocator,
+    error: unknown,
+  ): void {
+    const message = error instanceof Error ? error.message : String(error);
+    (summary.auditErrors ??= []).push(`${submission.submissionId}: ${message}`);
+    console.error(`Could not record nightly audit for ${submission.submissionId}:`, message);
   }
 }
