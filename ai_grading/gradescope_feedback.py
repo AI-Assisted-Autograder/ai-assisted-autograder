@@ -171,7 +171,8 @@ def appended_output(original, text, format_name, heading='AI feedback'):
     """Treat model text as text even when the original diagnostic uses rich markup."""
     text = re.sub(r'[\x00-\x08\x0b\x0c\x0e-\x1f\x7f]', '', text)
     if format_name in ('html', 'simple_format'):
-        addition = '<div><strong>' + html.escape(heading) + '</strong><pre>' + html.escape(text) + '</pre></div>'
+        body = html.escape(text).replace('\n', '<br>')
+        addition = '<div><strong>' + html.escape(heading) + '</strong><div>' + body + '</div></div>'
         return original + '\n' + addition
     if format_name == 'md':
         longest = max((len(match.group()) for match in re.finditer(r'`+', text)), default=0)
