@@ -168,6 +168,7 @@ The workflows are located in [`.github/workflows/`](.github/workflows/).
 
 - [Python Tests](.github/workflows/tests.yml)
 - [TypeScript Tests](.github/workflows/typescript-tests.yml)
+- [PowerShell Tests](.github/workflows/powershell-tests.yml)
 
 ### Python Tests Workflow
 
@@ -190,3 +191,13 @@ The CI pipeline:
 4. Installs Playwright Chromium and its required dependencies.
 5. Runs the TypeScript type check using `npm run typecheck`.
 6. Runs the TypeScript unit tests in `tests/unit/typescript` using Playwright.
+
+### PowerShell Tests Workflow
+
+The CI pipeline:
+
+1. Checks out the repository.
+2. Verifies the installed PowerShell version using `$PSVersionTable`.
+3. Configures the PowerShell Gallery as a trusted repository.
+4. Installs Pester version 6.2.0 for running PowerShell tests.
+5. Runs the PowerShell unit tests located in `tests/unit/powershell` using `Invoke-Pester` with detailed output.
