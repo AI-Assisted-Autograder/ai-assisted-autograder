@@ -168,7 +168,8 @@ reader. Global provider settings and assignment tokens are managed separately.
 | `POST /internal/assignments` | `X-Internal-Token` | Create an assignment, targets and current rubrics atomically |
 | `GET /internal/assignments/{id}/config` | `X-Internal-Token` | Read current AI configuration |
 | `POST /v1/feedback` | Assignment Bearer token | Generate and persist feedback for one submission target |
-| `POST /v1/submissions/{platform_submission_id}/ai-complete` | Assignment Bearer token | Set the completion guard after all targets finish |
+| `POST /v1/submissions/{platform_submission_id}/ai-complete` | Assignment Bearer token | Record the whole execution's required `ai_status`: `SUCCEEDED` or `FAILED` |
+| `GET /internal/ai-failures/submissions` | `X-Internal-Token` | List active submissions with `ai_status=FAILED`, across IMMEDIATE and NIGHTLY assignments |
 | `GET /v1/assignment/config` | Assignment Bearer token | Read the token's target collection rules and revision, without using call quota |
 
 Use `/docs` for the internal API request schema. Creation accepts either an
@@ -177,7 +178,27 @@ existing `course_id` or a new `course`; duplicate platform assignment IDs return
 requests. These are DB UUIDs, not Gradescope assignment numbers or filenames.
 Targets without a current rubric are excluded from AI execution.
 
+The connector reports `submission` metadata and `ai_status` to `ai-complete`
+after writing `results.json`. Any AI-processing failure in the execution makes
+the submission `FAILED`; a successful target cannot erase another target's
+failure. A fully successful rerun updates the same submission to `SUCCEEDED`,
+removing it from the failure list. Normal no-call cases succeed; failed student
+tests, rubric verdicts and valid insufficient-evidence responses are not API
+failures. The response acknowledges recording with `status: completed` and
+echoes `ai_status`. Old clients must be updated to send the explicit outcome.
+Unreported historical rows retain a null `ai_status`; they are not assumed to
+have succeeded. Target errors remain available through the existing diagnostics.
+
+The failure-list response contains `submission_id`, `platform`,
+`platform_assignment_id`, `platform_submission_id` and `ai_status`. It does not
+trigger a rerun or alter the existing nightly API. The single-outcome field
+assumes executions of the same submission do not overlap; it records the last
+reported outcome. Credentials, call quotas and request replay remain unchanged.
+
 Migration `0003` adds the provider engine; `0004` adds target analysis configuration.
+Migration `0007` adds submission AI outcomes and backfills existing target failures.
+The migration chain uses `0005` for instructors and `0006` for rerun audit statuses;
+verify deployed history before upgrading an installation previously labeled `0005`.
 The Web image applies migrations at startup. Packages contain only the backend
 URL in `config.json` and an assignment token, not a duplicated assignment JSON.
 

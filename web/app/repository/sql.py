@@ -1,12 +1,13 @@
 import uuid
 from decimal import Decimal
 
-from sqlalchemy import Uuid, and_, delete, exists, func, literal, select, update
+from sqlalchemy import Uuid, and_, delete, exists, func, literal, or_, select, update
 from sqlalchemy.dialects.postgresql import insert
 from sqlalchemy.orm import Session, sessionmaker
 
 from app.feedback_config import RubricInput
 from app.models import (
+    AI_STATUSES,
     GRADING_MODES,
     TEST_STATUSES,
     AiFeedback,
@@ -179,10 +180,15 @@ class SqlGradingRepository(IGradingRepository):
     def save_feedback(self, submission_id: uuid.UUID, target: str, result: FeedbackResult) -> None:
         with self._sessions.begin() as s:
             st = self._target(s, submission_id, target, lock=True)
-            check_gradable(target, st.ai_needed, st.completed_at)
+            check_gradable(target, st.ai_needed)
             rubric = s.get(Rubric, result.rubric_id)
             if rubric is None or rubric.grading_target_id != st.grading_target_id:
                 raise ValueError(f"Rubric {result.rubric_id} is not a rubric for target {target!r}")
+            s.execute(
+                update(AiFeedback)
+                .where(AiFeedback.submission_target_id == st.id, AiFeedback.is_selected)
+                .values(is_selected=False)
+            )
             for i, r in enumerate(result.responses):
                 s.add(
                     AiFeedback(
@@ -211,31 +217,50 @@ class SqlGradingRepository(IGradingRepository):
             raise ValueError("error must be a non-empty message")
         with self._sessions.begin() as s:
             st = self._target(s, submission_id, target, lock=True)
-            check_gradable(target, st.ai_needed, st.completed_at)
+            check_gradable(target, st.ai_needed)
+            s.execute(
+                update(AiFeedback)
+                .where(AiFeedback.submission_target_id == st.id, AiFeedback.is_selected)
+                .values(is_selected=False)
+            )
             st.completed_at = func.now()
             st.last_error = error
+            st.selection_reason = None
+            st.score_spread = None
+            st.agreement_score = None
+            sub = self._submission(s, submission_id)
+            sub.ai_status = "FAILED"
+            sub.ai_graded_submitted_at = None
+
+    def set_submission_ai_status(self, submission_id: uuid.UUID, status: str) -> None:
+        if status not in AI_STATUSES:
+            raise ValueError(f"status must be one of {', '.join(AI_STATUSES)}, not {status!r}")
+        with self._sessions.begin() as s:
+            sub = self._submission(s, submission_id)
+            sub.ai_status = status
+            sub.ai_graded_submitted_at = sub.submitted_at if status == "SUCCEEDED" else None
 
     def mark_ai_complete_if_all_done(self, submission_id: uuid.UUID) -> bool:
         with self._sessions.begin() as s:
             self._submission(s, submission_id)
-            pending = exists().where(
+            unfinished = exists().where(
                 SubmissionTarget.submission_id == submission_id,
                 SubmissionTarget.ai_needed,
-                SubmissionTarget.completed_at.is_(None),
+                or_(SubmissionTarget.completed_at.is_(None), SubmissionTarget.last_error.is_not(None)),
             )
             # One statement, so a target completing concurrently cannot slip
             # between the check and the write.
-            s.execute(
+            completed_at = s.scalar(
                 update(Submission)
-                .where(Submission.id == submission_id, ~pending)
-                .values(ai_graded_submitted_at=Submission.submitted_at)
-            )
-            guard, submitted = s.execute(
-                select(Submission.ai_graded_submitted_at, Submission.submitted_at).where(
-                    Submission.id == submission_id
+                .where(
+                    Submission.id == submission_id,
+                    Submission.ai_status.is_distinct_from("FAILED"),
+                    ~unfinished,
                 )
-            ).one()
-            return guard is not None and guard == submitted
+                .values(ai_graded_submitted_at=Submission.submitted_at)
+                .returning(Submission.ai_graded_submitted_at)
+            )
+            return completed_at is not None
 
     def get_assignment_config(self, assignment_id: uuid.UUID) -> AssignmentConfig:
         with self._sessions.begin() as s:
@@ -323,6 +348,21 @@ class SqlGradingRepository(IGradingRepository):
                     Submission.ai_graded_submitted_at.is_(None),
                     pending,
                 )
+                .order_by(Submission.submitted_at, Submission.id)
+            ).all()
+            return [
+                SubmissionLocator(
+                    sub.id, a.platform, a.platform_assignment_id, sub.platform_submission_id, sub.student_identifier
+                )
+                for sub, a in rows
+            ]
+
+    def list_submissions_failed_ai(self) -> list[SubmissionLocator]:
+        with self._sessions.begin() as s:
+            rows = s.execute(
+                select(Submission, Assignment)
+                .join(Assignment, Submission.assignment_id == Assignment.id)
+                .where(Assignment.is_active, Submission.is_active_attempt, Submission.ai_status == "FAILED")
                 .order_by(Submission.submitted_at, Submission.id)
             ).all()
             return [
@@ -711,8 +751,7 @@ class SqlGradingRepository(IGradingRepository):
             SubmissionTarget.submission_id == submission_id,
             SubmissionTarget.grading_target_id == gt.id,
         )
-        # Locked for the writes that complete a target, so two runs cannot
-        # both pass the not-yet-completed check.
+        # Serialize target outcomes and replacement of the selected feedback.
         st = s.scalar(query.with_for_update() if lock else query)
         if st is None:
             # Registered after this submission's targets were created.

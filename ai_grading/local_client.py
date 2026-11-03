@@ -433,9 +433,13 @@ def request_feedback(
 
 def complete_submission(
     *, backend_url: str, token_file: str | Path, platform_submission_id: str,
-    submitted_at: str, student_identifier: str | None = None, timeout: float = 30,
+    submitted_at: str, ai_status: str, student_identifier: str | None = None, timeout: float = 30,
 ) -> dict:
-    """Tell the backend that the Gradescope hook finished all configured targets."""
+    """Report the final AI outcome of this submission's current execution."""
+    if ai_status not in {"SUCCEEDED", "FAILED"}:
+        raise ClientError("AI outcome must be SUCCEEDED or FAILED.")
+    if not math.isfinite(timeout) or not 0 < timeout <= 300:
+        raise ClientError("Client timeout must be between 0 and 300 seconds.")
     origin = validate_backend_url(backend_url)
     token = read_assignment_token(token_file)
     payload = json.dumps({
@@ -443,7 +447,8 @@ def complete_submission(
             "platform_submission_id": platform_submission_id,
             "submitted_at": submitted_at,
             "student_identifier": student_identifier,
-        }
+        },
+        "ai_status": ai_status,
     }, ensure_ascii=False).encode("utf-8")
     request = Request(
         origin + "/v1/submissions/" + quote(platform_submission_id, safe="") + "/ai-complete",
@@ -461,8 +466,6 @@ def complete_submission(
     except HTTPError as error:
         status = error.code
         error.close()
-        if status == 409:
-            raise ClientError("Backend still has incomplete AI targets.") from None
         raise _safe_http_error(status) from None
     except (TimeoutError, socket.timeout):
         raise ClientError("Backend request timed out.") from None
@@ -471,7 +474,7 @@ def complete_submission(
     try:
         result = json.loads(raw)
         if (not isinstance(result, dict) or result.get("submission_id") != platform_submission_id
-                or result.get("status") != "completed"):
+                or result.get("status") != "completed" or result.get("ai_status") != ai_status):
             raise ValueError
         return result
     except (UnicodeError, ValueError, TypeError):
