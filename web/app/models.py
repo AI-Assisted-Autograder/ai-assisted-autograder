@@ -70,6 +70,25 @@ TRIGGERS = ("SCHEDULE", "MANUAL")
 # ---------------------------------------------------------------------
 # Instructor configuration
 # ---------------------------------------------------------------------
+class Instructor(Base):
+    """Someone who may sign in to the instructor UI (OQ-9).
+
+    Not in the original data model. Every instructor can see and edit every
+    course for now; per-course access is a later decision. Emails are
+    stored lowercased so the unique constraint is case-insensitive.
+    """
+
+    __tablename__ = "instructor"
+
+    id: Mapped[uuid.UUID] = uuid_pk()
+    email: Mapped[str] = mapped_column(Text, unique=True)
+    display_name: Mapped[str | None] = mapped_column(Text)
+    password_hash: Mapped[str] = mapped_column(Text)
+    is_active: Mapped[bool] = mapped_column(nullable=False, server_default=true())
+    created_at: Mapped[datetime] = created_now()
+    last_login_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+
+
 class Course(Base):
     __tablename__ = "course"
 

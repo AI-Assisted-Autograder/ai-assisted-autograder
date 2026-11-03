@@ -11,11 +11,14 @@ the AD-3 unregistered-name check covers every one of them.
 
 import uuid
 from abc import ABC, abstractmethod
-from dataclasses import dataclass, field
+from dataclasses import asdict, dataclass, field
 from datetime import datetime
 from decimal import Decimal
 from enum import Enum
 
+from pydantic import TypeAdapter
+
+from app.feedback_config import Analysis, RubricInput, TargetSettings, resolve_target_analysis
 from app.models import GRADING_MODES, TARGET_KINDS
 
 
@@ -482,6 +485,28 @@ def check_target_fields(identifier: str, kind: str, max_score: Decimal | None) -
     return required(identifier, "Identifier")
 
 
+def check_target_analysis(identifier: str, kind: str, language: str, analysis: dict,
+                          max_score: Decimal | None, *, draft: bool = False,
+                          rubric: RubricInput | None = None) -> tuple[dict, Decimal | None]:
+    value = TypeAdapter(Analysis).validate_python(analysis)
+    if draft:
+        incomplete = (value.behavior == "ai_grading" and not value.grading_items
+                      or value.behavior == "functional_test_feedback" and not value.functional_result_source)
+        if incomplete:
+            if max_score is not None:
+                raise ValueError("Configure grading items before setting a maximum score")
+            return asdict(value), None
+    else:
+        value = resolve_target_analysis(identifier, kind, language, value)
+    settings = TargetSettings(
+        identifier=identifier, kind=kind, max_score=max_score,
+        analysis=value,
+    )
+    if rubric is not None:
+        settings.validate_rubric(rubric)
+    return asdict(settings.analysis), to_decimal(settings.max_score)
+
+
 class IGradingRepository(ABC):
     @abstractmethod
     def upsert_submission(self, ref: SubmissionRef) -> uuid.UUID:
@@ -644,9 +669,12 @@ class IGradingRepository(ABC):
         identifier: str,
         kind: str,
         max_score: Decimal | None,
+        analysis_config: dict | None = None,
     ) -> uuid.UUID:
         """Register a target, after the assignment's existing ones in display order.
 
+        Omitted or empty analysis_config leaves source selection for rubric
+        configuration; a nonempty analysis_config is validated immediately.
         Raises ConflictError if the identifier is already registered on the
         assignment (AD-3), and ValueError for a blank identifier, an
         unknown kind, or a negative max score.
@@ -669,12 +697,17 @@ class IGradingRepository(ABC):
         *,
         criteria_text: str,
         feedback_guidance: str | None,
+        analysis_config: dict | None = None,
+        max_score: Decimal | None = None,
     ) -> RubricConfig:
         """Make this the target's current rubric, as version n+1.
 
         Rubrics are versioned, not overwritten, so feedback keeps pointing
         at the rubric it was generated from. Saving text identical to the
         current rubric returns it unchanged rather than adding a version.
-        Raises ValueError for blank criteria.
+        Validate source selection and analysis before saving. When
+        analysis_config is supplied, update it and max_score atomically
+        with the rubric; otherwise validate and resolve the stored configuration.
+        Raises ValueError for blank criteria or invalid target configuration.
         """
 

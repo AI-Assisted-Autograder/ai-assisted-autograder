@@ -110,8 +110,8 @@ def test_backend_config_applies_defaults():
 
     assert config.max_code_chars == 12_000
     assert config.max_guidance_chars == 2_000
-    assert config.max_output_tokens == 1_024
-    assert config.timeout_seconds == 30.0
+    assert config.max_output_tokens == 16_384
+    assert config.timeout_seconds == 240.0
     assert config.max_concurrency == 2
     assert config.max_body_bytes == 65_536
 
@@ -431,6 +431,12 @@ def test_assignment_create_requires_exactly_one_course_source():
             {
                 "identifier": "target-1",
                 "rubric": {"criteria_text": "Correctness"},
+                "analysis": {
+                    "behavior": "ai_grading",
+                    "grading_items": [
+                        {"id": "correctness", "requirement": "Returns the sum.", "points": 5},
+                    ],
+                },
             }
         ],
     }
@@ -457,10 +463,22 @@ def test_assignment_create_rejects_duplicate_target_identifiers():
                 {
                     "identifier": "same",
                     "rubric": {"criteria_text": "Correctness"},
+                    "analysis": {
+                        "behavior": "ai_grading",
+                        "grading_items": [
+                            {"id": "correctness", "requirement": "Returns the sum.", "points": 5},
+                        ],
+                    },
                 },
                 {
                     "identifier": "same",
                     "rubric": {"criteria_text": "Style"},
+                    "analysis": {
+                        "behavior": "ai_grading",
+                        "grading_items": [
+                            {"id": "style", "requirement": "Uses descriptive names.", "points": 5},
+                        ],
+                    },
                 },
             ],
         )

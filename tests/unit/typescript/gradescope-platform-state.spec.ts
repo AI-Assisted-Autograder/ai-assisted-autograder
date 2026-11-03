@@ -1,6 +1,6 @@
 import { expect, test } from '@playwright/test';
 
-import { classifyAutograderState } from '../../integration/gradescope-platform';
+import { classifyAutograderState } from '../../../integration/gradescope-platform';
 
 test.describe('Gradescope autograder state classification', () => {
   test('keeps a running submission out of the completed state', () => {

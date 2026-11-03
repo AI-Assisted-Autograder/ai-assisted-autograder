@@ -19,7 +19,7 @@ Get-Content -LiteralPath $envFile | ForEach-Object {
 
     $parts = $line -split '=', 2
     if ($parts.Count -ne 2) {
-        throw "Invalid environment line in $envFile: $line"
+        throw "Invalid environment line in ${envFile}: $line"
     }
 
     $name = $parts[0].Trim()

@@ -1,44 +1,250 @@
 {% extends "base.html" %}
 
 {% set assignment_title = assignment.name or assignment.platform_assignment_id %}
-{% block title %}Rubric for {{ target.identifier }}{% endblock %}
+{% block title %}Configure {{ target.identifier }}{% endblock %}
 
 {% block content %}
+<style>#target-configuration [data-behavior][hidden] { display: none; }</style>
 <p class="crumbs">
     <a href="/">Assignments</a> /
     <a href="/assignments/{{ assignment.id }}">{{ assignment_title }}</a> /
 </p>
 <h1>
-    Rubric for <code class="target">{{ target.identifier }}</code>
+    Configure <code class="target">{{ target.identifier }}</code>
     <span class="badge muted">{{ target.kind | title }}</span>
 </h1>
 <p class="hint">
     {% if target.rubric %}
-    Currently version {{ target.rubric.version }}. Saving changes creates version {{ target.rubric.version + 1 }};
-    earlier versions are kept, so feedback already generated still shows which rubric it was graded against.
+    Common background version {{ target.rubric.version }}. Changes to background or feedback guidance create a new version.
+    Every configuration change updates the revision used by the autograder.
     {% else %}
-    This target has no rubric yet, so it cannot be graded until you save one.
+    This target cannot be graded until you save a rubric with valid source selection and analysis settings.
     {% endif %}
 </p>
 
 {% if error %}<p class="form-error" role="alert">{{ error }}</p>{% endif %}
 
-<form class="card form" method="post" action="/assignments/{{ assignment.id }}/targets/{{ target.id }}/rubric">
+<form id="target-configuration" class="card form" method="post" action="/assignments/{{ assignment.id }}/targets/{{ target.id }}/rubric">
     <label>
-        Criteria
-        <textarea name="criteria_text" rows="8" required>{{ form.criteria_text }}</textarea>
+        Behavior
+        <select id="behavior" name="behavior" required>
+            <option value="ai_grading" {% if form.behavior == 'ai_grading' %}selected{% endif %}>AI grading</option>
+            <option value="functional_test_feedback" {% if form.behavior == 'functional_test_feedback' %}selected{% endif %}>Functional-test feedback</option>
+        </select>
     </label>
-    <p class="hint">What a correct, well-written {{ target.kind | lower }} does. The model grades against this.</p>
+    <p class="hint">AI grading creates a scored block for each configured item, including items awarded zero points. Functional-test feedback only explains failed tests inside their original output and never changes points.</p>
+
+    <label>
+        Common background (optional)
+        <textarea name="criteria_text" rows="5" maxlength="16000">{{ form.criteria_text }}</textarea>
+    </label>
+    <p class="hint">Assignment context shared by all items. Keep scoring requirements and points in the grading item list below.</p>
 
     <label>
         Feedback guidance (optional)
-        <textarea name="feedback_guidance" rows="4">{{ form.feedback_guidance }}</textarea>
+        <textarea name="feedback_guidance" rows="4" maxlength="8000">{{ form.feedback_guidance }}</textarea>
     </label>
     <p class="hint">How to talk to the student: tone, length, what not to give away.</p>
 
+    <label>Public assignment context (optional)
+        <textarea name="test_plan" rows="5" maxlength="64000">{{ form.test_plan or '' }}</textarea>
+    </label>
+    <p class="hint">Student-visible context for either behavior. Keep scoring requirements in the grading items. Do not include hidden tests or teacher-only diagnostics.</p>
+
+    <fieldset>
+        <legend>Source selection</legend>
+        <label>
+            Primary source patterns
+            <textarea name="source_globs" rows="3" placeholder="src/**/*.java">{{ form.source_globs }}</textarea>
+        </label>
+        <p class="hint">One submission-relative glob per line. Leave blank to locate one file from the target identifier and assignment language.</p>
+        <label>
+            Context source patterns (optional)
+            <textarea name="context_globs" rows="2">{{ form.context_globs }}</textarea>
+        </label>
+        <label>
+            Maximum primary files (optional)
+            <input type="number" name="max_source_files" min="1" max="64" value="{{ form.max_source_files if form.max_source_files is not none else '' }}">
+        </label>
+        <p class="hint">Use 1 when the target must identify a single file. Leave blank to allow multiple files selected by explicit patterns.</p>
+    </fieldset>
+
+    {% macro grading_item(item) %}
+    <fieldset class="card grading-item">
+        <input type="hidden" name="item_id" value="{{ item.id or '' }}">
+        <p class="hint">Item ID: <code>{{ item.id or 'Assigned when saved' }}</code></p>
+        <label>
+            Scoring requirement
+            <textarea name="item_requirement" rows="4" maxlength="16000" required>{{ item.requirement or '' }}</textarea>
+        </label>
+        <label>
+            Points
+            <input type="number" name="item_points" min="0.01" step="0.01" required value="{{ item.points if item.points is not none else '' }}">
+        </label>
+        <div class="actions">
+            <button type="button" class="link" data-move="up">Move up</button>
+            <button type="button" class="link" data-move="down">Move down</button>
+            <button type="button" class="link danger" data-remove-item>Remove item</button>
+        </div>
+    </fieldset>
+    {% endmacro %}
+    <fieldset data-behavior="ai_grading" {% if form.behavior != 'ai_grading' %}hidden disabled{% endif %}>
+        <legend>Grading items</legend>
+        <p class="hint">Each item is the single source of its requirement and points. IDs stay unchanged when editing or reordering. Pending items keep their full maximum and make the displayed grade provisional.</p>
+        {% if form.legacy_test_plan %}
+        <details><summary>Previous testplan — move each requirement into its item before saving</summary><pre>{{ form.legacy_test_plan }}</pre></details>
+        {% endif %}
+        <label>
+            Evaluation focus
+            <select name="analysis_mode">
+                {% for value, label in [('code_feedback', 'Code requirements'), ('testplan', 'Testplan adherence'), ('test_quality', 'Test quality')] %}
+                <option value="{{ value }}" {% if form.analysis_mode == value %}selected{% endif %}>{{ label }}</option>
+                {% endfor %}
+            </select>
+        </label>
+        <div id="grading-items">
+            {% for item in form.grading_items or [{}] %}{{ grading_item(item) }}{% endfor %}
+        </div>
+        <template id="grading-item-template">{{ grading_item({}) }}</template>
+        <button type="button" class="link" id="add-item">Add grading item</button>
+        <div class="row">
+            <label>Set all item points<input id="uniform-points" type="number" min="0.01" step="0.01"></label>
+            <button type="button" id="apply-points">Apply to all items</button>
+        </div>
+        <p>Total points: <output id="grading-total">0</output></p>
+    </fieldset>
+    <fieldset data-behavior="functional_test_feedback" {% if form.behavior != 'functional_test_feedback' %}hidden disabled{% endif %}>
+        <legend>Functional-test feedback</legend>
+        <label>Final functional result source
+            <select id="functional-result-source" name="functional_result_source" data-selected="{{ form.functional_result_source or '' }}" required>
+                {% for source in form.evidence_sources if source.format == 'gradescope' and source.path == 'results/results.json' %}
+                <option value="{{ source.label }}" {% if form.functional_result_source == source.label %}selected{% endif %}>{{ source.label }}</option>
+                {% endfor %}
+            </select>
+        </label>
+        <p class="hint">Configure exactly one evidence source: the final Gradescope report at results/results.json. It automatically finds all eligible visible failed tests. No per-test mapping is needed. With no eligible failures, AI is skipped. Only one active feedback target is allowed per assignment.</p>
+    </fieldset>
+
+    {% macro evidence_fields(source) %}
+    <fieldset class="card evidence-source">
+        <label>
+            Report format
+            <select name="evidence_format" required>
+                {% if source.format and source.format != 'gradescope' %}
+                <option value="" disabled selected>{{ source.format }} is unsupported; remove or replace this source</option>
+                {% endif %}
+                <option value="gradescope" {% if not source.format or source.format == 'gradescope' %}selected{% endif %}>Gradescope results</option>
+            </select>
+        </label>
+        <label>
+            Report path
+            <input name="evidence_path" value="{{ source.path or '' }}" placeholder="results/results.json">
+        </label>
+        <label>
+            Evidence label
+            <input name="evidence_label" value="{{ source.label or '' }}" placeholder="Functional test results">
+        </label>
+        <label>
+            Included test or class patterns (optional)
+            <textarea name="evidence_include" rows="2">{{ source.include or '' }}</textarea>
+        </label>
+        <button type="button" class="link danger" data-remove-source>Remove evidence source</button>
+    </fieldset>
+    {% endmacro %}
+    <fieldset>
+        <legend>Runtime evidence (optional)</legend>
+        <p class="hint">Only Gradescope result sources are supported for these behaviors. JUnit, JaCoCo and diagnostic text reports cannot be used here because they lack verified row visibility. Paths are relative to /autograder; labels must be unique. The selected functional result source must include all observations.</p>
+        <div id="evidence-sources">
+            {% for source in form.evidence_sources or [{}] %}{{ evidence_fields(source) }}{% endfor %}
+        </div>
+        <template id="evidence-source-template">{{ evidence_fields({}) }}</template>
+        <button type="button" class="link" id="add-source">Add evidence source</button>
+    </fieldset>
+
+    <label>
+        Temperature (optional)
+        <input type="number" name="temperature" min="0" max="2" step="any" value="{{ form.temperature if form.temperature is not none else '' }}">
+    </label>
+    <p class="hint">Leave blank to use the selected model's default. Some models do not accept this setting.</p>
+
+    <label>
+        <input type="checkbox" name="new_ai_attempt" value="1" {% if form.new_ai_attempt == '1' %}checked{% endif %}>
+        Start a new AI attempt on the next Gradescope run
+    </label>
+    <p class="hint">After saving, rerun the submission in Gradescope. This refreshes AI results for all targets in this assignment on their next run; it does not start grading or call AI automatically.</p>
+
     <div class="actions">
-        <button type="submit">Save rubric</button>
+        <button type="submit">Save configuration</button>
         <a href="/assignments/{{ assignment.id }}#targets">Cancel</a>
     </div>
 </form>
+<script>
+(() => {
+    const form = document.getElementById('target-configuration');
+    const behavior = document.getElementById('behavior');
+    const items = document.getElementById('grading-items');
+    const sources = document.getElementById('evidence-sources');
+    const resultSource = document.getElementById('functional-result-source');
+    function updateBehavior() {
+        form.querySelectorAll('[data-behavior]').forEach(section => {
+            section.hidden = section.dataset.behavior !== behavior.value;
+            section.disabled = section.hidden;
+        });
+    }
+    function updateTotal() {
+        let cents = 0;
+        items.querySelectorAll('[name="item_points"]').forEach(input => {
+            const value = Number(input.value);
+            if (Number.isFinite(value)) cents += Math.round(value * 100);
+        });
+        document.getElementById('grading-total').textContent = (cents / 100).toFixed(2);
+    }
+    function updateSources() {
+        const selected = resultSource.value || resultSource.dataset.selected;
+        resultSource.replaceChildren(new Option('Choose the final Gradescope report', ''));
+        sources.querySelectorAll('.evidence-source').forEach(source => {
+            const format = source.querySelector('[name="evidence_format"]').value;
+            const path = source.querySelector('[name="evidence_path"]').value;
+            const label = source.querySelector('[name="evidence_label"]').value;
+            if (format === 'gradescope' && path === 'results/results.json' && label) {
+                resultSource.add(new Option(label, label, false, label === selected));
+            }
+        });
+    }
+    behavior.addEventListener('change', updateBehavior);
+    items.addEventListener('input', updateTotal);
+    items.addEventListener('click', event => {
+        const button = event.target.closest('button');
+        if (!button) return;
+        const item = button.closest('.grading-item');
+        if (button.hasAttribute('data-remove-item')) item.remove();
+        if (button.dataset.move === 'up' && item.previousElementSibling) items.insertBefore(item, item.previousElementSibling);
+        if (button.dataset.move === 'down' && item.nextElementSibling) items.insertBefore(item.nextElementSibling, item);
+        updateTotal();
+    });
+    document.getElementById('add-item').addEventListener('click', () => {
+        items.append(document.getElementById('grading-item-template').content.cloneNode(true));
+        updateTotal();
+    });
+    document.getElementById('apply-points').addEventListener('click', () => {
+        const input = document.getElementById('uniform-points');
+        if (!input.value || !input.reportValidity()) return;
+        items.querySelectorAll('[name="item_points"]').forEach(item => { item.value = input.value; });
+        updateTotal();
+    });
+    sources.addEventListener('input', updateSources);
+    sources.addEventListener('change', updateSources);
+    sources.addEventListener('click', event => {
+        const button = event.target.closest('[data-remove-source]');
+        if (button) { button.closest('.evidence-source').remove(); updateSources(); }
+    });
+    document.getElementById('add-source').addEventListener('click', () => {
+        sources.append(document.getElementById('evidence-source-template').content.cloneNode(true));
+        updateSources();
+    });
+    updateBehavior();
+    updateTotal();
+    updateSources();
+})();
+</script>
 {% endblock %}

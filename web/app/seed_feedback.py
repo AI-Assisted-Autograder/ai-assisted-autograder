@@ -20,12 +20,7 @@ from .feedback_config import (
 from .feedback_store import JsonStore, StoreError, atomic_write, token_hash, utc_now
 
 
-DEFAULT_MODEL = "gemini-3.5-flash-lite"
-DEFAULT_PROJECT = "project-bcedce55-e972-4a7b-bef"
 DEFAULT_LOCATION = "global"
-DEFAULT_SERVICE_ACCOUNT = (
-    "gradescope-vertex-test@project-bcedce55-e972-4a7b-bef.iam.gserviceaccount.com"
-)
 DEFAULT_BACKEND_URL = "http://127.0.0.1:8001"
 
 
@@ -38,9 +33,9 @@ def initialize(
     max_calls: int = 5,
     expires_in_hours: float = 24.0,
     backend_url: str = DEFAULT_BACKEND_URL,
-    project: str = DEFAULT_PROJECT,
+    project: str | None = None,
     location: str = DEFAULT_LOCATION,
-    service_account: str = DEFAULT_SERVICE_ACCOUNT,
+    service_account: str | None = None,
     allowed_models: list[str] | None = None,
     engine_models: dict[str, list[str]] | None = None,
     add_assignment: bool = False,
@@ -73,8 +68,8 @@ def initialize(
     models = {key: list(value) for key, value in (engine_models or {}).items()}
     if allowed_models:
         models.setdefault("vertex", []).extend(allowed_models)
-    if not models:
-        models = {"vertex": [DEFAULT_MODEL]}
+    if not models and not add_assignment:
+        raise ValueError("Initial state requires at least one --allow-model ENGINE:MODEL")
     vertex = "vertex" in models
     client_payloads = (
         (raw_token + "\n").encode("utf-8"),
@@ -127,9 +122,9 @@ def main() -> int:
     parser.add_argument("--max-calls", type=int, default=5)
     parser.add_argument("--expires-in-hours", type=float, default=24.0)
     parser.add_argument("--backend-url", default=DEFAULT_BACKEND_URL)
-    parser.add_argument("--project", default=DEFAULT_PROJECT)
+    parser.add_argument("--project", help="Vertex project ID; required when enabling Vertex")
     parser.add_argument("--location", default=DEFAULT_LOCATION)
-    parser.add_argument("--service-account", default=DEFAULT_SERVICE_ACCOUNT)
+    parser.add_argument("--service-account", help="Impersonated service account; required when enabling Vertex")
     parser.add_argument("--allowed-model", action="append", dest="allowed_models",
                         help="Allowed Vertex model (legacy option); repeat for multiple models")
     parser.add_argument("--allow-model", action="append", default=[], metavar="ENGINE:MODEL",

@@ -1,9 +1,7 @@
 """Gemini adapter for an injected Vertex client or a Gemini API-key client."""
 
-import json
 from math import isfinite
 import os
-from pathlib import Path
 
 import httpx
 from google import genai
@@ -15,9 +13,6 @@ from .FeedbackParser import parse_feedback
 from .ILLMProvider import ProviderError
 
 
-LOCAL_CONFIG_PATH = Path(__file__).with_name(".gemini.json")
-
-
 class GeminiProvider:
     name = "GOOGLE"
 
@@ -27,8 +22,8 @@ class GeminiProvider:
         *,
         client: genai.Client | None = None,
         api_key: str | None = None,
-        timeout_seconds: float = 60.0,
-        max_output_tokens: int = 4096,
+        timeout_seconds: float = 240.0,
+        max_output_tokens: int = 16_384,
         builder: PromptBuilder | None = None,
     ) -> None:
         # An injected backend client must never consult legacy caller credentials.
@@ -37,12 +32,6 @@ class GeminiProvider:
             (os.getenv("GEMINI_API_KEY") or os.getenv("GOOGLE_API_KEY"))
             if client is None else None
         )
-        if client is None and (model is None or api_key is None) and LOCAL_CONFIG_PATH.is_file():
-            config = json.loads(LOCAL_CONFIG_PATH.read_text(encoding="utf-8"))
-            if model is None:
-                model = config.get("model")
-            if api_key is None:
-                api_key = config.get("api_key")
         if not model or not model.strip():
             raise ValueError("model must be configured explicitly")
         if not isfinite(timeout_seconds) or timeout_seconds <= 0:
@@ -69,9 +58,34 @@ class GeminiProvider:
         """Return validated feedback; output token usage includes Gemini thoughts."""
         prompt = self._builder.prepare(req)
         response_json_schema = None
-        if (req.analysis.points_per_test is not None
+        if req.analysis.behavior == "functional_test_feedback":
+            expected = [item.id for item in req.evidence
+                        if item.source == req.analysis.functional_result_source
+                        and item.kind == "runtime" and item.status == "fail"]
+            response_json_schema = {
+                "type": "object",
+                "properties": {
+                    "failure_feedback": {
+                        "type": "array", "minItems": len(expected), "maxItems": len(expected),
+                        "items": {
+                            "type": "object",
+                            "properties": {
+                                "evidence_id": {"type": "string", "enum": expected},
+                                "feedback": {"type": "string"},
+                                "evidence": {"type": "string"},
+                            },
+                            "required": ["evidence_id", "feedback", "evidence"],
+                            "additionalProperties": False,
+                        },
+                    },
+                },
+                "required": ["failure_feedback"], "additionalProperties": False,
+            }
+        elif (req.analysis.behavior == "ai_grading" or req.analysis.points_per_test is not None
                 or (req.analysis.mode == "test_quality" and req.target.max_score is None)):
-            expected_tests = list(req.analysis.expected_tests)
+            expected_tests = ([item.id for item in req.analysis.grading_items]
+                              if req.analysis.behavior == "ai_grading"
+                              else list(req.analysis.expected_tests))
             # Scores belong to the backend, not the model's response contract.
             response_json_schema = {
                 "type": "object",
@@ -98,6 +112,9 @@ class GeminiProvider:
                 "required": ["feedback_text", "items"],
                 "additionalProperties": False,
             }
+            if req.analysis.behavior == "ai_grading":
+                del response_json_schema["properties"]["feedback_text"]
+                response_json_schema["required"] = ["items"]
             if expected_tests:
                 items_schema = response_json_schema["properties"]["items"]
                 items_schema["minItems"] = items_schema["maxItems"] = len(expected_tests)
@@ -110,11 +127,15 @@ class GeminiProvider:
                     system_instruction=prompt.system_instruction,
                     http_options=self._http_options,
                     response_mime_type=(
-                        "text/plain" if req.analysis.mode == "code_feedback" else "application/json"
+                        "text/plain" if req.analysis.behavior is None and req.analysis.mode == "code_feedback"
+                        else "application/json"
                     ),
                     response_json_schema=response_json_schema,
                     max_output_tokens=self._max_output_tokens,
-                    candidate_count=1,
+                    temperature=(
+                        None if self.model.startswith("gemini-3.8-")
+                        else req.analysis.temperature
+                    ),
                     automatic_function_calling=types.AutomaticFunctionCallingConfig(
                         disable=True,
                     ),
@@ -129,6 +150,10 @@ class GeminiProvider:
                 "provider_unavailable", "Could not reach Gemini.", retryable=True,
             ) from None
         except errors.APIError as exc:
+            if exc.code in (408, 504):
+                raise ProviderError(
+                    "timeout", f"Gemini request timed out (HTTP {exc.code}).", retryable=True,
+                ) from None
             retryable = exc.code in (408, 429) or 500 <= exc.code < 600
             raise ProviderError(
                 "provider_error", f"Gemini rejected the request (HTTP {exc.code}).",
@@ -157,7 +182,8 @@ class GeminiProvider:
             raise ProviderError("provider_refusal", "Gemini declined this request.")
         if candidate.finish_reason != types.FinishReason.STOP:
             raise ProviderError(
-                "incomplete_provider_response", "Gemini did not finish generating feedback.",
+                "incomplete_provider_response",
+                f"Gemini did not finish generating feedback ({candidate.finish_reason}).",
             )
         # Exclude thinking parts; neither tool calls nor thoughts are feedback.
         parts = candidate.content.parts if candidate.content else []
