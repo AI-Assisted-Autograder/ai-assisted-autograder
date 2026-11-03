@@ -511,13 +511,16 @@ def test_save_feedback_stores_every_provider_and_completes(backend):
     assert [t.identifier for t in backend.repo.decide_action(sid).targets] == ["sub"]
 
 
-def test_save_feedback_twice_conflicts(backend):
+def test_save_feedback_rerun_replaces_selected_feedback(backend):
     aid, sid = started(backend)
     rubric = backend.add_rubric(aid, "add")
+    backend.repo.save_feedback(sid, "add", result_for(rubric, selected=0))
     backend.repo.save_feedback(sid, "add", result_for(rubric))
-    with pytest.raises(ConflictError):
-        backend.repo.save_feedback(sid, "add", result_for(rubric))
-    assert len(backend.feedback_rows(sid, "add")) == 2
+    rows = backend.feedback_rows(sid, "add")
+    assert len(rows) == 4
+    assert [row for row in rows if row[1]] == [
+        ("OPENAI", True, "Check the empty case.", Decimal("0.3")),
+    ]
 
 
 def test_save_feedback_opted_out_conflicts(backend):
@@ -568,15 +571,17 @@ def test_mark_target_failed_needs_a_message(backend, error):
     assert backend.target_state(sid, "add").completed is False
 
 
-def test_mark_target_failed_after_feedback_conflicts(backend):
+def test_mark_target_failed_after_feedback_marks_submission_failed(backend):
     aid, sid = started(backend)
     backend.repo.save_feedback(sid, "add", result_for(backend.add_rubric(aid, "add")))
-    with pytest.raises(ConflictError):
-        backend.repo.mark_target_failed(sid, "add", "late failure")
-    assert backend.target_state(sid, "add").last_error is None
+    backend.repo.mark_target_failed(sid, "add", "late failure")
+    assert backend.target_state(sid, "add").last_error == "late failure"
+    assert [sub.submission_id for sub in backend.repo.list_submissions_failed_ai()] == [sid]
+    assert backend.submission(sid)[1] is None
+    assert all(not row[1] for row in backend.feedback_rows(sid, "add"))
 
 
-def test_complete_waits_for_every_needed_target(backend):
+def test_complete_requires_every_needed_target_to_succeed(backend):
     aid, sid = started(backend, targets=(("add", 1), ("sub", 2), ("mul", 3)))
     backend.repo.set_ai_not_needed(sid, "mul")
     backend.repo.save_feedback(sid, "add", result_for(backend.add_rubric(aid, "add")))
@@ -584,11 +589,11 @@ def test_complete_waits_for_every_needed_target(backend):
     assert backend.submission(sid)[1] is None
 
     backend.repo.mark_target_failed(sid, "sub", "invalid_response")
-    assert backend.repo.mark_ai_complete_if_all_done(sid) is True
-    assert backend.submission(sid)[1] == SUBMITTED
-    assert backend.repo.decide_action(sid).action is Action.REEMIT
+    assert backend.repo.mark_ai_complete_if_all_done(sid) is False
+    assert backend.submission(sid)[1] is None
+    assert backend.repo.decide_action(sid).action is Action.GRADE
     # Idempotent.
-    assert backend.repo.mark_ai_complete_if_all_done(sid) is True
+    assert backend.repo.mark_ai_complete_if_all_done(sid) is False
 
 
 def test_complete_when_everything_opted_out(backend):
@@ -787,7 +792,7 @@ def test_list_submissions_newest_first_with_target_counts(backend):
 
     assert [s.id for s in found] == [mixed, superseded, waiting]
     m, s, w = found
-    assert (m.action, m.done, m.failed, m.waiting, m.opted_out) == (Action.REEMIT, 1, 1, 0, 1)
+    assert (m.action, m.done, m.failed, m.waiting, m.opted_out) == (Action.GRADE, 1, 1, 0, 1)
     assert (w.action, w.done, w.failed, w.waiting, w.opted_out) == (Action.DEFER, 0, 0, 3, 0)
     assert s.is_active_attempt is False and w.is_active_attempt is True
     assert w.platform_submission_id == "waiting"
