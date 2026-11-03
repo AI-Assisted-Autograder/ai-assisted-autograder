@@ -14,6 +14,7 @@ import math
 from pathlib import Path, PurePosixPath
 import re
 import sys
+import textwrap
 import time
 import uuid
 
@@ -171,8 +172,12 @@ def appended_output(original, text, format_name, heading='AI feedback'):
     """Treat model text as text even when the original diagnostic uses rich markup."""
     text = re.sub(r'[\x00-\x08\x0b\x0c\x0e-\x1f\x7f]', '', text)
     if format_name in ('html', 'simple_format'):
-        body = html.escape(text).replace('\n', '<br>')
-        addition = '<div><strong>' + html.escape(heading) + '</strong><div>' + body + '</div></div>'
+        # Gradescope wraps test output in its own pre element, even for rich HTML.
+        wrapped = '\n'.join(textwrap.fill(line, width=100, expand_tabs=False,
+                                         replace_whitespace=False, drop_whitespace=False,
+                                         break_on_hyphens=False) for line in text.split('\n'))
+        body = html.escape(wrapped).replace('\n', '<br>')
+        addition = '<div><p><strong>' + html.escape(heading) + '</strong></p><p>' + body + '</p></div>'
         return original + '\n' + addition
     if format_name == 'md':
         longest = max((len(match.group()) for match in re.finditer(r'`+', text)), default=0)
