@@ -97,3 +97,20 @@ test('NightlyTrigger keeps a real rerun successful when only its audit write fai
     { submissionId: 'submission-2', status: 'RERUN_SUCCEEDED' },
   ]);
 });
+
+test('NightlyTrigger retries only submissions returned by the AI-failure query', async () => {
+  const failedSubmission = submissions[1];
+  const client = new FakeGradingClient(submissions, undefined, [failedSubmission]);
+  const platform = new FakePlatform();
+
+  const summary = await new NightlyTrigger(client, platform).run('AI_FAILURES');
+
+  expect(platform.rerunCalls).toEqual([failedSubmission]);
+  expect(client.authorizedSubmissionIds).toEqual(['submission-2']);
+  expect(summary).toMatchObject({
+    found: 1,
+    authorized: 1,
+    rerun: 1,
+    failed: 0,
+  });
+});

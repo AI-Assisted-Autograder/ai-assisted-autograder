@@ -4,6 +4,7 @@ import type {
   SubmissionFailure,
   SubmissionLocator,
   SubmissionOutcomeStatus,
+  TriggerSource,
   TriggerRunSummary,
 } from './interfaces';
 import { classifyFailure } from './failure-classification';
@@ -17,7 +18,7 @@ export class NightlyTrigger {
     private readonly platform: ILearningPlatform,
   ) {}
 
-  public async run(): Promise<TriggerRunSummary> {
+  public async run(source: TriggerSource = 'PENDING_NIGHTLY'): Promise<TriggerRunSummary> {
     const summary: TriggerRunSummary = { found: 0, authorized: 0, rerun: 0, failed: 0 };
     await this.client.startRun();
     let runError: unknown;
@@ -25,7 +26,10 @@ export class NightlyTrigger {
 
     try {
       await this.platform.authenticate();
-      const pending: SubmissionLocator[] = await this.client.listSubmissionsPendingAi('NIGHTLY');
+      const pending: SubmissionLocator[] =
+        source === 'AI_FAILURES'
+          ? await this.client.listSubmissionsFailedOnAi()
+          : await this.client.listSubmissionsPendingAi('NIGHTLY');
       summary.found = pending.length;
 
       for (const submission of pending) {

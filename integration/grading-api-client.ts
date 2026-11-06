@@ -45,6 +45,25 @@ export class HttpGradingClient implements IGradingClient {
     }
 
     const rows = (await response.json()) as PendingSubmissionDto[];
+    return this.toSubmissionLocators(rows);
+  }
+
+  public async listSubmissionsFailedOnAi(): Promise<SubmissionLocator[]> {
+    const response = await fetch(`${this.baseUrl}/internal/ai-failures/submissions`, {
+      headers: this.headers(),
+    });
+    if (!response.ok) {
+      throw new Error(`Database API returned ${response.status} while listing AI-failed submissions.`);
+    }
+
+    const rows = (await response.json()) as PendingSubmissionDto[] | PendingSubmissionDto;
+    return this.toSubmissionLocators(rows);
+  }
+
+  private toSubmissionLocators(
+    response: PendingSubmissionDto[] | PendingSubmissionDto,
+  ): SubmissionLocator[] {
+    const rows = Array.isArray(response) ? response : [response];
     const courseId = process.env.GRADESCOPE_COURSE_ID;
     if (!courseId && rows.length > 0) {
       throw new Error('Set GRADESCOPE_COURSE_ID to build Gradescope submission URLs.');

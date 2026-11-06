@@ -4,6 +4,8 @@ export type SubmissionLocator = {
   platformSubmissionUrl: string;
 };
 
+export type TriggerSource = 'PENDING_NIGHTLY' | 'AI_FAILURES';
+
 export type RerunResult = {
   submissionId: string;
   clicked: boolean;
@@ -62,6 +64,7 @@ export type TriggerRunSummary = {
 export interface IGradingClient {
   startRun(): Promise<void>;
   listSubmissionsPendingAi(mode: 'NIGHTLY'): Promise<SubmissionLocator[]>;
+  listSubmissionsFailedOnAi(): Promise<SubmissionLocator[]>;
   authorizeForGrading(submissionId: string): Promise<void>;
   recordSubmissionResult(
     submissionId: string,

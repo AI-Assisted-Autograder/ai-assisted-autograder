@@ -41,6 +41,9 @@ The current implementation is a rerun prototype:
   orchestration tests.
 - `NightlyTrigger` authorizes and submits every pending rerun first, then polls
   the accepted reruns in a separate completion phase.
+- The runner supports two sources: PENDING_NIGHTLY for the initial nightly
+  batch and AI_FAILURES for retrying only submissions returned by the
+  backend's AI-failure endpoint.
 - Each submission failure now includes a phase (authorization, trigger, or
   completion) and a coarse kind such as DATABASE, TIMEOUT, AI_FEEDBACK, or
   AUTOGRADER. These labels help operations triage failures; the backend remains
@@ -124,6 +127,7 @@ exposes the operations needed before and after the browser action:
 
 ```text
 GET  /internal/nightly/submissions?mode=NIGHTLY
+GET  /internal/ai-failures/submissions
 POST /internal/nightly/submissions/{submission_id}/authorize
 POST /internal/nightly/runs
 POST /internal/nightly/runs/{run_id}/submissions/{submission_id}
@@ -141,6 +145,11 @@ $env:GRADESCOPE_COURSE_ID="your Gradescope course id"
 The API query filters for active `NIGHTLY` assignments, active submissions,
 AI-needed targets that are not completed, and submissions that have not
 already been AI-graded.
+
+For an AI retry cycle, set NIGHTLY_TRIGGER_SOURCE=AI_FAILURES. The runner then
+calls GET /internal/ai-failures/submissions and reruns only the returned
+submissions. The endpoint is the backend source of truth for ai_status=FAILED;
+the Playwright layer does not infer AI failure from the Gradescope page.
 
 The database is the source of the work list, but it does not itself perform a
 Gradescope rerun. A submission row represents the work to process; the actual
@@ -250,6 +259,7 @@ $env:INTEGRATION_API_TOKEN="the same token configured for the Web API"
 $env:GRADESCOPE_COURSE_ID="your Gradescope course id"
 $env:GRADESCOPE_RERUN_SUCCESS_TEXT="optional regex matching the Gradescope success message"
 $env:GRADESCOPE_ALLOW_RERUN="1"
+$env:NIGHTLY_TRIGGER_SOURCE="PENDING_NIGHTLY"
 
 npm run nightly:trigger
 ```
@@ -277,6 +287,15 @@ rerun includes the full autograder and AI feedback phases. Configure it with
 
 The login test is read-only with respect to Gradescope. The rerun test changes
 Gradescope state and must be run only for an intentionally selected submission.
+
+For an AI-failure retry cycle, set:
+
+    $env:NIGHTLY_TRIGGER_SOURCE="AI_FAILURES"
+    npm run nightly:trigger
+
+This reruns only the submissions returned by
+/internal/ai-failures/submissions. Test either mode against a controlled
+assignment before scheduling it.
 
 ## Running the nightly trigger on another machine
 
