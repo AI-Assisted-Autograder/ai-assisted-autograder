@@ -9,7 +9,7 @@ from datetime import datetime, timezone
 from decimal import Decimal
 
 from app.feedback_config import RubricInput
-from app.models import GRADING_MODES, TEST_STATUSES
+from app.models import AI_STATUSES, GRADING_MODES, TEST_STATUSES
 from app.repository.base import (
     Action,
     ActionResult,
@@ -113,6 +113,7 @@ class _Submission:
     student_identifier: str | None
     ai_authorized_at: datetime | None = None
     ai_graded_submitted_at: datetime | None = None
+    ai_status: str | None = None
     is_active_attempt: bool = True
 
 
@@ -299,10 +300,13 @@ class InMemoryRepository(IGradingRepository):
 
     def save_feedback(self, submission_id: uuid.UUID, target: str, result: FeedbackResult) -> None:
         st = self._target(submission_id, target)
-        check_gradable(target, st.ai_needed, st.completed_at)
+        check_gradable(target, st.ai_needed)
         rubric = self.rubrics.get(result.rubric_id)
         if rubric is None or rubric.grading_target_id != st.grading_target_id:
             raise ValueError(f"Rubric {result.rubric_id} is not a rubric for target {target!r}")
+        for previous in self.ai_feedback:
+            if previous.submission_target_id == st.id:
+                previous.is_selected = False
         for i, r in enumerate(result.responses):
             self.ai_feedback.append(
                 _AiFeedback(
@@ -329,19 +333,35 @@ class InMemoryRepository(IGradingRepository):
         if not error or not error.strip():
             raise ValueError("error must be a non-empty message")
         st = self._target(submission_id, target)
-        check_gradable(target, st.ai_needed, st.completed_at)
+        check_gradable(target, st.ai_needed)
+        for previous in self.ai_feedback:
+            if previous.submission_target_id == st.id:
+                previous.is_selected = False
         st.completed_at = _now()
         st.last_error = error
+        st.selection_reason = None
+        st.score_spread = None
+        st.agreement_score = None
+        self.set_submission_ai_status(submission_id, "FAILED")
+
+    def set_submission_ai_status(self, submission_id: uuid.UUID, status: str) -> None:
+        if status not in AI_STATUSES:
+            raise ValueError(f"status must be one of {', '.join(AI_STATUSES)}, not {status!r}")
+        sub = self._submission(submission_id)
+        sub.ai_status = status
+        sub.ai_graded_submitted_at = sub.submitted_at if status == "SUCCEEDED" else None
 
     def mark_ai_complete_if_all_done(self, submission_id: uuid.UUID) -> bool:
         sub = self._submission(submission_id)
-        pending = any(
-            st.submission_id == submission_id and st.ai_needed and st.completed_at is None
+        unfinished = any(
+            st.submission_id == submission_id and st.ai_needed
+            and (st.completed_at is None or st.last_error is not None)
             for st in self.submission_targets.values()
         )
-        if not pending:
-            sub.ai_graded_submitted_at = sub.submitted_at
-        return sub.ai_graded_submitted_at is not None and sub.ai_graded_submitted_at == sub.submitted_at
+        if unfinished or sub.ai_status == "FAILED":
+            return False
+        sub.ai_graded_submitted_at = sub.submitted_at
+        return True
 
     def get_assignment_config(self, assignment_id: uuid.UUID) -> AssignmentConfig:
         a = self.assignments.get(assignment_id)
@@ -396,6 +416,21 @@ class InMemoryRepository(IGradingRepository):
             if (a.grading_mode == mode and a.is_active and sub.is_active_attempt
                     and sub.ai_graded_submitted_at is None and pending):
                 found.append((sub, a))
+        found.sort(key=lambda p: (p[0].submitted_at, p[0].id))
+        return [
+            SubmissionLocator(
+                sub.id, a.platform, a.platform_assignment_id, sub.platform_submission_id, sub.student_identifier
+            )
+            for sub, a in found
+        ]
+
+    def list_submissions_failed_ai(self) -> list[SubmissionLocator]:
+        found = [
+            (sub, self.assignments[sub.assignment_id])
+            for sub in self.submissions.values()
+            if sub.ai_status == "FAILED" and sub.is_active_attempt
+            and self.assignments[sub.assignment_id].is_active
+        ]
         found.sort(key=lambda p: (p[0].submitted_at, p[0].id))
         return [
             SubmissionLocator(

@@ -85,7 +85,7 @@ def test_assignment_page_shows_submissions_targets_and_rubric(client, repo):
     text = response.text
     assert f'href="/submissions/{sid}"' in text
     assert "alice@example.edu" in text
-    assert "Graded" in text
+    assert "Not graded yet" in text
     assert "1 feedback" in text and "1 failed" in text and "1 opted out" in text
     assert "Returns the sum." in text and "Be brief." in text
     # divide has no rubric.

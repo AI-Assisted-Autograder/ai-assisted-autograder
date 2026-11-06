@@ -376,12 +376,10 @@ def to_decimal(value: Decimal | float | None) -> Decimal | None:
     return None if value is None else Decimal(str(value))
 
 
-def check_gradable(identifier: str, ai_needed: bool, completed_at: datetime | None) -> None:
-    """Only a target still wanting feedback can be completed (06-state)."""
+def check_gradable(identifier: str, ai_needed: bool) -> None:
+    """Allow reruns for targets that have not opted out of AI feedback."""
     if not ai_needed:
         raise ConflictError(f"Target {identifier!r} was opted out of AI feedback")
-    if completed_at is not None:
-        raise ConflictError(f"Target {identifier!r} is already completed")
 
 
 def sort_key(display_order: int | None, identifier: str) -> tuple[bool, int, str]:
@@ -565,26 +563,29 @@ class IGradingRepository(ABC):
     def save_feedback(self, submission_id: uuid.UUID, target: str, result: FeedbackResult) -> None:
         """Store every provider's feedback and complete the target.
 
-        One ai_feedback row per response, the selected one marked. Raises
-        ConflictError if the target was opted out or is already completed,
-        and ValueError if the rubric is not this target's.
+        A rerun replaces the selected feedback while retaining earlier rows.
+        Raises ConflictError if the target was opted out, and ValueError if
+        the rubric is not this target's. Does not mark the submission successful.
         """
 
     @abstractmethod
     def mark_target_failed(self, submission_id: uuid.UUID, target: str, error: str) -> None:
-        """Complete the target with last_error set (AD-8).
+        """Record the target error and atomically mark its submission FAILED."""
 
-        completed_at is set here too, or the nightly trigger would pick the
-        row up again every night forever.
+    @abstractmethod
+    def set_submission_ai_status(self, submission_id: uuid.UUID, status: str) -> None:
+        """Record the whole execution's SUCCEEDED or FAILED outcome.
+
+        Success sets the completion guard; failure clears it. Only the
+        explicit outcome of a complete execution may mark a submission successful.
         """
 
     @abstractmethod
     def mark_ai_complete_if_all_done(self, submission_id: uuid.UUID) -> bool:
-        """Set the AD-9 guard if every ai_needed target is completed.
+        """Set the legacy guard only if every ai_needed target succeeded.
 
-        Returns whether the guard is set after the call, so a repeat call
-        on a finished submission returns True. A submission whose targets
-        were all opted out is done.
+        Never overrides an explicit FAILED outcome. New execution reports
+        use set_submission_ai_status instead of inferring an outcome from targets.
         """
 
     @abstractmethod
@@ -606,6 +607,13 @@ class IGradingRepository(ABC):
         target is still ai_needed with completed_at NULL, and the guard is
         unset. Also restricted to active attempts (AD-14) on active
         assignments. Oldest submission first.
+        """
+
+    @abstractmethod
+    def list_submissions_failed_ai(self) -> list[SubmissionLocator]:
+        """Active submissions with a FAILED AI outcome, across grading modes.
+
+        Only active assignments and attempts are included, oldest first.
         """
 
     # Instructor UI reads (05-sequence-instructor). Read-only.

@@ -167,6 +167,25 @@ def create_assignment(
     return result
 
 
+@app.get("/internal/ai-failures/submissions")
+def failed_ai_submissions(
+    response: Response,
+    _: None = Depends(require_integration_token),
+):
+    """List active submissions whose latest reported AI outcome failed, in either mode."""
+    response.headers["Cache-Control"] = "no-store"
+    return [
+        {
+            "submission_id": str(item.submission_id),
+            "platform": item.platform,
+            "platform_assignment_id": item.platform_assignment_id,
+            "platform_submission_id": item.platform_submission_id,
+            "ai_status": "FAILED",
+        }
+        for item in grading_repository.list_submissions_failed_ai()
+    ]
+
+
 @app.get("/internal/nightly/submissions")
 def nightly_submissions(
     mode: str = Query(default="NIGHTLY"),

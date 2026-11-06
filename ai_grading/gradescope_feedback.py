@@ -6,6 +6,7 @@ file and report selection is read from the backend at the start of each run.
 
 import argparse
 from copy import deepcopy
+from datetime import datetime
 from decimal import Decimal
 import hashlib
 import html
@@ -352,10 +353,15 @@ def read_submission_context(root):
         return None
     try:
         metadata = json.loads(path.read_text(encoding='utf-8'))
-        platform_submission_id = str(metadata['id'])
+        identifier = metadata.get('id') if isinstance(metadata, dict) else None
+        if not (type(identifier) is int and identifier > 0
+                or isinstance(identifier, str) and re.fullmatch(r'[0-9]+', identifier)):
+            raise ValueError
+        platform_submission_id = str(identifier)
         submitted_at = metadata['created_at']
         if not isinstance(submitted_at, str) or not submitted_at.strip():
             raise ValueError
+        datetime.fromisoformat(submitted_at.replace('Z', '+00:00'))
         student_identifier = None
         users = metadata.get('users') or []
         if users and isinstance(users[0], dict):
@@ -368,7 +374,7 @@ def read_submission_context(root):
             'student_identifier': student_identifier,
         }
     except (OSError, UnicodeError, TypeError, KeyError, ValueError, json.JSONDecodeError):
-        raise ClientError('Gradescope submission metadata is missing or invalid.') from None
+        return None
 
 
 def add_feedback(root=Path('/autograder'), *, run_id=None):
@@ -385,137 +391,152 @@ def add_feedback(root=Path('/autograder'), *, run_id=None):
     except (OSError, ValueError, ClientError):
         pass
     run_context = {'submission_id': submission_id, 'run_id': run_id}
-    results_path = root / RESULTS_SOURCE
-    raw_results = results_path.read_bytes()
-    original = json.loads(raw_results)
-    if original.get('stdout_visibility', 'hidden') == 'hidden':
-        print(f"Instructor AI run: {json.dumps(run_context)}")
-    base, previous_ai, blocked, cleanup_diagnostics = clean_results(original)
-    config = json.loads((root / 'source/config.json').read_text(encoding='utf-8'))
     token_file = root / 'source/assignment.token'
     submission_context = read_submission_context(root)
-    deadline = time.monotonic() + 300
-    manifest = None
-    records = []
-    results = deepcopy(base)
-    unknown_grading = False
-    for attempt in range(2):
+    report_deadline = time.monotonic() + 300
+    # Leave time to report an exhausted AI budget within the hook deadline.
+    deadline = report_deadline - 5
+    config = None
+    ai_status = 'FAILED'
+    try:
+        config = json.loads((root / 'source/config.json').read_text(encoding='utf-8'))
+        results_path = root / RESULTS_SOURCE
+        raw_results = results_path.read_bytes()
+        original = json.loads(raw_results)
+        if original.get('stdout_visibility', 'hidden') == 'hidden':
+            print(f"Instructor AI run: {json.dumps(run_context)}")
+        base, previous_ai, blocked, cleanup_diagnostics = clean_results(original)
+        ai_failed = bool(cleanup_diagnostics)
+        manifest = None
+        records = []
         results = deepcopy(base)
-        records = list(cleanup_diagnostics)
         unknown_grading = False
-        try:
-            remaining = deadline - time.monotonic()
-            if remaining <= 0:
-                raise ClientError('The total AI time budget was exhausted.')
-            manifest = get_assignment_config(backend_url=config['backend_url'], token_file=token_file,
-                                             timeout=min(30, remaining))
-            feedback_targets = [target for target in manifest['targets'].values()
-                                if target['analysis'].get('behavior') == 'functional_test_feedback']
-            if len(feedback_targets) > 1:
-                raise ClientError('Only one functional-test feedback target is supported per assignment.')
-            for target_id, target in manifest['targets'].items():
-                analysis = target['analysis']
-                behavior = analysis.get('behavior')
-                if behavior not in ('ai_grading', 'functional_test_feedback'):
-                    records.append({'target_id': target_id, 'error': 'This legacy target must be migrated to an explicit AI behavior.'})
-                    unknown_grading = unknown_grading or target.get('max_score') is not None
+        for attempt in range(2):
+            results = deepcopy(base)
+            records = list(cleanup_diagnostics)
+            unknown_grading = False
+            try:
+                remaining = deadline - time.monotonic()
+                if remaining <= 0:
+                    raise ClientError('The total AI time budget was exhausted.')
+                manifest = get_assignment_config(backend_url=config['backend_url'], token_file=token_file,
+                                                 timeout=min(30, remaining))
+                feedback_targets = [target for target in manifest['targets'].values()
+                                    if target['analysis'].get('behavior') == 'functional_test_feedback']
+                if len(feedback_targets) > 1:
+                    raise ClientError('Only one functional-test feedback target is supported per assignment.')
+                for target_id, target in manifest['targets'].items():
+                    analysis = target['analysis']
+                    behavior = analysis.get('behavior')
+                    if behavior not in ('ai_grading', 'functional_test_feedback'):
+                        ai_failed = True
+                        records.append({'target_id': target_id, 'error': 'This legacy target must be migrated to an explicit AI behavior.'})
+                        unknown_grading = unknown_grading or target.get('max_score') is not None
+                        continue
+                    request_id = None
+                    try:
+                        if behavior == 'functional_test_feedback':
+                            evidence, mapping = functional_evidence(base, analysis, blocked)
+                            if not evidence:
+                                continue
+                        else:
+                            evidence = collect_evidence(root, analysis, base, blocked)
+                        if time.monotonic() >= deadline:
+                            raise ClientError('The total AI time budget was exhausted.')
+                        files = collect_files(root / 'submission', analysis)
+                        request_id = stable_request_id(target_id, files=files, evidence=evidence,
+                                                       namespace=f"{manifest['revision']}:{submission_id or ''}:{run_id}")
+                        remaining = deadline - time.monotonic()
+                        if remaining <= 0:
+                            raise ClientError('The total AI time budget was exhausted.')
+                        response = request_feedback(backend_url=config['backend_url'], token_file=token_file,
+                                                    target_id=target_id, files=files, evidence=evidence,
+                                                    request_id=request_id, config_revision=manifest['revision'],
+                                                    platform_submission_id=(submission_context or {}).get('platform_submission_id'),
+                                                    submitted_at=(submission_context or {}).get('submitted_at'),
+                                                    student_identifier=(submission_context or {}).get('student_identifier'),
+                                                    timeout=min(270, remaining))
+                        if behavior == 'ai_grading':
+                            results['tests'].extend(grading_rows(target_id, target, manifest['revision'], response))
+                        else:
+                            apply_inline(results, target_id, manifest['revision'], response, mapping)
+                        records.append({'target_id': target_id, **response})
+                    except ConfigChangedError:
+                        raise
+                    except Exception as exc:
+                        ai_failed = True
+                        detail = str(exc) if isinstance(exc, ClientError) else 'Could not collect or process the configured AI inputs.'
+                        record = {'target_id': target_id, 'error': detail}
+                        if request_id is not None:
+                            record['request_id'] = request_id
+                        records.append(record)
+                        if behavior == 'ai_grading':
+                            results['tests'].extend(grading_rows(target_id, target, manifest['revision'], error=detail))
+                break
+            except ConfigChangedError:
+                if attempt == 0:
                     continue
-                request_id = None
-                try:
-                    if behavior == 'functional_test_feedback':
-                        evidence, mapping = functional_evidence(base, analysis, blocked)
-                        if not evidence:
-                            continue
-                    else:
-                        evidence = collect_evidence(root, analysis, base, blocked)
-                    if time.monotonic() >= deadline:
-                        raise ClientError('The total AI time budget was exhausted.')
-                    files = collect_files(root / 'submission', analysis)
-                    request_id = stable_request_id(target_id, files=files, evidence=evidence,
-                                                   namespace=f"{manifest['revision']}:{submission_id or ''}:{run_id}")
-                    remaining = deadline - time.monotonic()
-                    if remaining <= 0:
-                        raise ClientError('The total AI time budget was exhausted.')
-                    response = request_feedback(backend_url=config['backend_url'], token_file=token_file,
-                                                target_id=target_id, files=files, evidence=evidence,
-                                                request_id=request_id, config_revision=manifest['revision'],
-                                                platform_submission_id=(submission_context or {}).get('platform_submission_id'),
-                                                submitted_at=(submission_context or {}).get('submitted_at'),
-                                                student_identifier=(submission_context or {}).get('student_identifier'),
-                                                timeout=min(270, remaining))
-                    if behavior == 'ai_grading':
-                        results['tests'].extend(grading_rows(target_id, target, manifest['revision'], response))
-                    else:
-                        apply_inline(results, target_id, manifest['revision'], response, mapping)
-                    records.append({'target_id': target_id, **response})
-                except ConfigChangedError:
-                    raise
-                except Exception as exc:
-                    detail = str(exc) if isinstance(exc, ClientError) else 'Could not collect or process the configured AI inputs.'
-                    record = {'target_id': target_id, 'error': detail}
-                    if request_id is not None:
-                        record['request_id'] = request_id
-                    records.append(record)
-                    if behavior == 'ai_grading':
-                        results['tests'].extend(grading_rows(target_id, target, manifest['revision'], error=detail))
+                failure = 'Assignment configuration changed again. No mixed-version AI result was applied.'
+            except Exception as exc:
+                failure = str(exc) if isinstance(exc, ClientError) else 'Could not load a valid assignment configuration.'
+            ai_failed = True
+            # A failed refresh cannot publish results staged under an older revision.
+            results = deepcopy(base)
+            records = list(cleanup_diagnostics) + [{'error': failure}]
+            unknown_grading = (manifest is None
+                               or any(number(row.get('max_score')) and row['max_score'] > 0 for row in previous_ai)
+                               or any(target['analysis'].get('behavior') == 'ai_grading' or target.get('max_score') is not None
+                                      for target in manifest['targets'].values()))
+            if manifest is not None:
+                for target_id, target in manifest['targets'].items():
+                    if target['analysis'].get('behavior') == 'ai_grading':
+                        results['tests'].extend(grading_rows(target_id, target, manifest['revision'], error=failure))
+                    elif target.get('max_score') is not None:
+                        unknown_grading = True
+            else:
+                for old in previous_ai:
+                    if number(old.get('max_score')) and old['max_score'] > 0:
+                        row = deepcopy(old)
+                        row['score'] = 0
+                        row['output'] = 'Pending regrade. The displayed zero is provisional. ' + failure
+                        row['extra_data'].update(grading_status='pending_regrade', actual_score=None)
+                        results['tests'].append(row)
             break
-        except ConfigChangedError:
-            if attempt == 0:
-                continue
-            failure = 'Assignment configuration changed again. No mixed-version AI result was applied.'
-        except Exception as exc:
-            failure = str(exc) if isinstance(exc, ClientError) else 'Could not load a valid assignment configuration.'
-        # A failed refresh cannot publish results staged under an older revision.
-        results = deepcopy(base)
-        records = list(cleanup_diagnostics) + [{'error': failure}]
-        unknown_grading = (manifest is None
-                           or any(number(row.get('max_score')) and row['max_score'] > 0 for row in previous_ai)
-                           or any(target['analysis'].get('behavior') == 'ai_grading' or target.get('max_score') is not None
-                                  for target in manifest['targets'].values()))
-        if manifest is not None:
-            for target_id, target in manifest['targets'].items():
-                if target['analysis'].get('behavior') == 'ai_grading':
-                    results['tests'].extend(grading_rows(target_id, target, manifest['revision'], error=failure))
-                elif target.get('max_score') is not None:
-                    unknown_grading = True
-        else:
-            for old in previous_ai:
-                if number(old.get('max_score')) and old['max_score'] > 0:
-                    row = deepcopy(old)
-                    row['score'] = 0
-                    row['output'] = 'Pending regrade. The displayed zero is provisional. ' + failure
-                    row['extra_data'].update(grading_status='pending_regrade', actual_score=None)
-                    results['tests'].append(row)
-        break
-    finalize_grading(results, manifest['revision'] if manifest is not None else None,
-                     unknown=unknown_grading)
-    # Never apply an explanation or score to a different functional-result snapshot.
-    if results_path.read_bytes() != raw_results:
-        raise ClientError('Functional results changed during AI processing; no AI result was applied.')
-    for record in records:
-        record.update(run_context)
-    if submission_context:
-        try:
-            complete_submission(backend_url=config['backend_url'], token_file=token_file,
-                                **submission_context)
-        except ClientError as exc:
-            print(f'AI completion was not recorded in the grading database: {exc}', file=sys.stderr)
-    evidence_path = root / 'results/ai_evidence.json'
-    evidence_path.write_text(json.dumps(records, ensure_ascii=False, indent=2, allow_nan=False) + '\n', encoding='utf-8')
-    evidence_path.chmod(0o600)
-    temporary = results_path.with_suffix('.tmp')
-    temporary.write_text(json.dumps(results, ensure_ascii=False, indent=2, allow_nan=False) + '\n', encoding='utf-8')
-    temporary.replace(results_path)
-    if results.get('stdout_visibility', 'hidden') == 'hidden':
+        finalize_grading(results, manifest['revision'] if manifest is not None else None,
+                         unknown=unknown_grading)
+        # Never apply an explanation or score to a different functional-result snapshot.
+        if results_path.read_bytes() != raw_results:
+            raise ClientError('Functional results changed during AI processing; no AI result was applied.')
         for record in records:
-            target = record.get('target_id', 'assignment')
-            if record.get('request_id'):
-                print(f"Instructor AI request [{target}]: {record['request_id']}")
-            if record.get('error'):
-                print(f"Instructor AI diagnostic [{target}]: {record['error']}")
-            for item in (*record.get('items', []), *record.get('failure_feedback', [])):
-                identifier = item.get('test_id', item.get('evidence_id', ''))
-                print(f"Instructor AI evidence [{target} / {identifier}]: {item['evidence']}")
+            record.update(run_context)
+        evidence_path = root / 'results/ai_evidence.json'
+        evidence_path.write_text(json.dumps(records, ensure_ascii=False, indent=2, allow_nan=False) + '\n', encoding='utf-8')
+        evidence_path.chmod(0o600)
+        temporary = results_path.with_suffix('.tmp')
+        temporary.write_text(json.dumps(results, ensure_ascii=False, indent=2, allow_nan=False) + '\n', encoding='utf-8')
+        temporary.replace(results_path)
+        # A valid insufficient-evidence verdict is still a successful AI request.
+        ai_status = 'FAILED' if ai_failed else 'SUCCEEDED'
+        if results.get('stdout_visibility', 'hidden') == 'hidden':
+            for record in records:
+                target = record.get('target_id', 'assignment')
+                if record.get('request_id'):
+                    print(f"Instructor AI request [{target}]: {record['request_id']}")
+                if record.get('error'):
+                    print(f"Instructor AI diagnostic [{target}]: {record['error']}")
+                for item in (*record.get('items', []), *record.get('failure_feedback', [])):
+                    identifier = item.get('test_id', item.get('evidence_id', ''))
+                    print(f"Instructor AI evidence [{target} / {identifier}]: {item['evidence']}")
+    finally:
+        if submission_context and isinstance(config, dict) and config.get('backend_url'):
+            remaining = report_deadline - time.monotonic()
+            try:
+                if remaining <= 0:
+                    raise ClientError('The AI outcome reporting time budget was exhausted.')
+                complete_submission(backend_url=config['backend_url'], token_file=token_file,
+                                    ai_status=ai_status, timeout=min(30, remaining), **submission_context)
+            except ClientError as exc:
+                print(f'AI outcome was not recorded in the grading database: {exc}', file=sys.stderr)
 
 
 def main():

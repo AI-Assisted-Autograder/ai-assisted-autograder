@@ -60,6 +60,7 @@ def one_of(column: str, values: tuple[str, ...]) -> CheckConstraint:
 
 PLATFORMS = ("GRADESCOPE",)
 GRADING_MODES = ("IMMEDIATE", "NIGHTLY")
+AI_STATUSES = ("SUCCEEDED", "FAILED")
 TARGET_KINDS = ("METHOD", "CLASS", "FILE")
 PROVIDERS = ("ANTHROPIC", "OPENAI", "GOOGLE")
 ENGINES = ("vertex", "pitt", "gemini_api")
@@ -187,7 +188,10 @@ class LlmProviderConfig(Base):
 # ---------------------------------------------------------------------
 class Submission(Base):
     __tablename__ = "submission"
-    __table_args__ = (UniqueConstraint("assignment_id", "platform_submission_id"),)
+    __table_args__ = (
+        UniqueConstraint("assignment_id", "platform_submission_id"),
+        one_of("ai_status", AI_STATUSES),
+    )
 
     id: Mapped[uuid.UUID] = uuid_pk()
     assignment_id: Mapped[uuid.UUID] = mapped_column(ForeignKey("assignment.id"))
@@ -198,6 +202,7 @@ class Submission(Base):
     # The diagram marks this NOT NULL, but it is NULL until grading
     # finishes and the AD-9 guard depends on that, so it is nullable here.
     ai_graded_submitted_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    ai_status: Mapped[str | None] = mapped_column(Text)
     is_active_attempt: Mapped[bool] = mapped_column(server_default=true())
 
 

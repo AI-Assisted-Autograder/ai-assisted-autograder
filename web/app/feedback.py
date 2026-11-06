@@ -14,6 +14,7 @@ import re
 from types import SimpleNamespace
 import threading
 import time
+from typing import Literal
 from uuid import UUID
 
 from fastapi import APIRouter, FastAPI, Request
@@ -94,6 +95,7 @@ class FeedbackInput(BaseModel):
 class AiCompleteInput(BaseModel):
     model_config = ConfigDict(extra="forbid", strict=True)
     submission: SubmissionContext
+    ai_status: Literal["SUCCEEDED", "FAILED"]
 
 
 def matches_path(path: str, patterns: tuple[str, ...]) -> bool:
@@ -382,6 +384,10 @@ def create_feedback_router(state_path: str | Path, *, assignment_loader,
             # Only cancellation of the job itself interrupts generation; an HTTP
             # disconnect cannot cancel the independently tracked job.
             store.fail(assignment_id, rid, code="upstream_timeout")
+            if payload.submission is not None and grading_repository is not None:
+                await asyncio.to_thread(
+                    persist_failure, assignment_id, assignment, payload, target, "upstream_timeout",
+                )
             raise
         except TimeoutError:
             code = "upstream_timeout"
@@ -392,14 +398,17 @@ def create_feedback_router(state_path: str | Path, *, assignment_loader,
                     "backend_auth_unavailable" if exc.code == "backend_auth_unavailable" else "model_error")
         except Exception:
             code = "model_error"
+        failed_to_save_request = False
         try:
             store.fail(assignment_id, rid, code=code)
         except Exception:
-            return error("backend_error", 500, rid)
+            failed_to_save_request = True
         if payload.submission is not None and grading_repository is not None:
             await asyncio.to_thread(
                 persist_failure, assignment_id, assignment, payload, target, code,
             )
+        if failed_to_save_request:
+            return error("backend_error", 500, rid)
         LOG.warning("feedback_request_failed code=%s request_id=%s", code, rid)
         return error(code, 504 if code == "upstream_timeout" else 502, rid)
 
@@ -552,7 +561,7 @@ def create_feedback_router(state_path: str | Path, *, assignment_loader,
 
     @router.post("/v1/submissions/{platform_submission_id}/ai-complete")
     async def ai_complete(platform_submission_id: str, request: Request):
-        """Set the AD-9 completion guard after all target calls finish."""
+        """Record the connector's aggregate outcome for this submission execution."""
         store = runtime.store
         headers = request.headers.getlist("authorization")
         if len(headers) != 1:
@@ -574,25 +583,24 @@ def create_feedback_router(state_path: str | Path, *, assignment_loader,
         if grading_repository is None:
             return error("backend_error", 503)
         try:
-            assignment = await asyncio.to_thread(assignment_loader, assignment_id)
-            if assignment.id != assignment_id or not assignment.enabled:
+            # Outcome reporting must still work when model or rubric configuration is invalid.
+            assignment = await asyncio.to_thread(
+                grading_repository.get_assignment_config, UUID(assignment_id),
+            )
+            if str(assignment.id) != assignment_id or not assignment.is_active:
                 return error("assignment_forbidden", 403)
             submission_id = await asyncio.to_thread(db_submission, assignment_id, payload.submission)
-            complete = await asyncio.to_thread(
-                grading_repository.mark_ai_complete_if_all_done, submission_id,
+            await asyncio.to_thread(
+                grading_repository.set_submission_ai_status, submission_id, payload.ai_status,
             )
         except StoreError as exc:
             return error(exc.code, exc.status_code)
         except Exception:
             LOG.error("ai_completion_failed", exc_info=True)
             return error("backend_error", 503)
-        if not complete:
-            return JSONResponse(
-                {"status": "waiting", "submission_id": platform_submission_id},
-                status_code=409, headers={"Cache-Control": "no-store"},
-            )
         return JSONResponse(
-            {"status": "completed", "submission_id": platform_submission_id},
+            {"status": "completed", "submission_id": platform_submission_id,
+             "ai_status": payload.ai_status},
             headers={"Cache-Control": "no-store"},
         )
 

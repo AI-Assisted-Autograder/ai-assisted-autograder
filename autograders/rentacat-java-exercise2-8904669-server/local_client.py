@@ -21,7 +21,7 @@ import stat
 import sys
 import time
 from urllib.error import HTTPError, URLError
-from urllib.parse import urlsplit
+from urllib.parse import quote, urlsplit
 from urllib.request import HTTPRedirectHandler, ProxyHandler, Request, build_opener
 
 
@@ -189,6 +189,9 @@ def request_feedback(
     files: list[dict] | None = None,
     evidence: list[dict] | None = None,
     request_id: str | None = None,
+    platform_submission_id: str | None = None,
+    submitted_at: str | None = None,
+    student_identifier: str | None = None,
     config_revision: str | None = None,
     timeout: float = 270,
 ) -> dict:
@@ -226,6 +229,20 @@ def request_feedback(
         payload["functional_test_feedback"] = functional_test_feedback
     if evidence:
         payload["evidence"] = evidence
+    if (platform_submission_id is None) != (submitted_at is None):
+        raise ClientError("Submission context requires both platform_submission_id and submitted_at.")
+    if platform_submission_id is not None:
+        if not isinstance(platform_submission_id, str) or not platform_submission_id.strip():
+            raise ClientError("Platform submission ID must be nonempty.")
+        if not isinstance(submitted_at, str) or not submitted_at.strip():
+            raise ClientError("Submission timestamp must be a nonempty ISO string.")
+        if student_identifier is not None and not isinstance(student_identifier, str):
+            raise ClientError("Student identifier must be a string or null.")
+        payload["submission"] = {
+            "platform_submission_id": platform_submission_id,
+            "submitted_at": submitted_at,
+            "student_identifier": student_identifier,
+        }
     data = json.dumps(payload, ensure_ascii=False).encode("utf-8")
     request = Request(
         origin + "/v1/feedback",
@@ -412,6 +429,56 @@ def request_feedback(
         return safe
     except (UnicodeError, ValueError, TypeError):
         raise ClientError("Backend returned an invalid response.") from None
+
+
+def complete_submission(
+    *, backend_url: str, token_file: str | Path, platform_submission_id: str,
+    submitted_at: str, ai_status: str, student_identifier: str | None = None, timeout: float = 30,
+) -> dict:
+    """Report the final AI outcome of this submission's current execution."""
+    if ai_status not in {"SUCCEEDED", "FAILED"}:
+        raise ClientError("AI outcome must be SUCCEEDED or FAILED.")
+    if not math.isfinite(timeout) or not 0 < timeout <= 300:
+        raise ClientError("Client timeout must be between 0 and 300 seconds.")
+    origin = validate_backend_url(backend_url)
+    token = read_assignment_token(token_file)
+    payload = json.dumps({
+        "submission": {
+            "platform_submission_id": platform_submission_id,
+            "submitted_at": submitted_at,
+            "student_identifier": student_identifier,
+        },
+        "ai_status": ai_status,
+    }, ensure_ascii=False).encode("utf-8")
+    request = Request(
+        origin + "/v1/submissions/" + quote(platform_submission_id, safe="") + "/ai-complete",
+        data=payload,
+        headers={"Authorization": "Bearer " + token, "Content-Type": "application/json",
+                 "Accept": "application/json"},
+        method="POST",
+    )
+    opener = build_opener(ProxyHandler({}), _NoRedirects())
+    try:
+        with opener.open(request, timeout=timeout) as response:
+            raw = response.read(MAX_RESPONSE_BYTES + 1)
+            if len(raw) > MAX_RESPONSE_BYTES or token.encode("ascii") in raw:
+                raise ClientError("Backend returned an invalid response.")
+    except HTTPError as error:
+        status = error.code
+        error.close()
+        raise _safe_http_error(status) from None
+    except (TimeoutError, socket.timeout):
+        raise ClientError("Backend request timed out.") from None
+    except (URLError, OSError, ValueError, HTTPException):
+        raise ClientError("Cannot reach the backend. Check its address and running process.") from None
+    try:
+        result = json.loads(raw)
+        if (not isinstance(result, dict) or result.get("submission_id") != platform_submission_id
+                or result.get("status") != "completed" or result.get("ai_status") != ai_status):
+            raise ValueError
+        return result
+    except (UnicodeError, ValueError, TypeError):
+        raise ClientError("Backend returned an invalid completion response.") from None
 
 
 def _backend_from_config(path: Path) -> str:
