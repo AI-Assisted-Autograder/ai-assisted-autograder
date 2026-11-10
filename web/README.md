@@ -599,10 +599,16 @@ feedback write-back path. The AI feedback API selects Vertex, Pitt or Gemini API
 from PostgreSQL configuration, retains assignment tokens/quota/replay state in
 JSON, and persists target feedback plus the final submission completion guard.
 
-Not done yet: in the instructor UI, the forms for assignments, targets and
-rubrics, feedback rating and the results dashboard (waiting on OQ-1);
-instructor login (OQ-9); and deployment of this updated package to the live
-server.
+Assignment context: an instructor can attach notes and documents (PDFs or
+UTF-8 text files, 5 MB each, 20 files, 60,000 characters of text in all) to
+an assignment, on the new-assignment form or the assignment page. Only the
+extracted text is stored (`assignment_context_file`, migration 0008), and
+`read_assignment_config` appends it to every target's background, so both
+`/v1/feedback` and the container's `/internal/assignments/{id}/config` see
+it. Scanned PDFs without a text layer are refused. New dependency: `pypdf`.
+
+Not done yet in the instructor UI: feedback rating (FR-11), and the
+NIGHTLY-only review-before-release gate (OQ-3, answered but not built).
 
 ## Known limitations
 

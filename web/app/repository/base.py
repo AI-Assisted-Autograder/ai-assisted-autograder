@@ -130,6 +130,16 @@ class ProviderConfig:
 
 
 @dataclass(frozen=True)
+class ContextFile:
+    """An instructor-uploaded document's extracted text (app.assignment_context)."""
+
+    id: uuid.UUID
+    filename: str
+    content: str
+    uploaded_at: datetime
+
+
+@dataclass(frozen=True)
 class AssignmentConfig:
     """What the AI phase needs to grade any submission of an assignment."""
 
@@ -144,6 +154,9 @@ class AssignmentConfig:
     # Enabled providers, the primary first. llm_provider_config is global
     # for now, as drawn, so this is the same for every assignment.
     providers: tuple[ProviderConfig, ...]
+    # Added to every target's prompt background. Files in upload order.
+    context_notes: str | None = None
+    context_files: tuple[ContextFile, ...] = ()
 
 
 @dataclass(frozen=True)
@@ -787,6 +800,25 @@ class IGradingRepository(ABC):
         would go with it. NotFoundError if the target is not registered on
         this assignment.
         """
+
+    @abstractmethod
+    def set_context_notes(self, assignment_id: uuid.UUID, notes: str | None) -> None:
+        """Replace the assignment's context notes; blank clears them.
+
+        Raises ValueError if notes and files together exceed the context
+        limit (app.assignment_context.check_context).
+        """
+
+    @abstractmethod
+    def add_context_files(self, assignment_id: uuid.UUID, files: list[tuple[str, str]]) -> list[uuid.UUID]:
+        """Attach (filename, extracted text) documents, all or none.
+
+        Raises ValueError if the result would exceed the context limits.
+        """
+
+    @abstractmethod
+    def delete_context_file(self, assignment_id: uuid.UUID, file_id: uuid.UUID) -> None:
+        """NotFoundError if the file is not attached to this assignment."""
 
     @abstractmethod
     def upsert_rubric(

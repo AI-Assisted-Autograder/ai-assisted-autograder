@@ -16,6 +16,8 @@ from ai_grading.PromptBuilder import PromptBuilder
 from ai_grading.models import AnalysisConfig, GradingTarget, Rubric, Score, TargetKind
 from ai_grading.pricing import ModelPrice, RequestAccounting, default_model_prices
 
+from .assignment_context import MAX_TOTAL_CHARS as MAX_CONTEXT_CHARS
+
 
 Identifier = Annotated[str, Field(min_length=1, max_length=128, pattern=r"^[A-Za-z0-9_.:-]+$")]
 Engine = Literal["vertex", "pitt", "gemini_api"]
@@ -136,12 +138,20 @@ def resolve_target_analysis(identifier: str, kind: str, language: str,
                                      max_source_files=value.max_source_files or 1))
 
 
+# Rubric text, the assignment context limit, and headings with room to spare.
+RUBRIC_WITH_CONTEXT_CHARS = 16_000 + MAX_CONTEXT_CHARS + 8_000
+
+
 class RubricInput(StrictModel):
     criteria_text: str = Field(min_length=1, max_length=16_000, pattern=r"\S")
     feedback_guidance: str = Field(default="", max_length=8_000)
 
 
 class RubricConfig(RubricInput):
+    # What grading reads: the instructor's background plus the assignment's
+    # notes and uploaded documents (app.assignment_context), so it may be
+    # longer than what the rubric form accepts.
+    criteria_text: str = Field(min_length=1, max_length=RUBRIC_WITH_CONTEXT_CHARS, pattern=r"\S")
     version: int = Field(default=1, ge=1)
     id: Identifier
 

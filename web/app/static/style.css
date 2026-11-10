@@ -235,3 +235,8 @@ table.results td.cell { white-space: nowrap; }
 table.results td.deduction { background: var(--failed-bg); }
 table.results .score-line { font-variant-numeric: tabular-nums; font-size: 0.9rem; margin-top: 0.2rem; }
 table.results tfoot th { border-top: 1px solid var(--border); border-bottom: none; font-variant-numeric: tabular-nums; }
+
+/* Assignment context */
+li.context-file { display: flex; align-items: baseline; justify-content: space-between; gap: 0.6rem; }
+li.context-file details { min-width: 0; flex: 1; }
+li.context-file code { word-break: break-all; }

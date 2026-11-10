@@ -8,7 +8,7 @@
 
 {% if error %}<p class="form-error" role="alert">{{ error }}</p>{% endif %}
 
-<form class="card form" method="post" action="/assignments">
+<form class="card form" method="post" action="/assignments" enctype="multipart/form-data">
     <div class="row">
         <label>
             Course
@@ -60,6 +60,25 @@
         </datalist>
     </label>
     <p class="hint">Java and Python support method and class targets. For other languages, use a file target or explicit source patterns.</p>
+
+    <fieldset>
+        <legend>Assignment context for the AI (optional)</legend>
+        <p class="hint">Added to every target's prompt, so feedback reflects the assignment as students saw it. You can change it later on the assignment page.</p>
+        <label>
+            Notes
+            <textarea name="context_notes" rows="4" placeholder="What the assignment asks for, what students were taught, conventions to expect...">{{ form.context_notes or '' }}</textarea>
+        </label>
+        <label>
+            Files
+            <input type="file" name="context_files" multiple accept=".pdf,.txt,.md,.java,.py,.ts,.js,.json,.csv,.html,.xml,.yaml,.yml,text/*,application/pdf">
+        </label>
+        <p class="hint">
+            Handouts, specs or starter code: PDFs or plain-text files, up to {{ CONTEXT_LIMITS.upload_mb }} MB each and {{ CONTEXT_LIMITS.files }} files.
+            Only the text is kept, {{ "{:,}".format(CONTEXT_LIMITS.chars) }} characters at most across notes and files.
+            Scanned PDFs without a text layer cannot be read.
+            {% if error %}<strong>If you chose files, choose them again.</strong>{% endif %}
+        </p>
+    </fieldset>
 
     <div class="actions">
         <button type="submit">Create assignment</button>

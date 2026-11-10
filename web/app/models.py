@@ -117,6 +117,28 @@ class Assignment(Base):
     name: Mapped[str | None] = mapped_column(Text)
     is_active: Mapped[bool] = mapped_column(server_default=true())
     created_at: Mapped[datetime] = created_now()
+    # Instructor-written background added to every target's prompt. Not in
+    # the original data model; see AssignmentContextFile.
+    context_notes: Mapped[str | None] = mapped_column(Text)
+
+
+class AssignmentContextFile(Base):
+    """An instructor-uploaded document (handout, spec, starter code) whose text
+    is added to every target's prompt.
+
+    Not in the original data model. Only the extracted text is kept, not the
+    uploaded bytes, because the text is all the prompt uses.
+    """
+
+    __tablename__ = "assignment_context_file"
+
+    id: Mapped[uuid.UUID] = uuid_pk()
+    assignment_id: Mapped[uuid.UUID] = mapped_column(ForeignKey("assignment.id"), index=True)
+    filename: Mapped[str] = mapped_column(Text)
+    content: Mapped[str] = mapped_column(Text)
+    # Upload order. Files uploaded together share one uploaded_at.
+    position: Mapped[int] = mapped_column(Integer)
+    uploaded_at: Mapped[datetime] = created_now()
 
 
 class GradingTarget(Base):

@@ -1004,6 +1004,58 @@ def test_is_deduction(test_status, score, max_score, expected):
     assert is_deduction(test_status, score, max_score) is expected
 
 
+def test_assignment_context_notes_and_files_in_config(backend):
+    aid = backend.add_assignment("IMMEDIATE", (("add", 1),))
+    assert backend.repo.get_assignment_config(aid).context_notes is None
+    assert backend.repo.get_assignment_config(aid).context_files == ()
+
+    backend.repo.set_context_notes(aid, "  Use recursion.  ")
+    first, second = backend.repo.add_context_files(aid, [("spec.md", "Add."), ("starter.py", "def add(): ...")])
+
+    config = backend.repo.get_assignment_config(aid)
+    assert config.context_notes == "Use recursion."
+    assert [(f.id, f.filename, f.content) for f in config.context_files] == [
+        (first, "spec.md", "Add."), (second, "starter.py", "def add(): ..."),
+    ]
+
+    backend.repo.delete_context_file(aid, first)
+    backend.repo.set_context_notes(aid, "   ")
+    config = backend.repo.get_assignment_config(aid)
+    assert config.context_notes is None
+    assert [f.id for f in config.context_files] == [second]
+
+
+def test_assignment_context_limits_are_all_or_none(backend):
+    from app.assignment_context import MAX_TOTAL_CHARS
+
+    aid = backend.add_assignment("IMMEDIATE", (("add", 1),))
+    backend.repo.add_context_files(aid, [("a.txt", "x" * (MAX_TOTAL_CHARS - 5))])
+
+    with pytest.raises(ValueError):
+        backend.repo.add_context_files(aid, [("b.txt", "ok"), ("c.txt", "too much")])
+    with pytest.raises(ValueError):
+        backend.repo.set_context_notes(aid, "123456")
+
+    config = backend.repo.get_assignment_config(aid)
+    assert [f.filename for f in config.context_files] == ["a.txt"]
+    assert config.context_notes is None
+
+
+def test_assignment_context_belongs_to_one_assignment(backend):
+    aid = backend.add_assignment("IMMEDIATE", (("add", 1),))
+    other = backend.add_assignment("IMMEDIATE", (("add", 1),))
+    (file_id,) = backend.repo.add_context_files(aid, [("spec.md", "Add.")])
+
+    assert backend.repo.get_assignment_config(other).context_files == ()
+    for assignment_id, fid in ((other, file_id), (aid, uuid.uuid4())):
+        with pytest.raises(NotFoundError):
+            backend.repo.delete_context_file(assignment_id, fid)
+    for call in (lambda: backend.repo.set_context_notes(uuid.uuid4(), "x"),
+                 lambda: backend.repo.add_context_files(uuid.uuid4(), [("a", "b")])):
+        with pytest.raises(NotFoundError):
+            call()
+
+
 # ---------------------------------------------------------------------
 # Group 4: instructor configuration writes
 # ---------------------------------------------------------------------

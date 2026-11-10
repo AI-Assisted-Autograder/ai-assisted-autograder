@@ -123,6 +123,50 @@
 <p class="empty">No submissions yet.</p>
 {% endif %}
 
+<h2 id="context">Assignment context</h2>
+<p class="hint">
+    Added to every target's prompt as background. Changes apply to feedback generated from now on.
+    {{ "{:,}".format(assignment_context_chars) }} of {{ "{:,}".format(CONTEXT_LIMITS.chars) }} characters used.
+</p>
+{% if context_error %}<p class="form-error" role="alert">{{ context_error }}</p>{% endif %}
+<div class="cards">
+    <section class="card">
+        <header><strong>Notes</strong></header>
+        <form class="form" method="post" action="/assignments/{{ assignment.id }}/context/notes">
+            <textarea name="context_notes" rows="5" aria-label="Context notes"
+                placeholder="What the assignment asks for, what students were taught, conventions to expect...">{{ context_form.context_notes if context_form.context_notes is defined else (assignment.context_notes or '') }}</textarea>
+            <div class="actions"><button type="submit">Save notes</button></div>
+        </form>
+    </section>
+    <section class="card">
+        <header><strong>Files</strong> <span class="sub">{{ assignment.context_files | length }} of {{ CONTEXT_LIMITS.files }}</span></header>
+        {% if assignment.context_files %}
+        <ul class="plain">
+            {% for f in assignment.context_files %}
+            <li class="context-file">
+                <details class="long-text">
+                    <summary><code>{{ f.filename }}</code> <span class="sub">{{ "{:,}".format(f.content | length) }} characters · {{ f.uploaded_at | when }}</span></summary>
+                    <p class="prose">{{ f.content | truncate(3000) }}</p>
+                </details>
+                <form method="post" action="/assignments/{{ assignment.id }}/context/files/{{ f.id }}/delete"
+                    data-confirm="Remove {{ f.filename }} from the assignment context?" onsubmit="return confirm(this.dataset.confirm)">
+                    <button type="submit" class="link danger">Remove</button>
+                </form>
+            </li>
+            {% endfor %}
+        </ul>
+        {% else %}
+        <p class="empty">No files attached.</p>
+        {% endif %}
+        <form class="form" method="post" action="/assignments/{{ assignment.id }}/context/files" enctype="multipart/form-data">
+            <input type="file" name="context_files" multiple required aria-label="Context files"
+                accept=".pdf,.txt,.md,.java,.py,.ts,.js,.json,.csv,.html,.xml,.yaml,.yml,text/*,application/pdf">
+            <p class="hint">PDFs or plain-text files, up to {{ CONTEXT_LIMITS.upload_mb }} MB each. Only the text is kept.</p>
+            <div class="actions"><button type="submit">Upload</button></div>
+        </form>
+    </section>
+</div>
+
 <h2 id="targets">Grading targets</h2>
 <p class="hint">
     The instructor's test suite refers to targets by these identifiers, so

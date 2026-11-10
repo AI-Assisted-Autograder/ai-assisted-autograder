@@ -439,3 +439,81 @@ def test_assignment_page_links_to_results(client, repo):
     aid, _ = graded_submission(repo)
     assert f'href="/assignments/{aid}/results"' in client.get(f"/assignments/{aid}").text
 
+
+def test_create_assignment_with_context_notes_and_files(client, repo):
+    response = client.post("/assignments", data={
+        "course_name": "CS 0401", "platform_assignment_id": "777", "grading_mode": "IMMEDIATE",
+        "language": "PYTHON", "context_notes": "Students have not learned exceptions yet.",
+    }, files=[
+        ("context_files", ("spec.md", b"Implement add.", "text/markdown")),
+        ("context_files", ("starter.py", b"def add(a, b): ...", "text/x-python")),
+    ], follow_redirects=False)
+
+    assert response.status_code == 303
+    aid = uuid.UUID(response.headers["location"].rsplit("/", 1)[1])
+    config = repo.get_assignment_config(aid)
+    assert config.context_notes == "Students have not learned exceptions yet."
+    assert [f.filename for f in config.context_files] == ["spec.md", "starter.py"]
+    page = client.get(f"/assignments/{aid}").text
+    assert "spec.md" in page
+    assert "Students have not learned exceptions yet." in page
+
+
+def test_create_assignment_with_no_files_chosen(client, repo):
+    # A browser sends an empty, nameless part for an untouched file input.
+    response = client.post("/assignments", data={
+        "course_name": "CS 0401", "platform_assignment_id": "778", "grading_mode": "IMMEDIATE", "language": "PYTHON",
+    }, files=[("context_files", ("", b"", "application/octet-stream"))], follow_redirects=False)
+
+    assert response.status_code == 303
+    aid = uuid.UUID(response.headers["location"].rsplit("/", 1)[1])
+    assert repo.get_assignment_config(aid).context_files == ()
+
+
+def test_create_assignment_with_unreadable_file_creates_nothing(client, repo):
+    response = client.post("/assignments", data={
+        "course_name": "CS 0401", "platform_assignment_id": "779", "grading_mode": "IMMEDIATE",
+        "language": "PYTHON", "context_notes": "keep me",
+    }, files=[("context_files", ("report.docx", b"PK\x03\x04\xff\xfe", "application/octet-stream"))])
+
+    assert response.status_code == 400
+    assert "Save Word documents as PDF first" in response.text
+    assert "keep me" in response.text
+    assert repo.list_assignments() == []
+
+
+def test_assignment_context_upload_notes_and_remove(client, repo):
+    aid, _ = graded_submission(repo)
+
+    response = client.post(f"/assignments/{aid}/context/files",
+                           files=[("context_files", ("handout.txt", b"Add two numbers.", "text/plain"))],
+                           follow_redirects=False)
+    assert (response.status_code, response.headers["location"]) == (303, f"/assignments/{aid}#context")
+    (f,) = repo.get_assignment_config(aid).context_files
+    assert (f.filename, f.content) == ("handout.txt", "Add two numbers.")
+
+    client.post(f"/assignments/{aid}/context/notes", data={"context_notes": "Be kind."})
+    assert repo.get_assignment_config(aid).context_notes == "Be kind."
+
+    page = client.get(f"/assignments/{aid}").text
+    assert f'action="/assignments/{aid}/context/files/{f.id}/delete"' in page
+
+    client.post(f"/assignments/{aid}/context/files/{f.id}/delete")
+    assert repo.get_assignment_config(aid).context_files == ()
+    assert client.post(f"/assignments/{aid}/context/files/{f.id}/delete").status_code == 404
+
+
+def test_assignment_context_errors_reshow_the_page(client, repo):
+    from app.assignment_context import MAX_TOTAL_CHARS
+
+    aid, _ = graded_submission(repo)
+
+    response = client.post(f"/assignments/{aid}/context/files",
+                           files=[("context_files", ("", b"", "application/octet-stream"))])
+    assert response.status_code == 400
+    assert "Choose at least one file" in response.text
+
+    response = client.post(f"/assignments/{aid}/context/notes", data={"context_notes": "x" * (MAX_TOTAL_CHARS + 1)})
+    assert response.status_code == 400
+    assert "over the" in response.text
+    assert repo.get_assignment_config(aid).context_notes is None

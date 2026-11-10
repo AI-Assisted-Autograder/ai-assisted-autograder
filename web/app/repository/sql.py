@@ -5,6 +5,7 @@ from sqlalchemy import Uuid, and_, delete, exists, func, literal, or_, select, u
 from sqlalchemy.dialects.postgresql import insert
 from sqlalchemy.orm import Session, sessionmaker
 
+from app.assignment_context import check_context
 from app.feedback_config import RubricInput
 from app.models import (
     AI_STATUSES,
@@ -12,6 +13,7 @@ from app.models import (
     TEST_STATUSES,
     AiFeedback,
     Assignment,
+    AssignmentContextFile,
     Course,
     GradingTarget,
     LlmProviderConfig,
@@ -27,6 +29,7 @@ from app.repository.base import (
     AssignmentResults,
     AssignmentSummary,
     ConflictError,
+    ContextFile,
     FeedbackDetail,
     FeedbackPackage,
     FeedbackResult,
@@ -307,6 +310,8 @@ class SqlGradingRepository(IGradingRepository):
                 a.is_active,
                 targets,
                 tuple(ProviderConfig(p.provider, p.model_name, p.is_primary, p.engine) for p in providers),
+                a.context_notes,
+                tuple(self._context_files(s, a.id)),
             )
 
     def get_selected_feedback(self, submission_id: uuid.UUID) -> FeedbackPackage:
@@ -728,6 +733,56 @@ class SqlGradingRepository(IGradingRepository):
                 raise ConflictError(f"Target {gt.identifier!r} already has submissions, so it cannot be deleted")
             s.execute(delete(Rubric).where(Rubric.grading_target_id == target_id))
             s.delete(gt)
+
+    def set_context_notes(self, assignment_id: uuid.UUID, notes: str | None) -> None:
+        with self._sessions.begin() as s:
+            a = self._locked_assignment(s, assignment_id)
+            notes = clean(notes)
+            check_context(notes, [f.content for f in self._context_files(s, a.id)])
+            a.context_notes = notes
+
+    def add_context_files(self, assignment_id: uuid.UUID, files: list[tuple[str, str]]) -> list[uuid.UUID]:
+        with self._sessions.begin() as s:
+            a = self._locked_assignment(s, assignment_id)
+            existing = [f.content for f in self._context_files(s, a.id)]
+            check_context(a.context_notes, existing + [content for _, content in files])
+            start = s.scalar(
+                select(func.coalesce(func.max(AssignmentContextFile.position), 0))
+                .where(AssignmentContextFile.assignment_id == a.id)
+            )
+            rows = [
+                AssignmentContextFile(assignment_id=a.id, filename=name, content=content, position=start + i)
+                for i, (name, content) in enumerate(files, 1)
+            ]
+            s.add_all(rows)
+            s.flush()
+            return [r.id for r in rows]
+
+    def delete_context_file(self, assignment_id: uuid.UUID, file_id: uuid.UUID) -> None:
+        with self._sessions.begin() as s:
+            f = s.get(AssignmentContextFile, file_id)
+            if f is None or f.assignment_id != assignment_id:
+                raise NotFoundError(f"Context file {file_id} not found")
+            s.delete(f)
+
+    @staticmethod
+    def _locked_assignment(s: Session, assignment_id: uuid.UUID) -> Assignment:
+        # Locked so two uploads cannot both pass the limit check.
+        a = s.get(Assignment, assignment_id, with_for_update=True)
+        if a is None:
+            raise NotFoundError(f"Assignment {assignment_id} not found")
+        return a
+
+    @staticmethod
+    def _context_files(s: Session, assignment_id: uuid.UUID) -> list[ContextFile]:
+        return [
+            ContextFile(f.id, f.filename, f.content, f.uploaded_at)
+            for f in s.scalars(
+                select(AssignmentContextFile)
+                .where(AssignmentContextFile.assignment_id == assignment_id)
+                .order_by(AssignmentContextFile.position)
+            )
+        ]
 
     def upsert_rubric(
         self,

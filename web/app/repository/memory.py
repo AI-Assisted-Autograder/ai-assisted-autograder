@@ -8,6 +8,7 @@ from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from decimal import Decimal
 
+from app.assignment_context import check_context
 from app.feedback_config import RubricInput
 from app.models import AI_STATUSES, GRADING_MODES, TEST_STATUSES
 from app.repository.base import (
@@ -17,6 +18,7 @@ from app.repository.base import (
     AssignmentResults,
     AssignmentSummary,
     ConflictError,
+    ContextFile,
     FeedbackDetail,
     FeedbackPackage,
     FeedbackResult,
@@ -78,6 +80,7 @@ class _Assignment:
     name: str | None
     is_active: bool = True
     course_id: uuid.UUID | None = None
+    context_notes: str | None = None
 
 
 @dataclass
@@ -176,6 +179,8 @@ class InMemoryRepository(IGradingRepository):
         self.test_results: list[_TestResult] = []
         self.ai_feedback: list[_AiFeedback] = []
         self.providers: list[_LlmProviderConfig] = []
+        self.context_files: list[ContextFile] = []
+        self._context_owner: dict[uuid.UUID, uuid.UUID] = {}
 
     # Seeding, standing in for the instructor's web UI.
     def add_assignment(
@@ -392,6 +397,8 @@ class InMemoryRepository(IGradingRepository):
                 for gt in targets
             ),
             tuple(ProviderConfig(p.provider, p.model_name, p.is_primary, p.engine) for p in providers),
+            a.context_notes,
+            tuple(self._context_files(a.id)),
         )
 
     def get_selected_feedback(self, submission_id: uuid.UUID) -> FeedbackPackage:
@@ -721,6 +728,35 @@ class InMemoryRepository(IGradingRepository):
             raise ConflictError(f"Target {gt.identifier!r} already has submissions, so it cannot be deleted")
         self.rubrics = {rid: r for rid, r in self.rubrics.items() if r.grading_target_id != target_id}
         del self.grading_targets[target_id]
+
+    def set_context_notes(self, assignment_id: uuid.UUID, notes: str | None) -> None:
+        a = self.assignments.get(assignment_id)
+        if a is None:
+            raise NotFoundError(f"Assignment {assignment_id} not found")
+        notes = clean(notes)
+        check_context(notes, [f.content for f in self._context_files(a.id)])
+        a.context_notes = notes
+
+    def add_context_files(self, assignment_id: uuid.UUID, files: list[tuple[str, str]]) -> list[uuid.UUID]:
+        a = self.assignments.get(assignment_id)
+        if a is None:
+            raise NotFoundError(f"Assignment {assignment_id} not found")
+        existing = [f.content for f in self._context_files(a.id)]
+        check_context(a.context_notes, existing + [content for _, content in files])
+        now = datetime.now(timezone.utc)
+        added = [ContextFile(uuid.uuid4(), name, content, now) for name, content in files]
+        self._context_owner.update({f.id: a.id for f in added})
+        self.context_files.extend(added)
+        return [f.id for f in added]
+
+    def delete_context_file(self, assignment_id: uuid.UUID, file_id: uuid.UUID) -> None:
+        if self._context_owner.get(file_id) != assignment_id:
+            raise NotFoundError(f"Context file {file_id} not found")
+        self.context_files = [f for f in self.context_files if f.id != file_id]
+        del self._context_owner[file_id]
+
+    def _context_files(self, assignment_id: uuid.UUID) -> list[ContextFile]:
+        return [f for f in self.context_files if self._context_owner.get(f.id) == assignment_id]
 
     def upsert_rubric(
         self,

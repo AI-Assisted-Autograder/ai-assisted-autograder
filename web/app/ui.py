@@ -15,7 +15,9 @@ from fastapi import APIRouter, Depends, Form, Request
 from fastapi.concurrency import run_in_threadpool
 from fastapi.responses import RedirectResponse
 from fastapi.templating import Jinja2Templates
+from starlette.datastructures import UploadFile as StarletteUploadFile
 
+from app.assignment_context import MAX_FILES, MAX_TOTAL_CHARS, MAX_UPLOAD_BYTES, check_context, clean_filename, extract_text
 from app.auth import require_instructor
 from app.db import SessionLocal
 from app.models import GRADING_MODES, TARGET_KINDS
@@ -98,6 +100,20 @@ templates.env.globals["TARGET_STATES"] = TARGET_STATES
 templates.env.globals["GRADING_MODES"] = GRADING_MODES
 templates.env.globals["TARGET_KINDS"] = TARGET_KINDS
 templates.env.globals["LANGUAGES"] = LANGUAGES
+templates.env.globals["CONTEXT_LIMITS"] = {
+    "files": MAX_FILES, "chars": MAX_TOTAL_CHARS, "upload_mb": MAX_UPLOAD_BYTES // (1024 * 1024),
+}
+
+
+async def chosen_files(request: Request) -> list[StarletteUploadFile]:
+    """The files chosen in a form's context_files input.
+
+    Read from the parsed form rather than declared as File(), because a file
+    input left empty still sends one part with no filename, which Starlette
+    hands over as a string and FastAPI would reject as invalid.
+    """
+    form = await request.form()
+    return [f for f in form.getlist("context_files") if isinstance(f, StarletteUploadFile) and f.filename]
 
 
 def not_found(request: Request, message: str):
@@ -150,6 +166,8 @@ def create_assignment(
     name: Annotated[str, Form()] = "",
     grading_mode: Annotated[str, Form()] = "",
     language: Annotated[str, Form()] = "",
+    context_notes: Annotated[str, Form()] = "",
+    context_files: list[StarletteUploadFile] = Depends(chosen_files),
     repo: IGradingRepository = Depends(get_repository),
 ):
     form = {
@@ -161,13 +179,32 @@ def create_assignment(
         "language": language,
     }
     try:
+        # Read and checked before the assignment exists, so a bad file does
+        # not leave a half-made assignment behind.
+        uploads = read_uploads(context_files)
+        check_context(context_notes.strip(), [text for _, text in uploads])
         assignment_id = repo.create_assignment(**form)
     except (ValueError, ConflictError) as error:
         message, status = form_error(error)
         return templates.TemplateResponse(
-            request, "assignment_form.html", {"form": form, "error": message}, status_code=status
+            request, "assignment_form.html",
+            {"form": {**form, "context_notes": context_notes}, "error": message}, status_code=status,
         )
+    if context_notes.strip():
+        repo.set_context_notes(assignment_id, context_notes)
+    if uploads:
+        repo.add_context_files(assignment_id, uploads)
     return see_other(f"/assignments/{assignment_id}")
+
+
+def read_uploads(files: list[StarletteUploadFile]) -> list[tuple[str, str]]:
+    """(filename, text) for each chosen file."""
+    found = []
+    for f in files:
+        name = clean_filename(f.filename)
+        # One byte over the limit is enough to refuse it without reading it all.
+        found.append((name, extract_text(name, f.file.read(MAX_UPLOAD_BYTES + 1))))
+    return found
 
 
 def assignment_page(
@@ -179,6 +216,8 @@ def assignment_page(
     status_code: int = 200,
     view: str = "students",
     delete_error: str | None = None,
+    context_error: str | None = None,
+    context_form: dict | None = None,
 ):
     by_target = view == "targets"
     try:
@@ -202,6 +241,9 @@ def assignment_page(
             "target_form": target_form or {},
             "target_error": target_error,
             "delete_error": delete_error,
+            "context_error": context_error,
+            "assignment_context_chars": len(config.context_notes or "") + sum(len(f.content) for f in config.context_files),
+            "context_form": context_form or {},
         },
         status_code=status_code,
     )
@@ -257,6 +299,58 @@ def results(
         "summary": summary,
         "column_deductions": column_deductions,
     })
+
+
+@router.post("/assignments/{assignment_id}/context/notes")
+def save_context_notes(
+    request: Request,
+    assignment_id: uuid.UUID,
+    context_notes: Annotated[str, Form()] = "",
+    repo: IGradingRepository = Depends(get_repository),
+):
+    try:
+        repo.set_context_notes(assignment_id, context_notes)
+    except NotFoundError:
+        return not_found(request, "That assignment does not exist.")
+    except ValueError as error:
+        message, status = form_error(error)
+        return assignment_page(request, repo, assignment_id, status_code=status, context_error=message,
+                               context_form={"context_notes": context_notes})
+    return see_other(f"/assignments/{assignment_id}#context")
+
+
+@router.post("/assignments/{assignment_id}/context/files")
+def upload_context_files(
+    request: Request,
+    assignment_id: uuid.UUID,
+    context_files: list[StarletteUploadFile] = Depends(chosen_files),
+    repo: IGradingRepository = Depends(get_repository),
+):
+    try:
+        uploads = read_uploads(context_files)
+        if not uploads:
+            raise ValueError("Choose at least one file to upload")
+        repo.add_context_files(assignment_id, uploads)
+    except NotFoundError:
+        return not_found(request, "That assignment does not exist.")
+    except ValueError as error:
+        message, status = form_error(error)
+        return assignment_page(request, repo, assignment_id, status_code=status, context_error=message)
+    return see_other(f"/assignments/{assignment_id}#context")
+
+
+@router.post("/assignments/{assignment_id}/context/files/{file_id}/delete")
+def delete_context_file(
+    request: Request,
+    assignment_id: uuid.UUID,
+    file_id: uuid.UUID,
+    repo: IGradingRepository = Depends(get_repository),
+):
+    try:
+        repo.delete_context_file(assignment_id, file_id)
+    except NotFoundError:
+        return not_found(request, "That context file does not exist.")
+    return see_other(f"/assignments/{assignment_id}#context")
 
 
 @router.post("/assignments/{assignment_id}/targets")

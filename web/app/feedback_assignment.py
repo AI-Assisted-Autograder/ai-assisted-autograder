@@ -13,6 +13,7 @@ from uuid import UUID
 
 from pydantic import TypeAdapter
 
+from .assignment_context import with_assignment_context
 from .feedback_config import (
     AssignmentConfig, Engine, ModelName, RubricConfig, TargetConfig, TargetSettings, resolve_target_analysis,
     validate_engine_model,
@@ -191,7 +192,11 @@ def read_assignment_config(repository, assignment_id: str) -> AssignmentConfig:
                 max_score=float(target.max_score) if target.max_score is not None else None,
                 rubric=RubricConfig(
                     id=str(rubric.id), version=rubric.version,
-                    criteria_text=rubric.criteria_text,
+                    # The instructor's notes and uploaded documents ride along in
+                    # each target's background (app.assignment_context).
+                    criteria_text=with_assignment_context(
+                        rubric.criteria_text, assignment.context_notes, assignment.context_files,
+                    ),
                     feedback_guidance=rubric.feedback_guidance or "",
                 ),
             )
