@@ -284,6 +284,8 @@ not recorded as final success. The default wait is 30 minutes because a real
 rerun includes the full autograder and AI feedback phases. Configure it with
 `GRADESCOPE_RERUN_TIMEOUT_MS` (default `1800000`) and
 `GRADESCOPE_RERUN_POLL_INTERVAL_MS` (default five seconds).
+The post-click confirmation wait defaults to 60 seconds and can be configured
+with `GRADESCOPE_RERUN_CONFIRMATION_TIMEOUT_MS`.
 
 The login test is read-only with respect to Gradescope. The rerun test changes
 Gradescope state and must be run only for an intentionally selected submission.

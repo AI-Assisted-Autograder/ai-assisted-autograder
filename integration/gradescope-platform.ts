@@ -110,11 +110,17 @@ export class GradescopePlatform implements ILearningPlatform {
       confirmed = true;
     }
 
+    const confirmationTimeoutMs = this.readPositiveInteger(
+      'GRADESCOPE_RERUN_CONFIRMATION_TIMEOUT_MS',
+      60_000,
+    );
     const configuredSuccessText = process.env.GRADESCOPE_RERUN_SUCCESS_TEXT;
     const successPattern = configuredSuccessText
       ? new RegExp(configuredSuccessText, 'i')
       : selectorMap.rerunSuccess;
-    await expect(this.page.getByText(successPattern).first()).toBeVisible({ timeout: 15_000 });
+    await expect(this.page.getByText(successPattern).first()).toBeVisible({
+      timeout: confirmationTimeoutMs,
+    });
 
     return {
       submissionId: locator.submissionId,
