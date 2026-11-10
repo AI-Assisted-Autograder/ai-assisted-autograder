@@ -8,6 +8,13 @@ NIGHTLY_LOCAL_TIME="${NIGHTLY_LOCAL_TIME:-02:00}"
 
 mkdir -p "${RUNNER_DIR}/logs"
 
+if [[ -f "${CONFIG_DIR}/runner.env" ]]; then
+  configured_time="$(sed -n 's/^NIGHTLY_LOCAL_TIME=//p' "${CONFIG_DIR}/runner.env" | tail -n 1)"
+  if [[ -n "${configured_time}" ]]; then
+    NIGHTLY_LOCAL_TIME="${configured_time}"
+  fi
+fi
+
 # Cron runs hourly in UTC on the server. This local-time guard keeps the
 # schedule at NIGHTLY_LOCAL_TIME America/New_York across daylight-saving changes.
 if [[ "$(TZ=America/New_York date +%H:%M)" != "${NIGHTLY_LOCAL_TIME}" ]]; then
