@@ -4,12 +4,13 @@ set -euo pipefail
 RUNNER_DIR="${RUNNER_DIR:-/home/wuruo/gradescope-runner}"
 CONFIG_DIR="${CONFIG_DIR:-/home/wuruo/.config/gradescope-runner}"
 LOG_FILE="${RUNNER_DIR}/logs/nightly-trigger.log"
+NIGHTLY_LOCAL_TIME="${NIGHTLY_LOCAL_TIME:-02:00}"
 
 mkdir -p "${RUNNER_DIR}/logs"
 
 # Cron runs hourly in UTC on the server. This local-time guard keeps the
-# schedule at 02:00 America/New_York across daylight-saving changes.
-if [[ "$(TZ=America/New_York date +%H:%M)" != "02:00" ]]; then
+# schedule at NIGHTLY_LOCAL_TIME America/New_York across daylight-saving changes.
+if [[ "$(TZ=America/New_York date +%H:%M)" != "${NIGHTLY_LOCAL_TIME}" ]]; then
   exit 0
 fi
 
