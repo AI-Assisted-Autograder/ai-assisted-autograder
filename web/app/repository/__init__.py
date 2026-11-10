@@ -2,6 +2,7 @@ from app.repository.base import (
     Action,
     ActionResult,
     AssignmentConfig,
+    AssignmentResults,
     AssignmentSummary,
     ConflictError,
     FeedbackDetail,
@@ -12,6 +13,9 @@ from app.repository.base import (
     ProviderConfig,
     ProviderFeedback,
     RepositoryError,
+    ResultCell,
+    ResultColumn,
+    ResultRow,
     RubricConfig,
     SelectedFeedback,
     SubmissionDetail,
@@ -29,6 +33,7 @@ from app.repository.base import (
     TestResultRecord,
     UnknownTargetError,
     derive_action,
+    is_deduction,
 )
 from app.repository.memory import InMemoryRepository
 from app.repository.sql import SqlGradingRepository
@@ -37,6 +42,7 @@ __all__ = [
     "Action",
     "ActionResult",
     "AssignmentConfig",
+    "AssignmentResults",
     "AssignmentSummary",
     "ConflictError",
     "FeedbackDetail",
@@ -48,6 +54,9 @@ __all__ = [
     "ProviderConfig",
     "ProviderFeedback",
     "RepositoryError",
+    "ResultCell",
+    "ResultColumn",
+    "ResultRow",
     "RubricConfig",
     "SelectedFeedback",
     "SqlGradingRepository",
@@ -66,4 +75,5 @@ __all__ = [
     "TestResultRecord",
     "UnknownTargetError",
     "derive_action",
+    "is_deduction",
 ]

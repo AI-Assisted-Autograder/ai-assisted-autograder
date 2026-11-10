@@ -42,6 +42,7 @@ from app.repository import (
     TargetStatus,
     UnknownTargetError,
     derive_action,
+    is_deduction,
 )
 
 TEST_DATABASE_URL = os.environ.get(
@@ -918,6 +919,89 @@ def test_target_submissions_target_must_belong_to_the_assignment(backend):
     for assignment_id, target_id in ((other, targets["add"]), (aid, uuid.uuid4()), (uuid.uuid4(), targets["add"])):
         with pytest.raises(NotFoundError):
             backend.repo.get_target_submissions(assignment_id, target_id)
+
+
+def scored(rubric_id, score):
+    return FeedbackResult(
+        rubric_id=rubric_id,
+        responses=(ProviderFeedback("GOOGLE", "gemini-2.5-flash", "Fine.", "v1", score),),
+        selected_index=0,
+    )
+
+
+def test_results_flag_failing_tests_and_low_scores(backend):
+    aid = backend.add_assignment("IMMEDIATE", (("sub", 2), ("add", 1)))
+    backend.configure_target(aid, "add", "METHOD", Decimal("1"))
+    rubric = backend.add_rubric(aid, "add")
+
+    def submit(platform_id, student, hours=0):
+        sid = backend.repo.upsert_submission(
+            SubmissionRef(aid, platform_id, SUBMITTED + timedelta(hours=hours), student)
+        )
+        backend.repo.create_targets_default_needed(sid)
+        return sid
+
+    bob = submit("bob-1", "bob@example.edu")
+    backend.repo.add_test_result(bob, "add", "FAIL", None)
+    backend.repo.add_test_result(bob, "add", "PASS", None)
+    backend.repo.save_feedback(bob, "add", scored(rubric, 0.5))
+    backend.repo.add_test_result(bob, "sub", "ERROR", None)
+    backend.repo.mark_target_failed(bob, "sub", "boom")
+    carol = submit("carol-1", "carol@example.edu")
+    backend.repo.add_test_result(carol, "add", "PASS", None)
+    backend.repo.save_feedback(carol, "add", scored(rubric, 1))
+    backend.repo.add_test_result(carol, "sub", "SKIP", None)
+    alice = submit("alice-1", "alice@example.edu")
+    backend.repo.add_test_result(alice, "add", "FAIL", None)
+    old = submit("alice-0", "alice@example.edu", hours=-1)
+    backend.set_submission(old, is_active_attempt=False)
+    submit("anon-1", None)
+    # Registered after everyone submitted, so nobody has a row for it.
+    backend.add_target(aid, "mul")
+
+    found = backend.repo.list_results(aid)
+
+    assert (found.assignment_id, found.grading_mode) == (aid, "IMMEDIATE")
+    assert [c.identifier for c in found.columns] == ["add", "sub", "mul"]
+    assert found.columns[0].max_score == Decimal("1")
+    # Active attempts only, by student, unknown last.
+    assert [r.platform_submission_id for r in found.rows] == ["alice-1", "bob-1", "carol-1", "anon-1"]
+    a, b, c, anon = found.rows
+
+    assert a.submission_id == alice
+    assert (a.cells[0].test_status, a.cells[0].status, a.cells[0].deduction) == ("FAIL", TargetStatus.WAITING, True)
+    assert a.cells[2] is None
+
+    # The latest test passed, but the AI score is below max.
+    assert (b.cells[0].test_status, b.cells[0].suggested_score, b.cells[0].deduction) == ("PASS", Decimal("0.5"), True)
+    # ERROR counts; sub has no max score, so only the test can flag it.
+    assert (b.cells[1].test_status, b.cells[1].status, b.cells[1].deduction) == ("ERROR", TargetStatus.FAILED, True)
+    assert b.deduction_count == 2
+
+    assert c.submission_id == carol
+    assert (c.cells[0].suggested_score, c.cells[0].deduction) == (Decimal("1"), False)
+    assert (c.cells[1].test_status, c.cells[1].deduction) == ("SKIP", False)
+    assert not c.has_deduction
+
+    assert (anon.student_identifier, anon.cells[0].test_status, anon.has_deduction) == (None, None, False)
+
+
+def test_results_unknown_assignment(backend):
+    with pytest.raises(NotFoundError):
+        backend.repo.list_results(uuid.uuid4())
+
+
+@pytest.mark.parametrize("test_status, score, max_score, expected", [
+    ("FAIL", None, None, True),
+    ("ERROR", Decimal("5"), Decimal("5"), True),
+    ("SKIP", None, Decimal("5"), False),
+    ("PASS", Decimal("4.5"), Decimal("5"), True),
+    ("PASS", Decimal("5"), Decimal("5"), False),
+    (None, Decimal("2"), None, False),
+    (None, None, None, False),
+])
+def test_is_deduction(test_status, score, max_score, expected):
+    assert is_deduction(test_status, score, max_score) is expected
 
 
 # ---------------------------------------------------------------------

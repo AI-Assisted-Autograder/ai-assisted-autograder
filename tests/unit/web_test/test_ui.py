@@ -393,3 +393,49 @@ def test_rubric_target_must_belong_to_the_assignment(client, repo):
     response = client.post(f"/assignments/{aid}/targets/{tid}/rubric", data={"criteria_text": "x"})
     assert response.status_code == 404
     assert repo.get_assignment_config(other).targets[0].rubric is None
+
+
+def test_results_dashboard_flags_deductions(client, repo):
+    aid, sid = graded_submission(repo)
+    clean = repo.upsert_submission(SubmissionRef(aid, "sub-2", SUBMITTED, "bob@example.edu"))
+    repo.create_targets_default_needed(clean)
+    repo.add_test_result(clean, "add", "PASS", None)
+
+    response = client.get(f"/assignments/{aid}/results")
+
+    assert response.status_code == 200
+    text = response.text
+    assert f'href="/submissions/{sid}"' in text
+    assert f'href="/submissions/{clean}"' in text
+    # alice's add failed its test and scored 3 of 5.
+    assert '<td class="cell deduction">' in text
+    assert "3 / 5" in text
+    assert '<span class="badge failed">AI failed</span>' in text
+    assert "Opted out" in text
+
+
+def test_results_dashboard_filters_to_deductions(client, repo):
+    aid, sid = graded_submission(repo)
+    clean = repo.upsert_submission(SubmissionRef(aid, "sub-2", SUBMITTED, "bob@example.edu"))
+    repo.create_targets_default_needed(clean)
+    repo.add_test_result(clean, "add", "PASS", None)
+
+    text = client.get(f"/assignments/{aid}/results?filter=has_deduction").text
+
+    assert f'href="/submissions/{sid}"' in text
+    assert f'href="/submissions/{clean}"' not in text
+    assert 'filter=has_deduction" aria-current="page"' in text
+
+
+def test_results_dashboard_empty_and_unknown(client, repo):
+    aid = repo.add_assignment("NIGHTLY", platform_assignment_id="x", name="Empty")
+    repo.add_grading_target(aid, "add", 1)
+
+    assert "No submissions yet." in client.get(f"/assignments/{aid}/results").text
+    assert client.get(f"/assignments/{uuid.uuid4()}/results").status_code == 404
+
+
+def test_assignment_page_links_to_results(client, repo):
+    aid, _ = graded_submission(repo)
+    assert f'href="/assignments/{aid}/results"' in client.get(f"/assignments/{aid}").text
+

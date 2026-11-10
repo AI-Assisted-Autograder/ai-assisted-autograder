@@ -24,6 +24,7 @@ from app.repository.base import (
     Action,
     ActionResult,
     AssignmentConfig,
+    AssignmentResults,
     AssignmentSummary,
     ConflictError,
     FeedbackDetail,
@@ -32,6 +33,9 @@ from app.repository.base import (
     IGradingRepository,
     NotFoundError,
     ProviderConfig,
+    ResultCell,
+    ResultColumn,
+    ResultRow,
     RubricConfig,
     SelectedFeedback,
     SubmissionDetail,
@@ -55,7 +59,9 @@ from app.repository.base import (
     clean,
     derive_action,
     feedback_sort_key,
+    is_deduction,
     required,
+    result_sort_key,
     sort_key,
     student_sort_key,
     summarize,
@@ -569,6 +575,66 @@ class SqlGradingRepository(IGradingRepository):
                 gt.kind,
                 gt.max_score,
                 tuple(sorted(submissions, key=student_sort_key)),
+            )
+
+    def list_results(self, assignment_id: uuid.UUID) -> AssignmentResults:
+        with self._sessions.begin() as s:
+            a = s.get(Assignment, assignment_id)
+            if a is None:
+                raise NotFoundError(f"Assignment {assignment_id} not found")
+            targets = sorted(
+                s.scalars(select(GradingTarget).where(GradingTarget.assignment_id == assignment_id)),
+                key=lambda gt: sort_key(gt.display_order, gt.identifier),
+            )
+            subs = list(s.scalars(
+                select(Submission).where(Submission.assignment_id == assignment_id, Submission.is_active_attempt)
+            ))
+            sts = list(s.scalars(
+                select(SubmissionTarget).where(SubmissionTarget.submission_id.in_([sub.id for sub in subs]))
+            ))
+            st_ids = [st.id for st in sts]
+            # In recorded order, so each target ends up with its latest.
+            latest: dict[uuid.UUID, str] = {}
+            for st_id, status in s.execute(
+                select(TestResult.submission_target_id, TestResult.status)
+                .where(TestResult.submission_target_id.in_(st_ids))
+                .order_by(TestResult.recorded_at)
+            ):
+                latest[st_id] = status
+            scores = dict(s.execute(
+                select(AiFeedback.submission_target_id, AiFeedback.suggested_score)
+                .where(AiFeedback.submission_target_id.in_(st_ids), AiFeedback.is_selected)
+            ).all())
+            by_pair = {(st.submission_id, st.grading_target_id): st for st in sts}
+
+            def cell(sub: Submission, gt: GradingTarget) -> ResultCell | None:
+                st = by_pair.get((sub.id, gt.id))
+                if st is None:
+                    return None
+                test, score = latest.get(st.id), scores.get(st.id)
+                return ResultCell(
+                    target_status(st.ai_needed, st.completed_at, st.last_error),
+                    test, score, is_deduction(test, score, gt.max_score),
+                )
+
+            rows = [
+                ResultRow(
+                    sub.id,
+                    sub.platform_submission_id,
+                    sub.student_identifier,
+                    sub.submitted_at,
+                    derive_action(a.grading_mode, sub.submitted_at, sub.ai_authorized_at, sub.ai_graded_submitted_at),
+                    sub.ai_status,
+                    tuple(cell(sub, gt) for gt in targets),
+                )
+                for sub in subs
+            ]
+            return AssignmentResults(
+                a.id,
+                a.name,
+                a.grading_mode,
+                tuple(ResultColumn(gt.id, gt.identifier, gt.kind, gt.max_score) for gt in targets),
+                tuple(sorted(rows, key=result_sort_key)),
             )
 
     def create_assignment(

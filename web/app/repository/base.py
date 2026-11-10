@@ -330,6 +330,84 @@ class TargetSubmissions:
     submissions: tuple[TargetSubmission, ...]
 
 
+@dataclass(frozen=True)
+class ResultColumn:
+    """One target, as a column of the results dashboard."""
+
+    id: uuid.UUID
+    identifier: str
+    kind: str
+    max_score: Decimal | None
+
+
+@dataclass(frozen=True)
+class ResultCell:
+    """One student's outcome on one target."""
+
+    status: TargetStatus
+    # The most recently recorded test status, or None if none was recorded.
+    test_status: str | None
+    # The selected provider's, once feedback is given.
+    suggested_score: Decimal | None
+    deduction: bool
+
+
+@dataclass(frozen=True)
+class ResultRow:
+    """One student's active attempt across every target."""
+
+    submission_id: uuid.UUID
+    platform_submission_id: str
+    student_identifier: str | None
+    submitted_at: datetime
+    action: Action
+    ai_status: str | None
+    # Aligned with AssignmentResults.columns. None where the submission has
+    # no row for that target, e.g. a target registered after it was graded.
+    cells: tuple[ResultCell | None, ...]
+
+    @property
+    def has_deduction(self) -> bool:
+        return any(c is not None and c.deduction for c in self.cells)
+
+    @property
+    def deduction_count(self) -> int:
+        return sum(1 for c in self.cells if c is not None and c.deduction)
+
+
+@dataclass(frozen=True)
+class AssignmentResults:
+    """Everything the results dashboard shows (FR-8, FR-9, FR-10)."""
+
+    assignment_id: uuid.UUID
+    assignment_name: str | None
+    grading_mode: str
+    # Display order.
+    columns: tuple[ResultColumn, ...]
+    # Active attempts only (AD-14), by student, unknown students last.
+    rows: tuple[ResultRow, ...]
+
+
+# A failing test is a deduction; SKIP is not.
+DEDUCTION_TEST_STATUSES = ("FAIL", "ERROR")
+
+
+def is_deduction(test_status: str | None, suggested_score: Decimal | None, max_score: Decimal | None) -> bool:
+    """OQ-1, as the instructor answered it: a failing latest test result, or a
+    selected AI score below the target's max score. Either one counts.
+
+    Only the latest test result is considered, so a target that failed and
+    then passed on a rerun is not flagged.
+    """
+    if test_status in DEDUCTION_TEST_STATUSES:
+        return True
+    return suggested_score is not None and max_score is not None and suggested_score < max_score
+
+
+def result_sort_key(r: ResultRow) -> tuple:
+    return (r.student_identifier is None, r.student_identifier or "", r.platform_submission_id)
+
+
 class RepositoryError(Exception):
     pass
 
@@ -650,6 +728,15 @@ class IGradingRepository(ABC):
 
         Raises NotFoundError if the target is not registered on this
         assignment, so it cannot be read under another assignment's URL.
+        """
+
+    @abstractmethod
+    def list_results(self, assignment_id: uuid.UUID) -> AssignmentResults:
+        """Every active attempt's outcome on every target, for the results dashboard.
+
+        Each cell carries its latest test status, the selected AI score and
+        whether it counts as a deduction (is_deduction). Raises NotFoundError
+        for an unknown assignment.
         """
 
     # Instructor configuration writes (05-sequence-instructor).

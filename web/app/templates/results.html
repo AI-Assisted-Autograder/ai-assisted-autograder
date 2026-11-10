@@ -1,0 +1,91 @@
+{% extends "base.html" %}
+
+{% set title = results.assignment_name or "Assignment" %}
+{% block title %}Results: {{ title }}{% endblock %}
+
+{% block content %}
+<p class="crumbs">
+    <a href="/">Assignments</a> /
+    <a href="/assignments/{{ results.assignment_id }}">{{ title }}</a> /
+</p>
+<h1>Results <span class="badge mode">{{ results.grading_mode | title }}</span></h1>
+
+<div class="stats">
+    <div class="stat"><span class="value">{{ summary.students }}</span><span class="label">Students</span></div>
+    <div class="stat{% if summary.with_deduction %} flagged{% endif %}"><span class="value">{{ summary.with_deduction }}</span><span class="label">With deductions</span></div>
+    <div class="stat"><span class="value">{{ summary.students - summary.with_deduction }}</span><span class="label">No deductions</span></div>
+    <div class="stat{% if summary.ai_failed %} flagged{% endif %}"><span class="value">{{ summary.ai_failed }}</span><span class="label">AI runs failed</span></div>
+    <div class="stat"><span class="value">{{ summary.waiting }}</span><span class="label">Targets waiting for AI</span></div>
+</div>
+
+<div class="title-row">
+    <h2>By student</h2>
+    <nav class="tabs" aria-label="Filter results">
+        <a href="/assignments/{{ results.assignment_id }}/results"{% if filter == "all" %} aria-current="page"{% endif %}>All</a>
+        <a href="/assignments/{{ results.assignment_id }}/results?filter=has_deduction"{% if filter == "has_deduction" %} aria-current="page"{% endif %}>With deductions</a>
+    </nav>
+</div>
+<p class="hint">
+    Each student's active attempt. A target counts as a deduction when its latest
+    test failed or errored, or when the selected AI score is below the target's max score.
+</p>
+
+{% if not results.columns %}
+<p class="empty">No targets registered.</p>
+{% elif rows %}
+<div class="table-wrap">
+<table class="results">
+    <thead>
+        <tr>
+            <th>Student</th>
+            {% for col in results.columns %}
+            <th>
+                <a href="/assignments/{{ results.assignment_id }}/targets/{{ col.id }}"><code class="target">{{ col.identifier }}</code></a>
+                {% if col.max_score is not none %}<div class="sub">max {{ col.max_score | number }}</div>{% endif %}
+            </th>
+            {% endfor %}
+            <th class="num">Deductions</th>
+        </tr>
+    </thead>
+    <tbody>
+        {% for r in rows %}
+        <tr>
+            <td>
+                <a href="/submissions/{{ r.submission_id }}">{{ r.student_identifier or "(unknown student)" }}</a>
+                {% if r.ai_status == "FAILED" %}<span class="badge failed">AI failed</span>{% endif %}
+                <div class="sub nowrap">{{ r.submitted_at | when }}</div>
+            </td>
+            {% for c in r.cells %}
+            {% if c is none %}
+            <td class="cell"><span class="sub">—</span></td>
+            {% else %}
+            {% set ai_label, ai_style = TARGET_STATES[c.status] %}
+            <td class="cell{% if c.deduction %} deduction{% endif %}">
+                {% if c.test_status %}<span class="test {{ c.test_status | lower }}">{{ c.test_status }}</span>{% else %}<span class="sub">No test</span>{% endif %}
+                {% if c.suggested_score is not none %}
+                <div class="score-line">{{ c.suggested_score | number }}{% if results.columns[loop.index0].max_score is not none %} / {{ results.columns[loop.index0].max_score | number }}{% endif %}</div>
+                {% elif c.status.value != "DONE" %}
+                <div><span class="badge {{ ai_style }}">{{ ai_label }}</span></div>
+                {% endif %}
+            </td>
+            {% endif %}
+            {% endfor %}
+            <td class="num">{% if r.deduction_count %}<span class="count failed">{{ r.deduction_count }}</span>{% else %}<span class="count done">0</span>{% endif %}</td>
+        </tr>
+        {% endfor %}
+    </tbody>
+    <tfoot>
+        <tr>
+            <th>Students with a deduction</th>
+            {% for n in column_deductions %}<th>{{ n }} / {{ summary.students }}</th>{% endfor %}
+            <th></th>
+        </tr>
+    </tfoot>
+</table>
+</div>
+{% elif filter == "has_deduction" and summary.students %}
+<p class="empty">No student has a deduction.</p>
+{% else %}
+<p class="empty">No submissions yet.</p>
+{% endif %}
+{% endblock %}

@@ -218,6 +218,47 @@ def assignment(
     return assignment_page(request, repo, assignment_id, view=view)
 
 
+RESULT_FILTERS = ("all", "has_deduction")
+
+
+@router.get("/assignments/{assignment_id}/results")
+def results(
+    request: Request,
+    assignment_id: uuid.UUID,
+    filter: str = "all",
+    repo: IGradingRepository = Depends(get_repository),
+):
+    """The results dashboard (FR-8..FR-10). filter=has_deduction keeps only
+    students with at least one deduction (OQ-1: a failing latest test, or an
+    AI score below the target's max)."""
+    try:
+        found = repo.list_results(assignment_id)
+    except NotFoundError:
+        return not_found(request, "That assignment does not exist.")
+    if filter not in RESULT_FILTERS:
+        filter = "all"
+    rows = found.rows
+    statuses = [c.status for r in rows for c in r.cells if c is not None]
+    summary = {
+        "students": len(rows),
+        "with_deduction": sum(1 for r in rows if r.has_deduction),
+        "ai_failed": sum(1 for r in rows if r.ai_status == "FAILED"),
+        "waiting": statuses.count(TargetStatus.WAITING),
+    }
+    column_deductions = [
+        sum(1 for r in rows if r.cells[i] is not None and r.cells[i].deduction)
+        for i in range(len(found.columns))
+    ]
+    shown = [r for r in rows if r.has_deduction] if filter == "has_deduction" else list(rows)
+    return templates.TemplateResponse(request, "results.html", {
+        "results": found,
+        "rows": shown,
+        "filter": filter,
+        "summary": summary,
+        "column_deductions": column_deductions,
+    })
+
+
 @router.post("/assignments/{assignment_id}/targets")
 def create_target(
     request: Request,

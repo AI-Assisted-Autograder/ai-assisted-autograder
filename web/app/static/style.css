@@ -224,3 +224,14 @@ header.site form.signed-in { margin-left: auto; display: flex; gap: 0.8rem; alig
 .login { max-width: 380px; margin: 3rem auto 0; }
 .login .hint { margin-top: 0.8rem; }
 .login form.form { max-width: none; }
+
+/* Results dashboard */
+.stats { display: grid; grid-template-columns: repeat(auto-fill, minmax(min(150px, 100%), 1fr)); gap: 0.6rem; margin: 1rem 0; }
+.stat { background: var(--surface); border: 1px solid var(--border); border-radius: 8px; padding: 0.7rem 0.9rem; display: flex; flex-direction: column; }
+.stat .value { font-size: 1.5rem; font-weight: 600; font-variant-numeric: tabular-nums; }
+.stat .label { color: var(--muted); font-size: 0.85rem; }
+.stat.flagged .value { color: var(--failed-fg); }
+table.results td.cell { white-space: nowrap; }
+table.results td.deduction { background: var(--failed-bg); }
+table.results .score-line { font-variant-numeric: tabular-nums; font-size: 0.9rem; margin-top: 0.2rem; }
+table.results tfoot th { border-top: 1px solid var(--border); border-bottom: none; font-variant-numeric: tabular-nums; }

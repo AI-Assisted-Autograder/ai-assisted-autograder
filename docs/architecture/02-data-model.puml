@@ -520,12 +520,11 @@ end note
 
 note as N2c #FFF8DC
   **Open decisions that touch this schema**
-  OQ-1  "deduction" (FR-10) is undefined.
-        Derive it as a view rather than adding a
-        column. Both inputs are now available:
-        a failing test_result.status, or
-        ai_feedback.suggested_score below the
-        target's max_score.
+  OQ-1  answered: "deduction" (FR-10) is either
+        a failing latest test_result.status, or
+        the selected ai_feedback.suggested_score
+        below the target's max_score. Derived at
+        read time, not stored.
   OQ-2  confidence has a column but no agreed
         semantics.
 end note

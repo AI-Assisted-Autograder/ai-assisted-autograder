@@ -53,6 +53,7 @@
     <nav class="tabs" aria-label="View submissions">
         <a href="/assignments/{{ assignment.id }}"{% if not by_target %} aria-current="page"{% endif %}>By student</a>
         <a href="/assignments/{{ assignment.id }}?view=targets"{% if by_target %} aria-current="page"{% endif %}>By target</a>
+        <a href="/assignments/{{ assignment.id }}/results">Results</a>
     </nav>
 </div>
 {% if by_target %}

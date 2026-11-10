@@ -14,6 +14,7 @@ from app.repository.base import (
     Action,
     ActionResult,
     AssignmentConfig,
+    AssignmentResults,
     AssignmentSummary,
     ConflictError,
     FeedbackDetail,
@@ -22,6 +23,9 @@ from app.repository.base import (
     IGradingRepository,
     NotFoundError,
     ProviderConfig,
+    ResultCell,
+    ResultColumn,
+    ResultRow,
     RubricConfig,
     SelectedFeedback,
     SubmissionDetail,
@@ -45,7 +49,9 @@ from app.repository.base import (
     clean,
     derive_action,
     feedback_sort_key,
+    is_deduction,
     required,
+    result_sort_key,
     sort_key,
     student_sort_key,
     summarize,
@@ -609,6 +615,52 @@ class InMemoryRepository(IGradingRepository):
             gt.kind,
             gt.max_score,
             tuple(sorted(submissions, key=student_sort_key)),
+        )
+
+    def list_results(self, assignment_id: uuid.UUID) -> AssignmentResults:
+        a = self.assignments.get(assignment_id)
+        if a is None:
+            raise NotFoundError(f"Assignment {assignment_id} not found")
+        targets = sorted(self._registered(assignment_id), key=lambda gt: sort_key(gt.display_order, gt.identifier))
+
+        def cell(sub: _Submission, gt: _GradingTarget) -> ResultCell | None:
+            st = next(
+                (st for st in self.submission_targets.values()
+                 if (st.submission_id, st.grading_target_id) == (sub.id, gt.id)),
+                None,
+            )
+            if st is None:
+                return None
+            latest = self._latest_test(st.id)
+            test = None if latest is None else latest.status
+            score = next(
+                (f.suggested_score for f in self.ai_feedback if f.submission_target_id == st.id and f.is_selected),
+                None,
+            )
+            return ResultCell(
+                target_status(st.ai_needed, st.completed_at, st.last_error),
+                test, score, is_deduction(test, score, gt.max_score),
+            )
+
+        rows = [
+            ResultRow(
+                sub.id,
+                sub.platform_submission_id,
+                sub.student_identifier,
+                sub.submitted_at,
+                derive_action(a.grading_mode, sub.submitted_at, sub.ai_authorized_at, sub.ai_graded_submitted_at),
+                sub.ai_status,
+                tuple(cell(sub, gt) for gt in targets),
+            )
+            for sub in self.submissions.values()
+            if sub.assignment_id == assignment_id and sub.is_active_attempt
+        ]
+        return AssignmentResults(
+            a.id,
+            a.name,
+            a.grading_mode,
+            tuple(ResultColumn(gt.id, gt.identifier, gt.kind, gt.max_score) for gt in targets),
+            tuple(sorted(rows, key=result_sort_key)),
         )
 
     def create_assignment(

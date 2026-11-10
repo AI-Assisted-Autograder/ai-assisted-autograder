@@ -573,12 +573,30 @@ Ordered by what they block. IDs are stable, so they are not sequential.
 | --- | --- | --- | --- |
 | OQ-6 | Exact Gradescope `results.json` schema | C's packager, D's tests | C |
 | OQ-7 | Gradescope automation: authentication, where that credential lives, and whether the UI exposes which submission is active (AD-14) | C's trigger | C |
-| OQ-3 | Can the instructor edit or approve generated feedback before the student sees it? | state machine, B's dashboard, whether IMMEDIATE is offered at all | Instructor |
-| OQ-1 | What exactly is a "deduction" (FR-10)? | B's dashboard query | Instructor |
 | OQ-2 | How is confidence defined and computed (FR-28)? | A's engine, B's UI | A |
 | OQ-5 | In-run retry count and backoff schedule | A's provider adapters | A |
 | OQ-9 | Instructor authentication and authorization | B's backend | B |
 | OQ-10 | Student data retention and FERPA posture | deployment | Instructor |
+
+### Answered
+
+**OQ-1, answered 2026-11-10 by the instructor:** a target has a deduction
+if *either* its latest `test_result.status` is `FAIL` or `ERROR`, *or* the
+selected `ai_feedback.suggested_score` is below the target's `max_score`.
+`SKIP` is not a deduction, and an earlier failure that a later run passed
+is not either. Derived at read time (`is_deduction` in
+`web/app/repository/base.py`), not stored, so changing the rule touches
+one function. The results dashboard
+(`/assignments/{id}/results?filter=has_deduction`) uses it.
+
+**OQ-3, answered 2026-11-10 by the instructor:** yes, the instructor may
+review generated feedback before the student sees it, but **only in
+`NIGHTLY` mode**. `IMMEDIATE` stays as it is: feedback reaches the student
+in the run that generated it. Not built yet. Holding feedback means the
+nightly rerun must store feedback without releasing it, and a later run
+must REEMIT it once approved. That changes the AD-11 action table and the
+AI phase's `results.json` write, so it needs A and C before B adds the
+approve control to the dashboard.
 
 ### OQ-9 and OQ-10 deserve a flag
 
