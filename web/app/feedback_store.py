@@ -15,8 +15,11 @@ from pathlib import Path
 import tempfile
 import threading
 from datetime import datetime, timezone
+from decimal import Decimal
 from typing import Any
 
+from ai_grading.models import TokenUsage
+from ai_grading.pricing import RequestAccounting, estimate_cost, select_price
 from .feedback_config import AssignmentAccess, BackendConfig, RequestRecord, State, TokenRecord
 
 
@@ -104,6 +107,9 @@ class JsonStore:
                 data["config"]["allowed_models"] = {"vertex": data["config"]["allowed_models"]}
                 raw = json.dumps(data)
             self._state = State.model_validate_json(raw)
+            if self._state.cost_tracking_started_at is None:
+                self._state.cost_tracking_started_at = utc_now()
+                changed = True
             for requests in self._state.requests.values():
                 for record in requests.values():
                     if record.status == "processing":
@@ -180,6 +186,53 @@ class JsonStore:
             record = self._state.requests.get(assignment_id, {}).get(request_id)
             return record.model_copy(deep=True) if record is not None else None
 
+    def record_usage(self, assignment_id: str, request_id: str, usage: TokenUsage,
+                     model_name: str) -> RequestAccounting:
+        """Keep usage even when grading fails or the HTTP wait has already timed out."""
+        with self._mutex:
+            self._ensure_open()
+            existing = self._state.requests[assignment_id][request_id]
+            if existing.accounting is not None:
+                return existing.accounting.model_copy(deep=True)
+            accounting = estimate_cost(usage, model_name, existing.pricing)
+            candidate = self._state.model_copy(deep=True)
+            candidate.requests[assignment_id][request_id].accounting = accounting
+            self._persist(candidate)
+            self._state = candidate
+            return accounting.model_copy(deep=True)
+
+    def cost_summary(self, assignment_id: str) -> dict[str, Any] | None:
+        with self._mutex:
+            self._ensure_open()
+            if assignment_id not in self._state.assignments:
+                return None
+            total = Decimal(0)
+            priced = unpriced = pending = 0
+            tokens = {key: 0 for key in ("input_tokens", "output_tokens", "cached_input_tokens")}
+            for record in self._state.requests.get(assignment_id, {}).values():
+                accounting = record.accounting
+                if accounting is not None:
+                    for key in tokens:
+                        count = getattr(accounting.usage, key)
+                        if count is not None:
+                            tokens[key] += count
+                if accounting is not None and accounting.estimated_cost_usd is not None:
+                    total += accounting.estimated_cost_usd
+                    priced += 1
+                elif record.status == "processing":
+                    pending += 1
+                else:
+                    unpriced += 1
+            return {"estimated_cost_usd": str(total), **tokens,
+                    "priced_requests": priced, "unpriced_requests": unpriced,
+                    "pending_requests": pending,
+                    "tracking_since": self._state.cost_tracking_started_at}
+
+    def cost_summaries(self) -> dict[str, dict[str, Any]]:
+        with self._mutex:
+            self._ensure_open()
+            return {key: self.cost_summary(key) for key in self._state.assignments}
+
     def _persist(self, state: State) -> None:
         try:
             content = json.dumps(state.model_dump(mode="json"), ensure_ascii=False,
@@ -194,7 +247,7 @@ class JsonStore:
 
     def reserve(self, assignment_id: str, request_id: str, digest: str,
                 target_id: str, model: str, *, engine: str = "vertex",
-                provider: str = "GOOGLE") -> tuple[RequestRecord, bool]:
+                provider: str = "GOOGLE", run_id: str | None = None) -> tuple[RequestRecord, bool]:
         with self._mutex:
             self._ensure_open()
             assignment = self.get_assignment(assignment_id)
@@ -210,7 +263,8 @@ class JsonStore:
             now = utc_now()
             record = RequestRecord(request_id=request_id, target_id=target_id,
                                    engine=engine, provider=provider, model=model, digest=digest,
-                                   status="processing", created_at=now, updated_at=now)
+                                   status="processing", created_at=now, updated_at=now, run_id=run_id,
+                                   pricing=select_price(self._state.config.model_prices, engine, model, now.date()))
             candidate = self._state.model_copy(deep=True)
             candidate.assignments[assignment_id].used_calls += 1
             candidate.requests.setdefault(assignment_id, {})[request_id] = record

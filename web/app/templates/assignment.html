@@ -27,6 +27,27 @@
     <div><dt>{{ assignment.platform | title }} id</dt><dd><code>{{ assignment.platform_assignment_id }}</code></dd></div>
 </dl>
 
+<h2>Estimated API cost (USD)</h2>
+{% if cost_summary is none %}
+<p class="empty">Not tracked</p>
+{% else %}
+<p>
+    {% if cost_summary.priced_requests == 0 and (cost_summary.unpriced_requests or cost_summary.pending_requests) %}
+    <strong>Unavailable</strong>
+    {% else %}
+    <strong>{{ cost_summary.estimated_cost_usd | usd }}</strong>
+    {% if cost_summary.unpriced_requests or cost_summary.pending_requests %}<span class="badge muted">Partial</span>{% endif %}
+    {% endif %}
+</p>
+<dl class="meta">
+    <div><dt>Priced requests</dt><dd>{{ cost_summary.priced_requests }}</dd></div>
+    <div><dt>Unpriced requests</dt><dd>{{ cost_summary.unpriced_requests }}</dd></div>
+    <div><dt>Pending requests</dt><dd>{{ cost_summary.pending_requests }}</dd></div>
+    {% if cost_summary.tracking_since %}<div><dt>Tracking since</dt><dd>{{ cost_summary.tracking_since | when }}</dd></div>{% endif %}
+</dl>
+<p class="sub">Cumulative estimates for recorded API calls across submissions and reruns. Unpriced and pending requests are excluded; earlier untracked usage is not included.</p>
+{% endif %}
+
 <div class="title-row">
     <h2>Submissions</h2>
     <nav class="tabs" aria-label="View submissions">

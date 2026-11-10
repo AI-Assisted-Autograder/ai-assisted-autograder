@@ -377,6 +377,35 @@ def read_submission_context(root):
         return None
 
 
+def print_cost_summary(run_id, requests):
+    accounted = [record['accounting'] for record in requests.values() if record['accounting'] is not None]
+    priced = [item for item in accounted if item['estimated_cost_usd'] is not None]
+    unknown = len(requests) - len(priced)
+    total = sum((Decimal(item['estimated_cost_usd']) for item in priced), Decimal(0))
+    tokens = {}
+    for key in ('input_tokens', 'cached_input_tokens', 'output_tokens'):
+        reported = [item['usage'][key] for item in accounted if item['usage'][key] is not None]
+        tokens[key] = ('unknown' if requests and not reported else str(sum(reported))
+                       + (' (partial)' if len(reported) < len(requests) else ''))
+    models = sorted({item['model_name'] for item in accounted})
+    bases = sorted({item['pricing']['basis'] for item in priced
+                    if item['pricing'] is not None and isinstance(item['pricing'].get('basis'), str)})
+    print(f'Instructor AI usage for run {run_id}:')
+    if models:
+        print('Models: ' + ', '.join(models))
+    print(f"Reported input tokens: {tokens['input_tokens']} (cached: {tokens['cached_input_tokens']})")
+    print(f"Reported output tokens: {tokens['output_tokens']}")
+    if unknown and not priced:
+        print('Estimated API cost: unavailable')
+    else:
+        print(f"Estimated API cost: USD {total:.6f}" + (' (partial)' if unknown else ''))
+    print(f'Requests: {len(priced)} priced, {unknown} without a cost estimate')
+    if bases:
+        print('Pricing basis: ' + '; '.join(bases))
+    if unknown:
+        print('Cost is incomplete. The Web assignment total can include usage reported after this run ends.')
+
+
 def add_feedback(root=Path('/autograder'), *, run_id=None):
     root = Path(root)
     if run_id is None:
@@ -398,12 +427,15 @@ def add_feedback(root=Path('/autograder'), *, run_id=None):
     deadline = report_deadline - 5
     config = None
     ai_status = 'FAILED'
+    hidden_stdout = False
+    accounting_requests = {}
     try:
         config = json.loads((root / 'source/config.json').read_text(encoding='utf-8'))
         results_path = root / RESULTS_SOURCE
         raw_results = results_path.read_bytes()
         original = json.loads(raw_results)
-        if original.get('stdout_visibility', 'hidden') == 'hidden':
+        hidden_stdout = original.get('stdout_visibility', 'hidden') == 'hidden'
+        if hidden_stdout:
             print(f"Instructor AI run: {json.dumps(run_context)}")
         base, previous_ai, blocked, cleanup_diagnostics = clean_results(original)
         ai_failed = bool(cleanup_diagnostics)
@@ -452,10 +484,15 @@ def add_feedback(root=Path('/autograder'), *, run_id=None):
                         response = request_feedback(backend_url=config['backend_url'], token_file=token_file,
                                                     target_id=target_id, files=files, evidence=evidence,
                                                     request_id=request_id, config_revision=manifest['revision'],
+                                                    run_id=run_id,
                                                     platform_submission_id=(submission_context or {}).get('platform_submission_id'),
                                                     submitted_at=(submission_context or {}).get('submitted_at'),
                                                     student_identifier=(submission_context or {}).get('student_identifier'),
                                                     timeout=min(270, remaining))
+                        accounting_requests[request_id] = {
+                            'request_id': request_id, 'target_id': target_id,
+                            'accounting': response.get('accounting'),
+                        }
                         if behavior == 'ai_grading':
                             results['tests'].extend(grading_rows(target_id, target, manifest['revision'], response))
                         else:
@@ -469,6 +506,13 @@ def add_feedback(root=Path('/autograder'), *, run_id=None):
                         record = {'target_id': target_id, 'error': detail}
                         if request_id is not None:
                             record['request_id'] = request_id
+                            if isinstance(exc, ClientError) and (exc.accounting is not None or exc.cost_unknown):
+                                accounting_requests[request_id] = {
+                                    'request_id': request_id, 'target_id': target_id,
+                                    'accounting': exc.accounting,
+                                }
+                            if request_id in accounting_requests:
+                                record['accounting'] = accounting_requests[request_id]['accounting']
                         records.append(record)
                         if behavior == 'ai_grading':
                             results['tests'].extend(grading_rows(target_id, target, manifest['revision'], error=detail))
@@ -502,16 +546,19 @@ def add_feedback(root=Path('/autograder'), *, run_id=None):
                         row['extra_data'].update(grading_status='pending_regrade', actual_score=None)
                         results['tests'].append(row)
             break
-        finalize_grading(results, manifest['revision'] if manifest is not None else None,
-                         unknown=unknown_grading)
-        # Never apply an explanation or score to a different functional-result snapshot.
-        if results_path.read_bytes() != raw_results:
-            raise ClientError('Functional results changed during AI processing; no AI result was applied.')
+        recorded_ids = {record.get('request_id') for record in records}
+        records.extend({**record, 'accounting_only': True}
+                       for request_id, record in accounting_requests.items() if request_id not in recorded_ids)
         for record in records:
             record.update(run_context)
         evidence_path = root / 'results/ai_evidence.json'
         evidence_path.write_text(json.dumps(records, ensure_ascii=False, indent=2, allow_nan=False) + '\n', encoding='utf-8')
         evidence_path.chmod(0o600)
+        finalize_grading(results, manifest['revision'] if manifest is not None else None,
+                         unknown=unknown_grading)
+        # Never apply an explanation or score to a different functional-result snapshot.
+        if results_path.read_bytes() != raw_results:
+            raise ClientError('Functional results changed during AI processing; no AI result was applied.')
         temporary = results_path.with_suffix('.tmp')
         temporary.write_text(json.dumps(results, ensure_ascii=False, indent=2, allow_nan=False) + '\n', encoding='utf-8')
         temporary.replace(results_path)
@@ -528,6 +575,8 @@ def add_feedback(root=Path('/autograder'), *, run_id=None):
                     identifier = item.get('test_id', item.get('evidence_id', ''))
                     print(f"Instructor AI evidence [{target} / {identifier}]: {item['evidence']}")
     finally:
+        if hidden_stdout:
+            print_cost_summary(run_id, accounting_requests)
         if submission_context and isinstance(config, dict) and config.get('backend_url'):
             remaining = report_deadline - time.monotonic()
             try:

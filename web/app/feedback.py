@@ -64,6 +64,7 @@ class SubmissionContext(BaseModel):
 class FeedbackInput(BaseModel):
     model_config = ConfigDict(extra="forbid", strict=True)
     request_id: str = Field(min_length=1, max_length=128, pattern=r"^[A-Za-z0-9_.:-]+$")
+    run_id: str | None = Field(default=None, min_length=1, max_length=128, pattern=r"^[A-Za-z0-9_.:-]+$")
     target_id: str = Field(min_length=1, max_length=128, pattern=r"^[A-Za-z0-9_.:-]+$")
     config_revision: str | None = Field(default=None, pattern=r"^[0-9a-f]{64}$")
     code: str | None = Field(default=None, min_length=1)
@@ -154,10 +155,12 @@ def resolve_input(payload: FeedbackInput, target) -> ResolvedSource:
     return resolved
 
 
-def error(code: str, status: int, request_id: str | None = None):
+def error(code: str, status: int, request_id: str | None = None, *, accounting=None):
     body = {"error": {"code": code, "message": MESSAGES.get(code, MESSAGES["backend_error"])}}
     if request_id is not None:
         body["request_id"] = request_id
+    if accounting is not None:
+        body["accounting"] = accounting.model_dump(mode="json")
     return JSONResponse(body, status_code=status,
                         headers={"Cache-Control": "no-store"})
 
@@ -196,6 +199,7 @@ def create_feedback_router(state_path: str | Path, *, assignment_loader,
         except Exception:
             raise RuntimeError("Backend state is unavailable or locked.") from None
         runtime.store = store
+        app.state.feedback_store = store
         runtime.providers = {}
         runtime.provider_lock = threading.Lock()
         runtime.inflight = 0
@@ -330,7 +334,7 @@ def create_feedback_router(state_path: str | Path, *, assignment_loader,
             body.extend(chunk)
         return bytes(body)
 
-    def invoke(assignment_id, assignment, grading_request, deadline):
+    def invoke(assignment_id, rid, assignment, grading_request, deadline):
         if time.monotonic() >= deadline:
             raise TimeoutError
         with runtime.provider_lock:
@@ -340,7 +344,14 @@ def create_feedback_router(state_path: str | Path, *, assignment_loader,
             provider = runtime.providers[key]
         if time.monotonic() >= deadline:
             raise TimeoutError
-        return provider.generate_feedback(grading_request)
+        try:
+            response = provider.generate_feedback(grading_request)
+        except ProviderError as exc:
+            if exc.usage is not None:
+                runtime.store.record_usage(assignment_id, rid, exc.usage, exc.model_name or assignment.model)
+            raise
+        runtime.store.record_usage(assignment_id, rid, response.usage, response.model_name)
+        return response
 
     def processing_response(request_id):
         return JSONResponse(
@@ -363,6 +374,7 @@ def create_feedback_router(state_path: str | Path, *, assignment_loader,
                 "feedback_text": response.feedback_text, "model_name": response.model_name,
                 "usage": {"input_tokens": response.input_tokens,
                           "output_tokens": response.output_tokens},
+                "accounting": store.get_request(assignment_id, rid).accounting.model_dump(mode="json"),
             }
             if response.items:
                 result["items"] = [asdict(item) for item in response.items]
@@ -410,7 +422,8 @@ def create_feedback_router(state_path: str | Path, *, assignment_loader,
         if failed_to_save_request:
             return error("backend_error", 500, rid)
         LOG.warning("feedback_request_failed code=%s request_id=%s", code, rid)
-        return error(code, 504 if code == "upstream_timeout" else 502, rid)
+        return error(code, 504 if code == "upstream_timeout" else 502, rid,
+                     accounting=store.get_request(assignment_id, rid).accounting)
 
     async def handle_feedback(request: Request):
         store = runtime.store
@@ -455,7 +468,7 @@ def create_feedback_router(state_path: str | Path, *, assignment_loader,
         target = assignment.targets.get(payload.target_id)
         if target is None:
             return error("target_forbidden", 403, rid)
-        content = payload.model_dump(mode="json", exclude={"request_id"})
+        content = payload.model_dump(mode="json", exclude={"request_id", "run_id"})
         if payload.config_revision is None:
             content.pop("config_revision")
         content["guidance"] = payload.guidance or ""
@@ -502,7 +515,7 @@ def create_feedback_router(state_path: str | Path, *, assignment_loader,
                 return error("busy", 429, rid)
             record, created = store.reserve(assignment_id, rid, digest, payload.target_id,
                                             assignment.model, engine=assignment.engine,
-                                            provider=assignment.provider)
+                                            provider=assignment.provider, run_id=payload.run_id)
         except StoreError as exc:
             return error(exc.code, exc.status_code, rid)
         except Exception:
@@ -511,17 +524,20 @@ def create_feedback_router(state_path: str | Path, *, assignment_loader,
             if record.status == "completed":
                 result = {"engine": record.engine, "provider": record.provider,
                           "requested_model": record.model, **record.result}
+                if record.accounting is not None:
+                    result["accounting"] = record.accounting.model_dump(mode="json")
                 return JSONResponse(result, headers={"Cache-Control": "no-store"})
             if record.status == "processing" and respond_async:
                 return processing_response(rid)
             if record.status in ("processing", "interrupted"):
-                return error(record.status, 409, rid)
+                return error(record.status, 409, rid, accounting=record.accounting)
             code = record.error_code or "model_error"
-            return error(code, 504 if code == "upstream_timeout" else 502, rid)
+            return error(code, 504 if code == "upstream_timeout" else 502, rid,
+                         accounting=record.accounting)
 
         runtime.inflight += 1
         future = asyncio.get_running_loop().run_in_executor(
-            runtime.pool, invoke, assignment_id, assignment, grading_request,
+            runtime.pool, invoke, assignment_id, rid, assignment, grading_request,
             time.monotonic() + config.timeout_seconds,
         )
         runtime.tasks.add(future)

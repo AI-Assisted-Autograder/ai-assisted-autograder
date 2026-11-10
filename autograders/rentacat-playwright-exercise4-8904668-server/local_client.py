@@ -8,7 +8,7 @@ imports a Google SDK, discovers ADC, or falls back to a model endpoint.
 from __future__ import annotations
 
 import argparse
-from decimal import Decimal
+from decimal import Decimal, InvalidOperation
 import hashlib
 from http.client import HTTPException
 import json
@@ -33,6 +33,11 @@ MAX_FILES_BYTES = 256 * 1024
 
 class ClientError(Exception):
     """An error with a deliberately safe, user-facing message."""
+
+    def __init__(self, message: str, *, accounting: dict | None = None, cost_unknown: bool = False):
+        super().__init__(message)
+        self.accounting = accounting
+        self.cost_unknown = cost_unknown
 
 
 class ConfigChangedError(ClientError):
@@ -122,7 +127,8 @@ def stable_request_id(
     return "local-" + hashlib.sha256(canonical.encode("utf-8")).hexdigest()
 
 
-def _safe_http_error(status: int) -> ClientError:
+def _safe_http_error(status: int, *, accounting: dict | None = None,
+                     cost_unknown: bool = False) -> ClientError:
     messages = {
         400: "Backend rejected the request.",
         401: "Assignment token is missing, invalid, expired, or revoked.",
@@ -136,7 +142,33 @@ def _safe_http_error(status: int) -> ClientError:
         503: "Backend is unavailable or busy.",
         504: "Model request timed out; the reserved call remains consumed.",
     }
-    return ClientError(messages.get(status, "Backend request failed."))
+    return ClientError(messages.get(status, "Backend request failed."),
+                       accounting=accounting, cost_unknown=cost_unknown)
+
+
+def read_accounting(value: dict | None) -> dict | None:
+    """Keep the backend's estimate and token counts without recalculating prices."""
+    if value is None:
+        return None
+    if (not isinstance(value, dict) or not isinstance(value.get("model_name"), str)
+            or not isinstance(value.get("usage"), dict)
+            or not isinstance(value.get("pricing"), (dict, type(None)))):
+        raise ValueError("Invalid accounting data")
+    usage = {key: value["usage"].get(key) for key in (
+        "input_tokens", "output_tokens", "cached_input_tokens", "reasoning_tokens",
+    )}
+    if any(count is not None and (type(count) is not int or count < 0) for count in usage.values()):
+        raise ValueError("Invalid token count")
+    amount = value.get("estimated_cost_usd")
+    if amount is not None:
+        try:
+            valid_amount = isinstance(amount, str) and Decimal(amount).is_finite() and Decimal(amount) >= 0
+        except InvalidOperation:
+            valid_amount = False
+        if not valid_amount:
+            raise ValueError("Invalid estimated cost")
+    return {"model_name": value["model_name"], "usage": usage,
+            "estimated_cost_usd": amount, "pricing": value.get("pricing")}
 
 
 def get_assignment_config(
@@ -189,6 +221,7 @@ def request_feedback(
     files: list[dict] | None = None,
     evidence: list[dict] | None = None,
     request_id: str | None = None,
+    run_id: str | None = None,
     platform_submission_id: str | None = None,
     submitted_at: str | None = None,
     student_identifier: str | None = None,
@@ -221,6 +254,8 @@ def request_feedback(
     payload = {"request_id": identifier, "target_id": target_id, "guidance": guidance or ""}
     if config_revision is not None:
         payload["config_revision"] = config_revision
+    if run_id is not None:
+        payload["run_id"] = run_id
     if files is None:
         payload["code"] = code
     else:
@@ -253,47 +288,49 @@ def request_feedback(
     )
     opener = build_opener(ProxyHandler({}), _NoRedirects())
     deadline = time.monotonic() + timeout
+    request_accepted = False
     while True:
         remaining = deadline - time.monotonic()
         if remaining <= 0:
-            raise ClientError("Backend request timed out. Reuse this request ID to check its saved state.")
+            raise ClientError("Backend request timed out. Reuse this request ID to check its saved state.",
+                              cost_unknown=request_accepted)
         try:
             try:
                 response = opener.open(request, timeout=min(remaining, 30))
             except HTTPError as error:
-                if error.code == 409:
-                    try:
-                        raw_error = error.read(MAX_RESPONSE_BYTES + 1)
-                        problem = json.loads(raw_error) if len(raw_error) <= MAX_RESPONSE_BYTES else None
-                    except (ValueError, OSError):
-                        problem = None
-                    finally:
-                        error.close()
-                    if (isinstance(problem, dict) and problem.get("request_id") == identifier
-                            and isinstance(problem.get("error"), dict)
-                            and problem["error"].get("code") == "config_changed"):
-                        raise ConfigChangedError("Assignment configuration changed; collect inputs again.") from None
-                    raise _safe_http_error(409) from None
-                if error.code != 429:
-                    error.close()
-                    raise _safe_http_error(error.code) from None
                 response = error
             with response:
                 status = response.getcode()
                 retry_after = response.headers.get("Retry-After", "2")
                 raw = response.read(MAX_RESPONSE_BYTES + 1)
                 if len(raw) > MAX_RESPONSE_BYTES or token.encode("ascii") in raw:
-                    raise ClientError("Backend returned an invalid response.")
+                    raise ClientError("Backend returned an invalid response.", cost_unknown=True)
         except (TimeoutError, socket.timeout):
-            raise ClientError("Backend request timed out. Reuse this request ID to check its saved state.") from None
+            raise ClientError("Backend request timed out. Reuse this request ID to check its saved state.",
+                              cost_unknown=True) from None
         except (URLError, OSError, ValueError, HTTPException):
-            raise ClientError("Cannot reach the backend. Check its address and running process.") from None
+            raise ClientError("Cannot reach the backend. Check its address and running process.",
+                              cost_unknown=True) from None
         if status == 200:
             break
         try:
             pending = json.loads(raw)
         except (UnicodeError, ValueError, TypeError):
             pending = None
+        if status not in (202, 429):
+            problem = pending if isinstance(pending, dict) and pending.get("request_id") == identifier else {}
+            code = problem.get("error", {}).get("code") if isinstance(problem.get("error"), dict) else None
+            if status == 409 and code == "config_changed":
+                raise ConfigChangedError("Assignment configuration changed; collect inputs again.")
+            try:
+                accounting = read_accounting(problem.get("accounting"))
+            except ValueError:
+                raise ClientError("Backend returned invalid accounting data.", cost_unknown=True) from None
+            raise _safe_http_error(status, accounting=accounting, cost_unknown=(
+                request_accepted or (status >= 500 and not problem) or "accounting" in problem or code in {
+                    "model_error", "upstream_timeout", "processing", "interrupted", "backend_error",
+                }
+            ))
         if status == 429:
             if (not isinstance(pending, dict) or pending.get("request_id") != identifier
                     or not isinstance(pending.get("error"), dict)
@@ -301,7 +338,9 @@ def request_feedback(
                 raise _safe_http_error(429)
         elif (status != 202 or not isinstance(pending, dict)
                 or pending.get("request_id") != identifier or pending.get("status") != "processing"):
-            raise ClientError("Backend returned an invalid response.")
+            raise ClientError("Backend returned an invalid response.", cost_unknown=True)
+        else:
+            request_accepted = True
         try:
             delay = float(retry_after)
             if not math.isfinite(delay):
@@ -310,10 +349,14 @@ def request_feedback(
             delay = 2
         remaining = deadline - time.monotonic()
         if remaining <= 0:
-            raise ClientError("Backend request timed out. Reuse this request ID to check its saved state.")
+            raise ClientError("Backend request timed out. Reuse this request ID to check its saved state.",
+                              cost_unknown=request_accepted)
         time.sleep(min(max(1, min(delay, 5)), remaining))
+    accounting = None
     try:
         result = json.loads(raw)
+        if isinstance(result, dict) and result.get("request_id") == identifier:
+            accounting = read_accounting(result.get("accounting"))
         if (
             not isinstance(result, dict)
             or result.get("request_id") != identifier
@@ -375,6 +418,8 @@ def request_feedback(
         safe = {"request_id": identifier, "feedback_text": result["feedback_text"],
                 "engine": engine, "provider": provider, "requested_model": requested_model,
                 "model_name": result["model_name"], "usage": usage}
+        if "accounting" in result:
+            safe["accounting"] = accounting
         if "items" in result:
             safe["items"] = clean_items
         if "failure_feedback" in result:
@@ -428,7 +473,8 @@ def request_feedback(
             raise ValueError
         return safe
     except (UnicodeError, ValueError, TypeError):
-        raise ClientError("Backend returned an invalid response.") from None
+        raise ClientError("Backend returned an invalid response.", accounting=accounting,
+                          cost_unknown=True) from None
 
 
 def complete_submission(

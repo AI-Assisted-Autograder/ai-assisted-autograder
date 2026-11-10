@@ -1,5 +1,6 @@
 """Gemini adapter for an injected Vertex client or a Gemini API-key client."""
 
+from dataclasses import replace
 from math import isfinite
 import os
 
@@ -7,7 +8,7 @@ import httpx
 from google import genai
 from google.genai import errors, types
 
-from ..models import FeedbackRequest, FeedbackResponse
+from ..models import FeedbackRequest, FeedbackResponse, TokenUsage
 from ..PromptBuilder import PromptBuilder
 from .FeedbackParser import parse_feedback
 from .ILLMProvider import ProviderError
@@ -164,45 +165,65 @@ class GeminiProvider:
                 "invalid_provider_response", "Gemini returned an invalid response.",
             ) from None
 
-        prompt_feedback = response.prompt_feedback
-        if prompt_feedback and prompt_feedback.block_reason not in (
-            None, types.BlockedReason.BLOCKED_REASON_UNSPECIFIED,
-        ):
-            raise ProviderError("provider_refusal", "Gemini declined this request.")
-        if not response.candidates or len(response.candidates) != 1:
-            raise ProviderError(
-                "invalid_provider_response", "Gemini returned no unique feedback candidate.",
+        usage = None
+        model_name = response.model_version or self.model
+        try:
+            metadata = response.usage_metadata
+            generated_counts = (
+                [metadata.candidates_token_count, metadata.thoughts_token_count]
+                if metadata else []
             )
-        candidate = response.candidates[0]
-        if candidate.finish_reason in (
-            types.FinishReason.SAFETY, types.FinishReason.RECITATION,
-            types.FinishReason.BLOCKLIST, types.FinishReason.PROHIBITED_CONTENT,
-            types.FinishReason.SPII,
-        ):
-            raise ProviderError("provider_refusal", "Gemini declined this request.")
-        if candidate.finish_reason != types.FinishReason.STOP:
-            raise ProviderError(
-                "incomplete_provider_response",
-                f"Gemini did not finish generating feedback ({candidate.finish_reason}).",
+            known_counts = [count for count in generated_counts if count is not None]
+            usage = TokenUsage(
+                input_tokens=metadata.prompt_token_count if metadata else None,
+                output_tokens=sum(known_counts) if known_counts else None,
+                cached_input_tokens=metadata.cached_content_token_count if metadata else None,
+                reasoning_tokens=metadata.thoughts_token_count if metadata else None,
             )
-        # Exclude thinking parts; neither tool calls nor thoughts are feedback.
-        parts = candidate.content.parts if candidate.content else []
-        output = "".join(part.text or "" for part in parts or [] if not part.thought)
-        usage = response.usage_metadata
-        generated_counts = (
-            [usage.candidates_token_count, usage.thoughts_token_count]
-            if usage else []
-        )
-        known_counts = [count for count in generated_counts if count is not None]
-        return parse_feedback(
-            output,
-            request=req,
-            provider=self.name,
-            model_name=response.model_version or self.model,
-            prompt_version=prompt.version,
-            input_tokens=usage.prompt_token_count if usage else None,
-            output_tokens=sum(known_counts) if known_counts else None,
-        )
+            prompt_feedback = response.prompt_feedback
+            if prompt_feedback and prompt_feedback.block_reason not in (
+                None, types.BlockedReason.BLOCKED_REASON_UNSPECIFIED,
+            ):
+                raise ProviderError("provider_refusal", "Gemini declined this request.")
+            if not response.candidates or len(response.candidates) != 1:
+                raise ProviderError(
+                    "invalid_provider_response", "Gemini returned no unique feedback candidate.",
+                )
+            candidate = response.candidates[0]
+            if candidate.finish_reason in (
+                types.FinishReason.SAFETY, types.FinishReason.RECITATION,
+                types.FinishReason.BLOCKLIST, types.FinishReason.PROHIBITED_CONTENT,
+                types.FinishReason.SPII,
+            ):
+                raise ProviderError("provider_refusal", "Gemini declined this request.")
+            if candidate.finish_reason != types.FinishReason.STOP:
+                raise ProviderError(
+                    "incomplete_provider_response",
+                    f"Gemini did not finish generating feedback ({candidate.finish_reason}).",
+                )
+            # Exclude thinking parts; neither tool calls nor thoughts are feedback.
+            parts = candidate.content.parts if candidate.content else []
+            output = "".join(part.text or "" for part in parts or [] if not part.thought)
+            result = parse_feedback(
+                output,
+                request=req,
+                provider=self.name,
+                model_name=model_name,
+                prompt_version=prompt.version,
+                input_tokens=usage.input_tokens,
+                output_tokens=usage.output_tokens,
+            )
+            return replace(result, cached_input_tokens=usage.cached_input_tokens,
+                           reasoning_tokens=usage.reasoning_tokens)
+        except ProviderError as exc:
+            exc.usage = usage
+            exc.model_name = model_name
+            raise
+        except ValueError:
+            raise ProviderError(
+                "invalid_provider_response", "Gemini returned an invalid response.",
+                usage=usage, model_name=model_name,
+            ) from None
 
     def estimated_cost(self, req: FeedbackRequest) -> float | None:
         """Unknown until the caller supplies a pricing policy."""

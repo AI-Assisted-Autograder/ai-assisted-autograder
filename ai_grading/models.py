@@ -218,6 +218,16 @@ class FailureFeedbackItem:
 
 
 @dataclass(frozen=True, config=CONTRACT_CONFIG)
+class TokenUsage:
+    """Provider usage; cached input and reasoning are subsets of their totals."""
+
+    input_tokens: Count | None = None
+    output_tokens: Count | None = None
+    cached_input_tokens: Count | None = None
+    reasoning_tokens: Count | None = None
+
+
+@dataclass(frozen=True, config=CONTRACT_CONFIG)
 class FeedbackResponse:
     """One provider's result, before comparison, selection, and persistence.
 
@@ -232,10 +242,21 @@ class FeedbackResponse:
     suggested_score: Score | None = None
     input_tokens: Count | None = None
     output_tokens: Count | None = None
+    cached_input_tokens: Count | None = field(default=None, kw_only=True)
+    reasoning_tokens: Count | None = field(default=None, kw_only=True)
     rubric_id: Identifier | None = field(default=None, kw_only=True)
     items: tuple[FeedbackItem, ...] = ()
     failure_feedback: tuple[FailureFeedbackItem, ...] = ()
     grading_status: Literal["complete", "pending_regrade"] = "complete"
+
+    @property
+    def usage(self) -> TokenUsage:
+        return TokenUsage(
+            input_tokens=self.input_tokens,
+            output_tokens=self.output_tokens,
+            cached_input_tokens=self.cached_input_tokens,
+            reasoning_tokens=self.reasoning_tokens,
+        )
 
 
 @dataclass(frozen=True, config=CONTRACT_CONFIG)

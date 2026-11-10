@@ -1,11 +1,12 @@
 """Pitt AI Connect adapter using the Portkey Chat Completions endpoint."""
 
+from dataclasses import replace
 from math import isfinite
 import os
 
 import httpx
 
-from ..models import FeedbackRequest, FeedbackResponse
+from ..models import FeedbackRequest, FeedbackResponse, TokenUsage
 from ..PromptBuilder import PromptBuilder
 from .FeedbackParser import parse_feedback
 from .ILLMProvider import ProviderError
@@ -83,10 +84,26 @@ class PittProvider:
                 f"Pitt rejected the request (HTTP {response.status_code}).",
                 retryable=response.status_code in (408, 429) or response.status_code >= 500,
             )
+        usage = None
+        model_name = self.model
         try:
             data = response.json()
             if not isinstance(data, dict):
                 raise ValueError("response must be an object")
+            raw_usage = data.get("usage") or {}
+            if not isinstance(raw_usage, dict):
+                raise ValueError("usage must be an object")
+            input_details = raw_usage.get("prompt_tokens_details") or {}
+            output_details = raw_usage.get("completion_tokens_details") or {}
+            if not isinstance(input_details, dict) or not isinstance(output_details, dict):
+                raise ValueError("token details must be objects")
+            usage = TokenUsage(
+                input_tokens=raw_usage.get("prompt_tokens"),
+                output_tokens=raw_usage.get("completion_tokens"),
+                cached_input_tokens=input_details.get("cached_tokens"),
+                reasoning_tokens=output_details.get("reasoning_tokens"),
+            )
+            model_name = data.get("model") or self.model
             choices = data.get("choices")
             if not isinstance(choices, list) or len(choices) != 1:
                 raise ValueError("response must contain one choice")
@@ -103,21 +120,25 @@ class PittProvider:
             output = message.get("content")
             if not isinstance(output, str):
                 raise ValueError("feedback must be text")
-            usage = data.get("usage") or {}
-            if not isinstance(usage, dict):
-                raise ValueError("usage must be an object")
-            return parse_feedback(
+            result = parse_feedback(
                 output,
                 request=req,
                 provider=self.name,
-                model_name=data.get("model") or self.model,
+                model_name=model_name,
                 prompt_version=prompt.version,
-                input_tokens=usage.get("prompt_tokens"),
-                output_tokens=usage.get("completion_tokens"),
+                input_tokens=usage.input_tokens,
+                output_tokens=usage.output_tokens,
             )
+            return replace(result, cached_input_tokens=usage.cached_input_tokens,
+                           reasoning_tokens=usage.reasoning_tokens)
+        except ProviderError as exc:
+            exc.usage = usage
+            exc.model_name = model_name
+            raise
         except ValueError:
             raise ProviderError(
                 "invalid_provider_response", "Pitt returned an invalid response.",
+                usage=usage, model_name=model_name,
             ) from None
 
     def estimated_cost(self, req: FeedbackRequest) -> float | None:

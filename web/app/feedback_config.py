@@ -14,6 +14,7 @@ from pydantic import AfterValidator, BaseModel, ConfigDict, Field, TypeAdapter, 
 from ai_grading.FileResolver import FileResolver
 from ai_grading.PromptBuilder import PromptBuilder
 from ai_grading.models import AnalysisConfig, GradingTarget, Rubric, Score, TargetKind
+from ai_grading.pricing import ModelPrice, RequestAccounting, default_model_prices
 
 
 Identifier = Annotated[str, Field(min_length=1, max_length=128, pattern=r"^[A-Za-z0-9_.:-]+$")]
@@ -38,6 +39,15 @@ class BackendConfig(StrictModel):
     timeout_seconds: float = Field(default=240.0, gt=0, le=300)
     max_concurrency: int = Field(default=2, ge=1, le=64)
     max_body_bytes: int = Field(default=65_536, ge=1, le=1_048_576)
+    model_prices: list[ModelPrice] = Field(default_factory=default_model_prices)
+
+    @field_validator("model_prices")
+    @classmethod
+    def unique_prices(cls, value: list[ModelPrice]) -> list[ModelPrice]:
+        keys = [(price.engine, price.model, price.effective_from) for price in value]
+        if len(keys) != len(set(keys)):
+            raise ValueError("model prices must have unique engine, model and effective date")
+        return value
 
     @field_validator("allowed_models")
     @classmethod
@@ -286,6 +296,9 @@ class RequestRecord(StrictModel):
     status: Literal["processing", "completed", "failed", "interrupted"]
     created_at: datetime
     updated_at: datetime
+    run_id: Identifier | None = None
+    pricing: ModelPrice | None = None
+    accounting: RequestAccounting | None = None
     result: dict[str, Any] | None = None
     error_code: Literal[
         "model_error", "upstream_timeout", "backend_auth_unavailable", "interrupted",
@@ -316,6 +329,7 @@ class State(StrictModel):
     assignments: dict[Identifier, AssignmentAccess]
     tokens: dict[Digest, TokenRecord]
     requests: dict[Identifier, dict[Identifier, RequestRecord]] = Field(default_factory=dict)
+    cost_tracking_started_at: datetime | None = None
 
     @model_validator(mode="after")
     def validate_relationships(self) -> "State":

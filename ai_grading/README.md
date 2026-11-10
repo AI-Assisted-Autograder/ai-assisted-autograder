@@ -122,6 +122,51 @@ seconds for the entire hook. Backend request/output limits are initialized with
 provider calls remain charged to the call quota. Pitt requests bypass gateway
 cache; backend replay still applies.
 
+## Estimated API cost
+
+The backend prices reported token usage once per request and persists it with
+the request's model, run ID and price snapshot. The hidden autograder output
+shows the current run's estimate; the assignment list and detail pages show the
+cumulative estimate across submissions and reruns. Polling and intentional
+request replay do not add cost. Functional scores are unaffected.
+
+Prices are configured centrally in `config.model_prices` in the backend state
+file. Each entry uses USD per million tokens and an effective date (UTC):
+
+```json
+{
+  "engine": "pitt",
+  "model": "@pitt-ai-connect-google-vertex/gemini-4-argon",
+  "response_model": "gemini-4-argon",
+  "effective_from": "2026-10-13",
+  "input_per_million": "2.00",
+  "cached_input_per_million": "0.10",
+  "output_per_million": "10.00",
+  "basis": "Google Cloud Standard / Global; public rates including applicable credits"
+}
+```
+
+The latest effective entry for the exact engine/model is selected when a request
+is reserved. The actual response model must match `response_model`. Add an entry
+when switching models; missing prices leave usage recorded and cost unavailable.
+Stop Web before editing its state file, preserve existing tokens, quota and
+request records, then restart. Do not reinitialize state. Existing request
+estimates keep their original prices.
+
+Defaults cover Pitt Gemini 4 Argon at the [Google Cloud Standard/Global public
+rates](https://cloud.google.com/model-garden/pricing): $2 input, $0.10 cached input
+and $10 output through November 30, 2026; $4, $0.20 and $20 from December 1.
+These are estimates including the advertised promotional credits, not Pitt
+invoices; configure different rates if the Pitt route uses another region or
+pricing arrangement. Cached tokens are subtracted from ordinary input, and
+output already includes reasoning tokens.
+
+Usage remains recorded when feedback parsing or grading fails. A provider
+response arriving after the hook ends can update the Web total, but cannot
+rewrite the finished autograder log. Missing usage, missing prices and older
+requests without price snapshots are shown as unpriced, not zero-cost calls.
+The Web pages show the tracking start and unpriced/pending request counts.
+
 ## RentACat feedback
 
 - **Playwright:** preserves the prototype's rubric, test cases and 11 ordered

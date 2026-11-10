@@ -1,6 +1,6 @@
 from typing import Protocol
 
-from ..models import FeedbackRequest, FeedbackResponse
+from ..models import FeedbackRequest, FeedbackResponse, TokenUsage
 
 
 class ProviderError(Exception):
@@ -8,6 +8,7 @@ class ProviderError(Exception):
 
     def __init__(
         self, code: str, message: str, *, retryable: bool = False, attempts: int = 1,
+        usage: TokenUsage | None = None, model_name: str | None = None,
     ):
         if type(attempts) is not int or attempts < 1:
             raise ValueError("attempts must be a positive integer")
@@ -16,6 +17,8 @@ class ProviderError(Exception):
         self.message = message
         self.retryable = retryable
         self.attempts = attempts
+        self.usage = usage
+        self.model_name = model_name
 
 
 class ILLMProvider(Protocol):

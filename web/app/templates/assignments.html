@@ -16,6 +16,7 @@
             <th>Language</th>
             <th class="num">Targets</th>
             <th class="num">Submissions</th>
+            <th class="num">Estimated API cost (USD)</th>
         </tr>
     </thead>
     <tbody>
@@ -30,6 +31,23 @@
             <td>{{ a.language | title }}</td>
             <td class="num">{{ a.target_count }}</td>
             <td class="num">{{ a.submission_count }}</td>
+            <td class="num">
+                {% set cost = cost_summaries.get(a.id | string) %}
+                {% if cost is none %}
+                <span class="sub">Not tracked</span>
+                {% elif cost.priced_requests == 0 and (cost.unpriced_requests or cost.pending_requests) %}
+                Unavailable
+                {% else %}
+                <span class="nowrap">{{ cost.estimated_cost_usd | usd }}</span>
+                {% if cost.unpriced_requests or cost.pending_requests %}<span class="badge muted">Partial</span>{% endif %}
+                {% endif %}
+                {% if cost is not none %}
+                {% if cost.unpriced_requests or cost.pending_requests %}
+                <div class="sub">{{ cost.unpriced_requests }} unpriced · {{ cost.pending_requests }} pending</div>
+                {% endif %}
+                {% if cost.tracking_since %}<div class="sub">Since {{ cost.tracking_since | when }}</div>{% endif %}
+                {% endif %}
+            </td>
         </tr>
         {% endfor %}
     </tbody>

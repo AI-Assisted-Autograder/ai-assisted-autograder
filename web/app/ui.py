@@ -51,6 +51,10 @@ def number(value: Decimal | None) -> str:
     return format(value.normalize(), "f")
 
 
+def usd(value: str) -> str:
+    return f"${Decimal(value):.6f}"
+
+
 def submission_state(action: Action, grading_mode: str) -> tuple[str, str]:
     """A label and badge style for where a submission stands (AD-11)."""
     if action is Action.REEMIT:
@@ -74,6 +78,7 @@ LANGUAGES = ("JAVA", "PYTHON", "TYPESCRIPT", "JAVASCRIPT")
 
 templates.env.filters["when"] = when
 templates.env.filters["number"] = number
+templates.env.filters["usd"] = usd
 templates.env.globals["submission_state"] = submission_state
 templates.env.globals["TARGET_STATES"] = TARGET_STATES
 templates.env.globals["GRADING_MODES"] = GRADING_MODES
@@ -87,7 +92,11 @@ def not_found(request: Request, message: str):
 
 @router.get("/")
 def assignments(request: Request, repo: IGradingRepository = Depends(get_repository)):
-    return templates.TemplateResponse(request, "assignments.html", {"assignments": repo.list_assignments()})
+    store = getattr(request.app.state, "feedback_store", None)
+    return templates.TemplateResponse(request, "assignments.html", {
+        "assignments": repo.list_assignments(),
+        "cost_summaries": store.cost_summaries() if store is not None else {},
+    })
 
 
 def form_error(error: ValueError | ConflictError) -> tuple[str, int]:
@@ -166,11 +175,13 @@ def assignment_page(
             submissions, target_summaries = repo.list_submissions(assignment_id), []
     except NotFoundError:
         return not_found(request, "That assignment does not exist.")
+    store = getattr(request.app.state, "feedback_store", None)
     return templates.TemplateResponse(
         request,
         "assignment.html",
         {
             "assignment": config,
+            "cost_summary": store.cost_summary(str(assignment_id)) if store is not None else None,
             "by_target": by_target,
             "submissions": submissions,
             "target_summaries": target_summaries,
