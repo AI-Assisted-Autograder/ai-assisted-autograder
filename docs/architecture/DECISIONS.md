@@ -25,6 +25,7 @@ contributor needs when the constraint stops making obvious sense.
   - [AD-14. Only the active attempt is graded or shown](#ad-14-only-the-active-attempt-is-graded-or-shown)
 - [Why AI generation fails](#why-ai-generation-fails)
 - [Open questions](#open-questions)
+  - [Answered](#answered)
   - [OQ-9 and OQ-10 deserve a flag](#oq-9-and-oq-10-deserve-a-flag)
 - [Changes to make in the SRS](#changes-to-make-in-the-srs)
 - [Naming](#naming)
