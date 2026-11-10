@@ -38,6 +38,8 @@ jobs:
         env:
           GRADESCOPE_USERNAME: ${{ secrets.GRADESCOPE_USERNAME }}
           GRADESCOPE_PASSWORD: ${{ secrets.GRADESCOPE_PASSWORD }}
+          INSTRUCTOR_USERNAME: ${{ secrets.INSTRUCTOR_USERNAME }}
+          INSTRUCTOR_PASSWORD: ${{ secrets.INSTRUCTOR_PASSWORD }}
 
       - name: Upload Playwright report
         if: always()
