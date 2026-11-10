@@ -91,6 +91,7 @@ class SqlGradingRepository(IGradingRepository):
                     platform_submission_id=ref.platform_submission_id,
                     submitted_at=ref.submitted_at,
                     student_identifier=ref.student_identifier,
+                    is_active_attempt=False,
                 )
                 .on_conflict_do_nothing(index_elements=["assignment_id", "platform_submission_id"])
                 .returning(Submission.id)
@@ -103,6 +104,25 @@ class SqlGradingRepository(IGradingRepository):
                     Submission.platform_submission_id == ref.platform_submission_id,
                 )
             )
+
+    def sync_active_submissions(
+        self, assignment_id: uuid.UUID, platform_submission_ids: list[str],
+    ) -> list[str]:
+        with self._sessions.begin() as s:
+            if s.get(Assignment, assignment_id, with_for_update=True) is None:
+                raise NotFoundError(f"Assignment {assignment_id} not found")
+            selected = set(platform_submission_ids)
+            known = set(s.scalars(
+                select(Submission.platform_submission_id).where(Submission.assignment_id == assignment_id)
+            ))
+            missing = sorted(selected - known)
+            if missing:
+                return missing
+            s.execute(
+                update(Submission).where(Submission.assignment_id == assignment_id)
+                .values(is_active_attempt=Submission.platform_submission_id.in_(selected))
+            )
+            return []
 
     def create_targets_default_needed(self, submission_id: uuid.UUID) -> list[SubmissionTargetRef]:
         with self._sessions.begin() as s:
@@ -172,9 +192,63 @@ class SqlGradingRepository(IGradingRepository):
             rows.sort(key=lambda r: sort_key(r[1].display_order, r[1].identifier))
             return ActionResult(action, tuple(_ref(st, gt) for st, gt in rows))
 
-    def authorize_for_grading(self, submission_id: uuid.UUID) -> None:
+    def get_ai_execution_action(self, submission_id: uuid.UUID) -> str:
         with self._sessions.begin() as s:
-            self._submission(s, submission_id).ai_authorized_at = func.now()
+            sub = self._submission(s, submission_id)
+            mode = s.scalar(select(Assignment.grading_mode).where(Assignment.id == sub.assignment_id))
+            if mode == "IMMEDIATE":
+                return "execute"
+            if sub.ai_authorized_at is None:
+                return "deferred"
+            return "execute" if sub.is_active_attempt else "inactive"
+
+    def defer_submission_target(self, submission_id: uuid.UUID, target: str) -> str:
+        with self._sessions.begin() as s:
+            st = self._target(s, submission_id, target, lock=True)
+            # Match target-result writers' lock order; serialize the decision
+            # with submission authorization and completion updates.
+            sub = s.get(Submission, submission_id, with_for_update=True, populate_existing=True)
+            mode = s.scalar(select(Assignment.grading_mode).where(Assignment.id == sub.assignment_id))
+            if mode == "IMMEDIATE":
+                return "execute"
+            if sub.ai_authorized_at is not None:
+                return "execute" if sub.is_active_attempt else "inactive"
+            check_gradable(target, st.ai_needed)
+            st.completed_at = None
+            sub.ai_graded_submitted_at = None
+            return "deferred"
+
+    def authorize_for_grading(self, submission_id: uuid.UUID, trigger_source: str) -> bool:
+        if trigger_source not in ("PENDING_NIGHTLY", "AI_FAILURES"):
+            raise ValueError("trigger_source must be PENDING_NIGHTLY or AI_FAILURES")
+        with self._sessions.begin() as s:
+            sub = s.get(Submission, submission_id, with_for_update=True)
+            if sub is None:
+                raise NotFoundError(f"Submission {submission_id} not found")
+            assignment = s.get(Assignment, sub.assignment_id)
+            if not assignment.is_active or not sub.is_active_attempt:
+                raise ConflictError("Submission is not active")
+            if trigger_source == "AI_FAILURES":
+                if sub.ai_status != "FAILED" or (
+                    assignment.grading_mode == "NIGHTLY" and sub.ai_authorized_at is None
+                ):
+                    raise ConflictError("Submission is not eligible for AI failure retry")
+                return False
+            unfinished = s.scalar(select(exists().where(
+                SubmissionTarget.submission_id == submission_id,
+                SubmissionTarget.ai_needed,
+                SubmissionTarget.completed_at.is_(None),
+            )))
+            eligible = (
+                sub.ai_authorized_at is None if sub.ai_status == "FAILED"
+                else sub.ai_graded_submitted_at is None and unfinished
+            )
+            if assignment.grading_mode != "NIGHTLY" or not eligible:
+                raise ConflictError("Submission is not eligible for nightly processing")
+            if sub.ai_authorized_at is not None:
+                return False
+            sub.ai_authorized_at = func.now()
+            return True
 
     def get_test_results(self, submission_id: uuid.UUID, target: str) -> list[TestResultRecord]:
         with self._sessions.begin() as s:
@@ -356,8 +430,14 @@ class SqlGradingRepository(IGradingRepository):
                     Assignment.grading_mode == mode,
                     Assignment.is_active,
                     Submission.is_active_attempt,
-                    Submission.ai_graded_submitted_at.is_(None),
-                    pending,
+                    or_(
+                        and_(
+                            Submission.ai_status.is_distinct_from("FAILED"),
+                            Submission.ai_graded_submitted_at.is_(None),
+                            pending,
+                        ),
+                        and_(Submission.ai_status == "FAILED", Submission.ai_authorized_at.is_(None)),
+                    ),
                 )
                 .order_by(Submission.submitted_at, Submission.id)
             ).all()
@@ -368,14 +448,19 @@ class SqlGradingRepository(IGradingRepository):
                 for sub, a in rows
             ]
 
-    def list_submissions_failed_ai(self) -> list[SubmissionLocator]:
+    def list_submissions_failed_ai(self, retry_eligible: bool = False) -> list[SubmissionLocator]:
         with self._sessions.begin() as s:
-            rows = s.execute(
+            query = (
                 select(Submission, Assignment)
                 .join(Assignment, Submission.assignment_id == Assignment.id)
                 .where(Assignment.is_active, Submission.is_active_attempt, Submission.ai_status == "FAILED")
                 .order_by(Submission.submitted_at, Submission.id)
-            ).all()
+            )
+            if retry_eligible:
+                query = query.where(or_(
+                    Assignment.grading_mode == "IMMEDIATE", Submission.ai_authorized_at.is_not(None),
+                ))
+            rows = s.execute(query).all()
             return [
                 SubmissionLocator(
                     sub.id, a.platform, a.platform_assignment_id, sub.platform_submission_id, sub.student_identifier

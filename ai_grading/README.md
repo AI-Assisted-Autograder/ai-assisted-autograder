@@ -16,17 +16,23 @@ For credentials, token setup and deployment, see the
    then sends each target to `POST /v1/feedback`. Evidence respects test visibility
    and explicit pass/fail status; functional-test feedback selects failed rows only.
 3. The backend authenticates the assignment token, checks the configuration
-   revision and input scope, reserves call quota, and invokes the DB-selected
-   provider with the current rubric.
+   revision and submission authorization. An unauthorized `NIGHTLY` submission
+   is registered for scheduled processing and returned as `deferred`, without
+   reserving quota or calling a model. Authorized and `IMMEDIATE` requests pass
+   input checks, reserve call quota, and invoke the DB-selected provider.
 4. AI grading adds one scored block per configured item. Functional-test feedback
    appends explanations inside the original failed tests without changing scores;
    when no eligible failures exist, the hook skips AI. Teacher evidence and errors
    are retained in `results/ai_evidence.json` and logged only when Gradescope's
    `stdout_visibility` is `hidden` (the default).
 
-This path does not write submissions, test results or feedback to PostgreSQL and
-is not connected to nightly scheduling. Backend JSON stores token hashes, call
-quota and replay responses.
+With submission metadata, PostgreSQL stores submission/target metadata, provider
+feedback and final AI outcomes. A normally deferred run reports neither success
+nor failure; scored items remain provisional until the authorized rerun. A run
+with no eligible feedback reports `SUCCEEDED` with `completion_reason=not_needed`.
+Automation authorizes each pending submission before triggering its rerun; the
+assignment stays `NIGHTLY`. Student source and functional test-result rows are
+not stored by this path. Backend JSON retains quota, replay and cost accounting.
 
 | Engine | Backend credentials | Adapter |
 | --- | --- | --- |
@@ -72,8 +78,10 @@ submission rerun and Regrade All therefore create independent AI attempts for
 each eligible submission, without additional configuration. Request IDs include
 this UUID, the submission ID when available, source content, grading-relevant
 observations and the configuration revision. Targets, configuration refreshes and
-HTTP polling share the same run UUID. Missing submission metadata does not prevent
-local runs. Existing instructor diagnostics record the run and request IDs.
+HTTP polling share the same run UUID. `NIGHTLY` requests require valid submission
+metadata to check authorization; `IMMEDIATE` local calls can omit it. Existing
+instructor diagnostics record the run and request IDs. Deferred or inactive
+responses end the hook's AI requests immediately, without polling or a model cost.
 
 Use `gradescope_feedback.py --run-id ORIGINAL_RUN_ID` only to intentionally replay
 the same submission, inputs and configuration. Runtime metadata such as

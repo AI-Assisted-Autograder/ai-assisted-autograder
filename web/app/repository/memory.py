@@ -123,7 +123,7 @@ class _Submission:
     ai_authorized_at: datetime | None = None
     ai_graded_submitted_at: datetime | None = None
     ai_status: str | None = None
-    is_active_attempt: bool = True
+    is_active_attempt: bool = False
 
 
 @dataclass
@@ -262,6 +262,20 @@ class InMemoryRepository(IGradingRepository):
         self.submissions[sub.id] = sub
         return sub.id
 
+    def sync_active_submissions(
+        self, assignment_id: uuid.UUID, platform_submission_ids: list[str],
+    ) -> list[str]:
+        if assignment_id not in self.assignments:
+            raise NotFoundError(f"Assignment {assignment_id} not found")
+        rows = [sub for sub in self.submissions.values() if sub.assignment_id == assignment_id]
+        selected = set(platform_submission_ids)
+        missing = sorted(selected - {sub.platform_submission_id for sub in rows})
+        if missing:
+            return missing
+        for sub in rows:
+            sub.is_active_attempt = sub.platform_submission_id in selected
+        return []
+
     def create_targets_default_needed(self, submission_id: uuid.UUID) -> list[SubmissionTargetRef]:
         sub = self._submission(submission_id)
         for gt in self._registered(sub.assignment_id):
@@ -297,8 +311,51 @@ class InMemoryRepository(IGradingRepository):
         pending = self._refs(submission_id, lambda st: st.ai_needed and st.completed_at is None)
         return ActionResult(action, tuple(pending))
 
-    def authorize_for_grading(self, submission_id: uuid.UUID) -> None:
-        self._submission(submission_id).ai_authorized_at = _now()
+    def get_ai_execution_action(self, submission_id: uuid.UUID) -> str:
+        sub = self._submission(submission_id)
+        if self.assignments[sub.assignment_id].grading_mode == "IMMEDIATE":
+            return "execute"
+        if sub.ai_authorized_at is None:
+            return "deferred"
+        return "execute" if sub.is_active_attempt else "inactive"
+
+    def defer_submission_target(self, submission_id: uuid.UUID, target: str) -> str:
+        action = self.get_ai_execution_action(submission_id)
+        if action != "deferred":
+            return action
+        st = self._target(submission_id, target)
+        check_gradable(target, st.ai_needed)
+        st.completed_at = None
+        self._submission(submission_id).ai_graded_submitted_at = None
+        return "deferred"
+
+    def authorize_for_grading(self, submission_id: uuid.UUID, trigger_source: str) -> bool:
+        if trigger_source not in ("PENDING_NIGHTLY", "AI_FAILURES"):
+            raise ValueError("trigger_source must be PENDING_NIGHTLY or AI_FAILURES")
+        sub = self._submission(submission_id)
+        assignment = self.assignments[sub.assignment_id]
+        if not assignment.is_active or not sub.is_active_attempt:
+            raise ConflictError("Submission is not active")
+        if trigger_source == "AI_FAILURES":
+            if sub.ai_status != "FAILED" or (
+                assignment.grading_mode == "NIGHTLY" and sub.ai_authorized_at is None
+            ):
+                raise ConflictError("Submission is not eligible for AI failure retry")
+            return False
+        unfinished = any(
+            st.submission_id == submission_id and st.ai_needed and st.completed_at is None
+            for st in self.submission_targets.values()
+        )
+        eligible = (
+            sub.ai_authorized_at is None if sub.ai_status == "FAILED"
+            else sub.ai_graded_submitted_at is None and unfinished
+        )
+        if assignment.grading_mode != "NIGHTLY" or not eligible:
+            raise ConflictError("Submission is not eligible for nightly processing")
+        if sub.ai_authorized_at is not None:
+            return False
+        sub.ai_authorized_at = _now()
+        return True
 
     def get_test_results(self, submission_id: uuid.UUID, target: str) -> list[TestResultRecord]:
         st = self._target(submission_id, target)
@@ -426,8 +483,11 @@ class InMemoryRepository(IGradingRepository):
                 st.submission_id == sub.id and st.ai_needed and st.completed_at is None
                 for st in self.submission_targets.values()
             )
-            if (a.grading_mode == mode and a.is_active and sub.is_active_attempt
-                    and sub.ai_graded_submitted_at is None and pending):
+            eligible = (
+                sub.ai_authorized_at is None if sub.ai_status == "FAILED"
+                else sub.ai_graded_submitted_at is None and pending
+            )
+            if a.grading_mode == mode and a.is_active and sub.is_active_attempt and eligible:
                 found.append((sub, a))
         found.sort(key=lambda p: (p[0].submitted_at, p[0].id))
         return [
@@ -437,12 +497,14 @@ class InMemoryRepository(IGradingRepository):
             for sub, a in found
         ]
 
-    def list_submissions_failed_ai(self) -> list[SubmissionLocator]:
+    def list_submissions_failed_ai(self, retry_eligible: bool = False) -> list[SubmissionLocator]:
         found = [
             (sub, self.assignments[sub.assignment_id])
             for sub in self.submissions.values()
             if sub.ai_status == "FAILED" and sub.is_active_attempt
             and self.assignments[sub.assignment_id].is_active
+            and (not retry_eligible or self.assignments[sub.assignment_id].grading_mode == "IMMEDIATE"
+                 or sub.ai_authorized_at is not None)
         ]
         found.sort(key=lambda p: (p[0].submitted_at, p[0].id))
         return [

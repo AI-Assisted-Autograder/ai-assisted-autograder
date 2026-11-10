@@ -116,15 +116,19 @@ def test_authorize_nightly_submission_succeeds():
 
     submission_id = UUID("11111111-1111-1111-1111-111111111111")
     repository = MagicMock()
+    repository.authorize_for_grading.return_value = True
 
     with patch.object(main, "grading_repository", repository):
-        result = main.authorize_nightly_submission(submission_id)
+        result = main.authorize_nightly_submission(
+            submission_id, main.SubmissionAuthorizationRequest(trigger_source="PENDING_NIGHTLY"),
+        )
 
     assert result == {
         "submission_id": str(submission_id),
         "authorized": True,
+        "authorization_granted": True,
     }
-    repository.authorize_for_grading.assert_called_once_with(submission_id)
+    repository.authorize_for_grading.assert_called_once_with(submission_id, "PENDING_NIGHTLY")
 
 
 def test_authorize_nightly_submission_propagates_not_found():
@@ -140,7 +144,9 @@ def test_authorize_nightly_submission_propagates_not_found():
 
     with patch.object(main, "grading_repository", repository):
         with pytest.raises(HTTPException) as exc_info:
-            main.authorize_nightly_submission(submission_id)
+            main.authorize_nightly_submission(
+                submission_id, main.SubmissionAuthorizationRequest(trigger_source="PENDING_NIGHTLY"),
+            )
 
     assert exc_info.value.status_code == 404
     assert exc_info.value.detail == "Submission not found"

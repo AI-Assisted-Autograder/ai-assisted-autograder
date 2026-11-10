@@ -41,6 +41,7 @@ def graded_submission(repo):
     repo.add_provider("GOOGLE", "gemini-2.5-flash", is_primary=True)
 
     sid = repo.upsert_submission(SubmissionRef(aid, "sub-1", SUBMITTED, "alice@example.edu"))
+    repo.sync_active_submissions(aid, ["sub-1"])
     repo.create_targets_default_needed(sid)
     repo.add_test_result(sid, "add", "FAIL", "test_add_negative: expected -1")
     repo.save_feedback(sid, "add", FeedbackResult(
@@ -398,6 +399,7 @@ def test_rubric_target_must_belong_to_the_assignment(client, repo):
 def test_results_dashboard_flags_deductions(client, repo):
     aid, sid = graded_submission(repo)
     clean = repo.upsert_submission(SubmissionRef(aid, "sub-2", SUBMITTED, "bob@example.edu"))
+    repo.sync_active_submissions(aid, ["sub-1", "sub-2"])
     repo.create_targets_default_needed(clean)
     repo.add_test_result(clean, "add", "PASS", None)
 
@@ -417,6 +419,7 @@ def test_results_dashboard_flags_deductions(client, repo):
 def test_results_dashboard_filters_to_deductions(client, repo):
     aid, sid = graded_submission(repo)
     clean = repo.upsert_submission(SubmissionRef(aid, "sub-2", SUBMITTED, "bob@example.edu"))
+    repo.sync_active_submissions(aid, ["sub-1", "sub-2"])
     repo.create_targets_default_needed(clean)
     repo.add_test_result(clean, "add", "PASS", None)
 

@@ -294,9 +294,10 @@ def backend(request):
 
 
 def start(backend, mode="IMMEDIATE", targets=(("add", 1), ("sub", 2)), platform_id="sub-1"):
-    """The reporting library's first call: upsert, then create targets."""
+    """Register a submission and sync its active selection for these fixtures."""
     aid = backend.add_assignment(mode, targets)
     sid = backend.repo.upsert_submission(SubmissionRef(aid, platform_id, SUBMITTED, "student@example.edu"))
+    backend.repo.sync_active_submissions(aid, [platform_id])
     return aid, sid
 
 
@@ -471,14 +472,14 @@ def started(backend, mode="IMMEDIATE", targets=(("add", 1), ("sub", 2))):
 def test_authorize_turns_defer_into_grade(backend):
     _, sid = started(backend, mode="NIGHTLY")
     assert backend.repo.decide_action(sid).action is Action.DEFER
-    backend.repo.authorize_for_grading(sid)
+    backend.repo.authorize_for_grading(sid, "PENDING_NIGHTLY")
     assert backend.submission(sid)[0] is not None
     assert backend.repo.decide_action(sid).action is Action.GRADE
 
 
 def test_authorize_unknown_submission(backend):
     with pytest.raises(NotFoundError):
-        backend.repo.authorize_for_grading(uuid.uuid4())
+        backend.repo.authorize_for_grading(uuid.uuid4(), "PENDING_NIGHTLY")
 
 
 def test_get_test_results_in_order_and_per_target(backend):
@@ -621,7 +622,7 @@ def test_nightly_lifecycle_end_to_end(backend):
     assert backend.repo.decide_action(sid).action is Action.DEFER
 
     # The trigger authorizes before clicking rerun.
-    backend.repo.authorize_for_grading(sid)
+    backend.repo.authorize_for_grading(sid, "PENDING_NIGHTLY")
 
     # The rerun: the suite reports in again, then the AI phase grades.
     assert backend.repo.upsert_submission(ref) == sid
@@ -699,6 +700,7 @@ def test_pending_ai_lists_only_what_the_trigger_should_rerun(backend):
         sid = backend.repo.upsert_submission(
             SubmissionRef(aid, platform_id, SUBMITTED + timedelta(minutes=minutes), "s@example.edu")
         )
+        backend.repo.sync_active_submissions(aid, [platform_id])
         backend.repo.create_targets_default_needed(sid)
         return aid, sid
 
@@ -708,8 +710,9 @@ def test_pending_ai_lists_only_what_the_trigger_should_rerun(backend):
     # Never wanted: opted out.
     _, opted = nightly("opted-out", 0)
     backend.repo.set_ai_not_needed(opted, "add")
-    # Attempted and failed: terminal, not retried (AD-8).
+    # Authorized failures belong to the AI-failure retry queue.
     _, failed = nightly("failed", 0)
+    backend.repo.authorize_for_grading(failed, "PENDING_NIGHTLY")
     backend.repo.mark_target_failed(failed, "add", "invalid_response")
     # Superseded attempt (AD-14).
     _, superseded = nightly("superseded", 0)
@@ -731,7 +734,7 @@ def test_pending_ai_lists_only_what_the_trigger_should_rerun(backend):
 def test_pending_ai_skips_graded_submissions(backend):
     aid, sid = started(backend, mode="NIGHTLY")
     assert [s.submission_id for s in backend.repo.list_submissions_pending_ai("NIGHTLY")] == [sid]
-    backend.repo.authorize_for_grading(sid)
+    backend.repo.authorize_for_grading(sid, "PENDING_NIGHTLY")
     backend.repo.mark_target_failed(sid, "add", "boom")
     backend.repo.mark_target_failed(sid, "sub", "boom")
     backend.repo.mark_ai_complete_if_all_done(sid)
@@ -776,12 +779,13 @@ def test_list_submissions_newest_first_with_target_counts(backend):
 
     def submit(platform_id, hours):
         sid = backend.repo.upsert_submission(SubmissionRef(aid, platform_id, SUBMITTED + timedelta(hours=hours)))
+        backend.set_submission(sid, is_active_attempt=True)
         backend.repo.create_targets_default_needed(sid)
         return sid
 
     waiting = submit("waiting", 0)
     mixed = submit("mixed", 2)
-    backend.repo.authorize_for_grading(mixed)
+    backend.repo.authorize_for_grading(mixed, "PENDING_NIGHTLY")
     backend.repo.save_feedback(mixed, "add", result_for(backend.add_rubric(aid, "add")))
     backend.repo.mark_target_failed(mixed, "sub", "boom")
     backend.repo.set_ai_not_needed(mixed, "mul")
@@ -855,6 +859,7 @@ def by_target(backend):
         sid = backend.repo.upsert_submission(
             SubmissionRef(aid, platform_id, SUBMITTED + timedelta(hours=hours), student)
         )
+        backend.set_submission(sid, is_active_attempt=True)
         backend.repo.create_targets_default_needed(sid)
         return sid
 
@@ -938,6 +943,7 @@ def test_results_flag_failing_tests_and_low_scores(backend):
         sid = backend.repo.upsert_submission(
             SubmissionRef(aid, platform_id, SUBMITTED + timedelta(hours=hours), student)
         )
+        backend.set_submission(sid, is_active_attempt=True)
         backend.repo.create_targets_default_needed(sid)
         return sid
 

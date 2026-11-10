@@ -31,13 +31,15 @@ The system has three main application components and a shared database.
 
 1. Instructors configure assignments, grading targets and rubrics through the Web forms.
 2. The autograder container fetches its assignment configuration from the backend, then sends source code and runtime evidence for AI feedback.
-3. The backend authenticates the assignment token, enforces quota and calls the configured provider using DB-owned grading instructions.
+3. The backend authenticates the assignment token, checks NIGHTLY authorization, enforces quota and calls the configured provider using DB-owned grading instructions.
 4. The container displays feedback and configured AI scores in Gradescope, preserving functional-test scores when AI is unavailable.
 
-The assignment-token feedback path keeps runtime state outside PostgreSQL and does
-not write submission, test-result or feedback records to the DB. The nightly
-integration manages eligibility and reruns through separate Web endpoints; it is
-not yet connected to this feedback path.
+The feedback path stores submission metadata, provider feedback and AI outcomes in
+PostgreSQL; token policy, quota and request replay remain in private runtime state.
+NIGHTLY execution and failure-retry eligibility are enforced by the backend using
+the current Gradescope selection and submission authorization. Automation must
+follow the [selection and authorization API contract](web/README.md#nightly-authorization-and-failure-retries);
+its scheduling and browser implementation are separate.
 
 ![Component Architecture](docs/architecture/rendered/01-component.png)
 

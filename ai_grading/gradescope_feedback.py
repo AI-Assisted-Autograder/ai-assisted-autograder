@@ -427,6 +427,9 @@ def add_feedback(root=Path('/autograder'), *, run_id=None):
     deadline = report_deadline - 5
     config = None
     ai_status = 'FAILED'
+    completion_reason = 'processed'
+    ai_needed = False
+    deferred_response = None
     hidden_stdout = False
     accounting_requests = {}
     try:
@@ -453,6 +456,8 @@ def add_feedback(root=Path('/autograder'), *, run_id=None):
                     raise ClientError('The total AI time budget was exhausted.')
                 manifest = get_assignment_config(backend_url=config['backend_url'], token_file=token_file,
                                                  timeout=min(30, remaining))
+                ai_needed = any(target['analysis'].get('behavior') == 'ai_grading'
+                                for target in manifest['targets'].values())
                 feedback_targets = [target for target in manifest['targets'].values()
                                     if target['analysis'].get('behavior') == 'functional_test_feedback']
                 if len(feedback_targets) > 1:
@@ -471,6 +476,7 @@ def add_feedback(root=Path('/autograder'), *, run_id=None):
                             evidence, mapping = functional_evidence(base, analysis, blocked)
                             if not evidence:
                                 continue
+                            ai_needed = True
                         else:
                             evidence = collect_evidence(root, analysis, base, blocked)
                         if time.monotonic() >= deadline:
@@ -489,6 +495,20 @@ def add_feedback(root=Path('/autograder'), *, run_id=None):
                                                     submitted_at=(submission_context or {}).get('submitted_at'),
                                                     student_identifier=(submission_context or {}).get('student_identifier'),
                                                     timeout=min(270, remaining))
+                        if response.get('status') in {'deferred', 'inactive'}:
+                            deferred_response = response
+                            records.append({'target_id': target_id, **response})
+                            message = ('AI grading is awaiting scheduled authorization.'
+                                       if response['status'] == 'deferred' else
+                                       'This submission is inactive; AI grading was not run.')
+                            rendered = {row.get('extra_data', {}).get('target_id')
+                                        for row in results['tests'] if row.get('extra_data', {}).get('ai_feedback')}
+                            for pending_id, pending_target in manifest['targets'].items():
+                                if (pending_target['analysis'].get('behavior') == 'ai_grading'
+                                        and pending_id not in rendered):
+                                    results['tests'].extend(grading_rows(
+                                        pending_id, pending_target, manifest['revision'], error=message))
+                            break
                         accounting_requests[request_id] = {
                             'request_id': request_id, 'target_id': target_id,
                             'accounting': response.get('accounting'),
@@ -563,7 +583,9 @@ def add_feedback(root=Path('/autograder'), *, run_id=None):
         temporary.write_text(json.dumps(results, ensure_ascii=False, indent=2, allow_nan=False) + '\n', encoding='utf-8')
         temporary.replace(results_path)
         # A valid insufficient-evidence verdict is still a successful AI request.
-        ai_status = 'FAILED' if ai_failed else 'SUCCEEDED'
+        ai_status = 'FAILED' if ai_failed else None if deferred_response else 'SUCCEEDED'
+        completion_reason = ('not_needed' if ai_status == 'SUCCEEDED' and not ai_needed
+                             and not accounting_requests else 'processed')
         if results.get('stdout_visibility', 'hidden') == 'hidden':
             for record in records:
                 target = record.get('target_id', 'assignment')
@@ -571,19 +593,22 @@ def add_feedback(root=Path('/autograder'), *, run_id=None):
                     print(f"Instructor AI request [{target}]: {record['request_id']}")
                 if record.get('error'):
                     print(f"Instructor AI diagnostic [{target}]: {record['error']}")
+                if record.get('status') in {'deferred', 'inactive'}:
+                    print(f"Instructor AI status [{target}]: {record['reason']}")
                 for item in (*record.get('items', []), *record.get('failure_feedback', [])):
                     identifier = item.get('test_id', item.get('evidence_id', ''))
                     print(f"Instructor AI evidence [{target} / {identifier}]: {item['evidence']}")
     finally:
         if hidden_stdout:
             print_cost_summary(run_id, accounting_requests)
-        if submission_context and isinstance(config, dict) and config.get('backend_url'):
+        if ai_status is not None and submission_context and isinstance(config, dict) and config.get('backend_url'):
             remaining = report_deadline - time.monotonic()
             try:
                 if remaining <= 0:
                     raise ClientError('The AI outcome reporting time budget was exhausted.')
                 complete_submission(backend_url=config['backend_url'], token_file=token_file,
-                                    ai_status=ai_status, timeout=min(30, remaining), **submission_context)
+                                    ai_status=ai_status, completion_reason=completion_reason,
+                                    timeout=min(30, remaining), **submission_context)
             except ClientError as exc:
                 print(f'AI outcome was not recorded in the grading database: {exc}', file=sys.stderr)
 

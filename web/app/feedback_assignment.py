@@ -202,6 +202,7 @@ def read_assignment_config(repository, assignment_id: str) -> AssignmentConfig:
             )
         return AssignmentConfig(
             id=str(assignment.id), enabled=assignment.is_active,
+            grading_mode=assignment.grading_mode,
             **model_config, targets=targets,
         )
     except (TypeError, ValueError):

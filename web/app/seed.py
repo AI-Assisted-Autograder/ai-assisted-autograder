@@ -243,11 +243,10 @@ def add_submissions(ids: dict[str, uuid.UUID]) -> list[tuple[str, str]]:
     made.append(("sample-list-sub-1", "pending, DEFER (nightly queue)"))
 
     # Authorized by the trigger, rerun not finished yet: GRADE.
-    sid = report(repo, lst, "sample-list-sub-2", "dave@example.edu", 4, [
+    authorized_sid = report(repo, lst, "sample-list-sub-2", "dave@example.edu", 4, [
         ("LinkedList.add", "PASS", None),
         ("LinkedList.remove", "PASS", None),
     ])
-    repo.authorize_for_grading(sid)
     made.append(("sample-list-sub-2", "authorized, GRADE (nightly queue)"))
 
     # Graded last night: REEMIT.
@@ -255,7 +254,10 @@ def add_submissions(ids: dict[str, uuid.UUID]) -> list[tuple[str, str]]:
         ("LinkedList.add", "PASS", None),
         ("LinkedList.remove", "PASS", None),
     ])
-    repo.authorize_for_grading(sid)
+    repo.sync_active_submissions(calc, [f"sample-calc-sub-{index}" for index in (1, 2, 3)])
+    repo.sync_active_submissions(lst, [f"sample-list-sub-{index}" for index in (1, 2, 3)])
+    repo.authorize_for_grading(authorized_sid, "PENDING_NIGHTLY")
+    repo.authorize_for_grading(sid, "PENDING_NIGHTLY")
     repo.save_feedback(sid, "LinkedList.add", feedback(
         r("list", "LinkedList.add"), "O(1) append using the tail pointer. Nicely done.", 10, 10))
     repo.save_feedback(sid, "LinkedList.remove", feedback(
