@@ -10,6 +10,7 @@
   "scripts": {
     "test": "playwright test",
     "typecheck": "tsc --noEmit",
+    "gradescope:save-auth": "tsx scripts/save-gradescope-auth.ts",
     "test:gradescope-login": "playwright test tests/e2e/gradescope-login.spec.ts",
     "test:gradescope-rerun": "playwright test tests/e2e/gradescope-rerun.spec.ts",
     "nightly:trigger": "tsx integration/nightly-runner.ts"

@@ -112,6 +112,37 @@ test('listSubmissionsPendingAi rejects a missing course ID when submissions exis
   ).rejects.toThrow('Set GRADESCOPE_COURSE_ID');
 });
 
+test('listSubmissionsFailedOnAi calls the AI-failure endpoint and maps rows', async () => {
+  const fetchMock = mockFetch([
+    {
+      status: 200,
+      body: [{
+        submission_id: 'submission-failed',
+        platform: 'GRADESCOPE',
+        platform_assignment_id: 'assignment-456',
+        platform_submission_id: 'submission-789',
+        student_identifier: 'student@example.com',
+        ai_status: 'FAILED',
+      }],
+    },
+  ]);
+
+  const client = new HttpGradingClient();
+
+  await expect(client.listSubmissionsFailedOnAi()).resolves.toEqual([{
+    submissionId: 'submission-failed',
+    platformAssignmentId: 'assignment-456',
+    platformSubmissionUrl:
+      'https://www.gradescope.com/courses/course-123/assignments/assignment-456/submissions/submission-789',
+  }]);
+  expect(fetchMock.mock.calls[0].arguments[0]).toBe(
+    'http://localhost:8000/internal/ai-failures/submissions',
+  );
+  expect(fetchMock.mock.calls[0].arguments[1]).toMatchObject({
+    headers: { 'X-Internal-Token': 'test-token' },
+  });
+});
+
 test('authorizeForGrading sends a POST request for the selected submission', async () => {
   const fetchMock = mockFetch([
     { status: 200, body: {} },

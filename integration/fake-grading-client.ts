@@ -15,7 +15,11 @@ export class FakeGradingClient implements IGradingClient {
   public finishedSummary: TriggerRunSummary | undefined;
   public started = false;
 
-  public constructor(private readonly pending: SubmissionLocator[]) {}
+  public constructor(
+    private readonly pending: SubmissionLocator[],
+    private readonly failRecordingStatus?: 'AUTHORIZED' | 'RERUN_SUBMITTED' | 'RERUN_SUCCEEDED' | 'RERUN_FAILED',
+    private readonly failedAi: SubmissionLocator[] = pending,
+  ) {}
 
   public async startRun(): Promise<void> {
     this.started = true;
@@ -23,6 +27,10 @@ export class FakeGradingClient implements IGradingClient {
 
   public async listSubmissionsPendingAi(): Promise<SubmissionLocator[]> {
     return this.pending;
+  }
+
+  public async listSubmissionsFailedOnAi(): Promise<SubmissionLocator[]> {
+    return this.failedAi;
   }
 
   public async authorizeForGrading(submissionId: string): Promise<void> {
@@ -34,6 +42,9 @@ export class FakeGradingClient implements IGradingClient {
     status: 'AUTHORIZED' | 'RERUN_SUBMITTED' | 'RERUN_SUCCEEDED' | 'RERUN_FAILED',
     errorMessage?: string,
   ): Promise<void> {
+    if (status === this.failRecordingStatus) {
+      throw new Error(`fake audit failure for ${status}`);
+    }
     this.recordedResults.push({ submissionId, status, errorMessage });
   }
 
