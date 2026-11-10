@@ -9,10 +9,9 @@ tests/
 ├── requirements.txt
 ├── unit/
 │   ├── ai_grading_test/
-│   │   ...
-│   ├── web_test/
-│   │   ...
-│   └── typescript/
+│   └── ...
+├── integration/
+├── e2e/
 ```
 
 ## 1. Create the Virtual Environment
@@ -162,42 +161,9 @@ A different database can be specified using the `TEST_DATABASE_URL` environment 
 
 ## GitHub Actions CI
 
-These workflows run automatically when code is pushed to the repository or when a pull request is opened or updated.
+GitHub Actions automates testing on pushes and pull requests. Workflows are located in [`.github/workflows/`](.github/workflows/).
 
-The workflows are located in [`.github/workflows/`](.github/workflows/).
-
-- [Python Tests](.github/workflows/tests.yml)
-- [TypeScript Tests](.github/workflows/typescript-tests.yml)
-- [PowerShell Tests](.github/workflows/powershell-tests.yml)
-
-### Python Tests Workflow
-
-The CI pipeline:
-
-1. Checks out the repository.
-2. Sets up Python 3.12.
-3. Creates a virtual environment.
-4. Installs the dependencies from `tests/requirements.txt`.
-5. Runs the AI grading tests.
-6. Runs the web tests.
-
-### TypeScript Tests Workflow
-
-The CI pipeline:
-
-1. Checks out the repository.
-2. Sets up Node.js 22 with npm caching.
-3. Installs dependencies using `npm ci`.
-4. Installs Playwright Chromium and its required dependencies.
-5. Runs the TypeScript type check using `npm run typecheck`.
-6. Runs the TypeScript unit tests in `tests/unit/typescript` using Playwright.
-
-### PowerShell Tests Workflow
-
-The CI pipeline:
-
-1. Checks out the repository.
-2. Verifies the installed PowerShell version using `$PSVersionTable`.
-3. Configures the PowerShell Gallery as a trusted repository.
-4. Installs Pester version 6.2.0 for running PowerShell tests.
-5. Runs the PowerShell unit tests located in `tests/unit/powershell` using `Invoke-Pester` with detailed output.
+- [Python Tests](.github/workflows/tests.yml): Sets up Python 3.12, installs dependencies, and runs AI grading and web tests.
+- [TypeScript Tests](.github/workflows/typescript-tests.yml): Sets up Node.js 22, installs dependencies, runs type checking, and executes TypeScript unit tests.
+- [PowerShell Tests](.github/workflows/powershell-tests.yml): Installs Pester 6.2.0 and runs PowerShell unit tests.
+- [E2E Tests](.github/workflows/e2e.yml): Uses Playwright and Chromium to test Gradescope and AI grading platform instructor authentication. Credentials are securely managed through GitHub Secrets.
