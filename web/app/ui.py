@@ -66,6 +66,19 @@ def submission_state(action: Action, grading_mode: str) -> tuple[str, str]:
     return "Not graded yet", "waiting"
 
 
+def ai_result_state(status: str | None, targets) -> tuple[str, str]:
+    if status is None:
+        return "—", "muted"
+    behaviors = {target.analysis_config.get("behavior") for target in targets if target.rubric is not None}
+    if behaviors == {"functional_test_feedback"}:
+        labels = ("Feedback checked ✓", "Feedback failed")
+    elif behaviors == {"ai_grading"}:
+        labels = ("AI grading processed ✓", "AI grading failed")
+    else:
+        labels = ("AI processing complete ✓", "AI processing failed")
+    return (labels[0], "done") if status == "SUCCEEDED" else (labels[1], "failed")
+
+
 TARGET_STATES = {
     TargetStatus.DONE: ("Feedback given", "done"),
     TargetStatus.FAILED: ("Failed", "failed"),
@@ -80,6 +93,7 @@ templates.env.filters["when"] = when
 templates.env.filters["number"] = number
 templates.env.filters["usd"] = usd
 templates.env.globals["submission_state"] = submission_state
+templates.env.globals["ai_result_state"] = ai_result_state
 templates.env.globals["TARGET_STATES"] = TARGET_STATES
 templates.env.globals["GRADING_MODES"] = GRADING_MODES
 templates.env.globals["TARGET_KINDS"] = TARGET_KINDS

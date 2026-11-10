@@ -425,6 +425,7 @@ class SqlGradingRepository(IGradingRepository):
                     sub.is_active_attempt,
                     derive_action(a.grading_mode, sub.submitted_at, sub.ai_authorized_at, sub.ai_graded_submitted_at),
                     statuses[sub.id],
+                    ai_status=sub.ai_status,
                 )
                 for sub in subs
             ]

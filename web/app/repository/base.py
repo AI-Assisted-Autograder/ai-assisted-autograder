@@ -210,7 +210,7 @@ class AssignmentSummary:
 
 @dataclass(frozen=True)
 class SubmissionSummary:
-    """One row of an assignment's submission list, with its targets counted by status."""
+    """One submission's AI outcome and targets counted by status."""
 
     id: uuid.UUID
     platform_submission_id: str
@@ -222,6 +222,7 @@ class SubmissionSummary:
     failed: int
     waiting: int
     opted_out: int
+    ai_status: str | None
 
 
 @dataclass(frozen=True)
@@ -412,6 +413,7 @@ def summarize(
     is_active_attempt: bool,
     action: Action,
     statuses: list[TargetStatus],
+    ai_status: str | None,
 ) -> SubmissionSummary:
     return SubmissionSummary(
         sub_id,
@@ -424,6 +426,7 @@ def summarize(
         statuses.count(TargetStatus.FAILED),
         statuses.count(TargetStatus.WAITING),
         statuses.count(TargetStatus.OPTED_OUT),
+        ai_status,
     )
 
 

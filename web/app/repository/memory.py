@@ -478,6 +478,7 @@ class InMemoryRepository(IGradingRepository):
                     for st in self.submission_targets.values()
                     if st.submission_id == sub.id
                 ],
+                ai_status=sub.ai_status,
             )
             for sub in subs
         ]

@@ -97,7 +97,7 @@
             <th>Student</th>
             <th>Submitted</th>
             <th>Status</th>
-            <th>Targets</th>
+            <th>AI result</th>
         </tr>
     </thead>
     <tbody>
@@ -111,12 +111,8 @@
             </td>
             <td class="nowrap">{{ s.submitted_at | when }}</td>
             <td><span class="badge {{ style }}">{{ label }}</span></td>
-            <td><div class="counts">
-                {% if s.done %}<span class="count done">{{ s.done }} feedback</span>{% endif %}
-                {% if s.failed %}<span class="count failed">{{ s.failed }} failed</span>{% endif %}
-                {% if s.waiting %}<span class="count waiting">{{ s.waiting }} waiting</span>{% endif %}
-                {% if s.opted_out %}<span class="count muted">{{ s.opted_out }} opted out</span>{% endif %}
-            </div></td>
+            {% set ai_label, ai_style = ai_result_state(s.ai_status, assignment.targets) %}
+            <td><span class="badge {{ ai_style }}">{{ ai_label }}</span></td>
         </tr>
         {% endfor %}
     </tbody>
