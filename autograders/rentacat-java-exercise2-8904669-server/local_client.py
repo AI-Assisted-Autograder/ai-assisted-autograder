@@ -355,6 +355,12 @@ def request_feedback(
     accounting = None
     try:
         result = json.loads(raw)
+        if isinstance(result, dict) and result.get("status") in {"deferred", "inactive"}:
+            reason = {"deferred": "awaiting_nightly_authorization", "inactive": "inactive_submission"}
+            if (result.get("request_id") != identifier
+                    or result.get("reason") != reason[result["status"]]):
+                raise ValueError
+            return {key: result[key] for key in ("request_id", "status", "reason")}
         if isinstance(result, dict) and result.get("request_id") == identifier:
             accounting = read_accounting(result.get("accounting"))
         if (
@@ -479,11 +485,15 @@ def request_feedback(
 
 def complete_submission(
     *, backend_url: str, token_file: str | Path, platform_submission_id: str,
-    submitted_at: str, ai_status: str, student_identifier: str | None = None, timeout: float = 30,
+    submitted_at: str, ai_status: str, student_identifier: str | None = None,
+    completion_reason: str = "processed", timeout: float = 30,
 ) -> dict:
     """Report the final AI outcome of this submission's current execution."""
     if ai_status not in {"SUCCEEDED", "FAILED"}:
         raise ClientError("AI outcome must be SUCCEEDED or FAILED.")
+    if completion_reason not in {"processed", "not_needed"} or (
+            completion_reason == "not_needed" and ai_status != "SUCCEEDED"):
+        raise ClientError("No-AI-needed completion requires a successful outcome.")
     if not math.isfinite(timeout) or not 0 < timeout <= 300:
         raise ClientError("Client timeout must be between 0 and 300 seconds.")
     origin = validate_backend_url(backend_url)
@@ -495,6 +505,7 @@ def complete_submission(
             "student_identifier": student_identifier,
         },
         "ai_status": ai_status,
+        "completion_reason": completion_reason,
     }, ensure_ascii=False).encode("utf-8")
     request = Request(
         origin + "/v1/submissions/" + quote(platform_submission_id, safe="") + "/ai-complete",
@@ -598,6 +609,10 @@ def main(argv: list[str] | None = None) -> int:
         )
         if args.json:
             print(json.dumps(result, ensure_ascii=False, indent=2))
+        elif result.get("status") in {"deferred", "inactive"}:
+            print("Request:", result["request_id"])
+            print("Status:", result["status"])
+            print("Reason:", result["reason"])
         else:
             print("Request:", result["request_id"])
             print("Engine:", result["engine"])

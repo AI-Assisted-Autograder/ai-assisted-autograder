@@ -49,6 +49,7 @@ MESSAGES = {
     "upstream_timeout": "The model timed out; the reserved call remains consumed.",
     "backend_auth_unavailable": "Backend model authentication is unavailable.",
     "backend_error": "Backend could not safely finish this request.",
+    "ai_not_authorized": "This submission has not received nightly AI authorization.",
 }
 
 
@@ -97,6 +98,13 @@ class AiCompleteInput(BaseModel):
     model_config = ConfigDict(extra="forbid", strict=True)
     submission: SubmissionContext
     ai_status: Literal["SUCCEEDED", "FAILED"]
+    completion_reason: Literal["processed", "not_needed"] = "processed"
+
+    @model_validator(mode="after")
+    def completion_outcome(self):
+        if self.completion_reason == "not_needed" and self.ai_status != "SUCCEEDED":
+            raise ValueError("No-AI-needed completion must be successful")
+        return self
 
 
 def matches_path(path: str, patterns: tuple[str, ...]) -> bool:
@@ -468,6 +476,24 @@ def create_feedback_router(state_path: str | Path, *, assignment_loader,
         target = assignment.targets.get(payload.target_id)
         if target is None:
             return error("target_forbidden", 403, rid)
+        if assignment.grading_mode == "NIGHTLY":
+            if payload.submission is None:
+                return error("invalid_request", 422, rid)
+            if grading_repository is None:
+                return error("backend_error", 503, rid)
+        if existing is None and payload.submission is not None and grading_repository is not None:
+            submission_id = await asyncio.to_thread(db_submission, assignment_id, payload.submission)
+            action = await asyncio.to_thread(grading_repository.get_ai_execution_action, submission_id)
+            if action == "deferred":
+                action = await asyncio.to_thread(
+                    grading_repository.defer_submission_target, submission_id, target.identifier,
+                )
+            if action != "execute":
+                return JSONResponse(
+                    {"request_id": rid, "status": action,
+                     "reason": "awaiting_nightly_authorization" if action == "deferred" else "inactive_submission"},
+                    headers={"Cache-Control": "no-store"},
+                )
         content = payload.model_dump(mode="json", exclude={"request_id", "run_id"})
         if payload.config_revision is None:
             content.pop("config_revision")
@@ -605,7 +631,18 @@ def create_feedback_router(state_path: str | Path, *, assignment_loader,
             )
             if str(assignment.id) != assignment_id or not assignment.is_active:
                 return error("assignment_forbidden", 403)
+            if payload.completion_reason == "not_needed" and any(
+                target.rubric is not None
+                and target.analysis_config.get("behavior") != "functional_test_feedback"
+                for target in assignment.targets
+            ):
+                return error("invalid_request", 422)
             submission_id = await asyncio.to_thread(db_submission, assignment_id, payload.submission)
+            if (payload.ai_status == "SUCCEEDED" and payload.completion_reason == "processed"
+                    and assignment.grading_mode == "NIGHTLY"):
+                action = await asyncio.to_thread(grading_repository.get_ai_execution_action, submission_id)
+                if action == "deferred":
+                    return error("ai_not_authorized", 409)
             await asyncio.to_thread(
                 grading_repository.set_submission_ai_status, submission_id, payload.ai_status,
             )

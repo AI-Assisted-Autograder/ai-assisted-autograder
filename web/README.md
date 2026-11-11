@@ -138,8 +138,8 @@ uvicorn app.main:app --reload
 The Web Docker service reads assignment, target, rubric and the primary engine/model
 configuration from PostgreSQL. During a Gradescope autograder run, the hook sends
 submission metadata with each feedback request. The API then stores provider
-feedback and target completion in PostgreSQL; a final `ai-complete` call sets the
-submission completion guard only when no AI-needed target is still waiting. JSON
+feedback and target completion in PostgreSQL; a final `ai-complete` call records
+the connector's aggregate outcome and sets the completion guard on success. JSON
 retains backend policy, assignment token hashes, call quota and replay responses.
 The backend supports three engines:
 
@@ -191,9 +191,81 @@ have succeeded. Target errors remain available through the existing diagnostics.
 
 The failure-list response contains `submission_id`, `platform`,
 `platform_assignment_id`, `platform_submission_id` and `ai_status`. It does not
-trigger a rerun or alter the existing nightly API. The single-outcome field
+trigger a rerun. The single-outcome field
 assumes executions of the same submission do not overlap; it records the last
 reported outcome. Credentials, call quotas and request replay remain unchanged.
+
+### NIGHTLY authorization and failure retries
+
+The backend owns eligibility; Gradescope owns the selected submission. Before
+either automated cycle, the caller reads the complete instructor submission list
+(all pages, without filtering by result) and synchronizes each assignment:
+
+`PUT /internal/assignments/{assignment_id}/active-submissions`
+
+Body: `{"platform_submission_ids": ["123456", "123457"]}`. IDs are Gradescope
+submission IDs; the path uses the DB assignment UUID. The endpoint atomically
+replaces `is_active_attempt` flags without deleting history or granting permission.
+An empty list clears the assignment's selections. Unknown IDs return `409` with
+`detail.missing_submission_ids`, leaving the previous snapshot unchanged; do not
+continue that assignment's cycle. New submissions have an unknown selection
+(`is_active_attempt = NULL`) until synchronized; `true` means selected and `false`
+means superseded. Unknown submissions remain visible in Web results and target
+views without a Superseded label, but cannot enter automated queues or receive
+nightly authorization. IMMEDIATE first-run AI still executes without a snapshot.
+Synchronization preserves submission metadata, outcomes and feedback history.
+
+| Cycle | Query | Authorization request before rerun |
+| --- | --- | --- |
+| Initial nightly processing | `GET /internal/nightly/submissions?mode=NIGHTLY` | `{"trigger_source":"PENDING_NIGHTLY"}` |
+| Periodic AI-failure retry | `GET /internal/ai-failures/submissions?retry_eligible=true` | `{"trigger_source":"AI_FAILURES"}` |
+
+Send the authorization body to
+`POST /internal/nightly/submissions/{submission_id}/authorize`, using the DB
+submission UUID returned by the query. All these endpoints require
+`X-Internal-Token`. The response includes `authorized: true` and
+`authorization_granted`; ineligible submissions return `409`, missing IDs `404`.
+The source is required: the old bodyless authorization call is no longer accepted.
+
+Nightly authorization applies only to selected NIGHTLY submissions awaiting work,
+including failures that have never been authorized. It sets `ai_authorized_at`
+once and preserves it across subsequent retries. Authorized failures are excluded
+from the nightly list. The retry source only checks eligibility and never grants
+or refreshes authorization: it requires `FAILED` and either IMMEDIATE mode or an
+existing NIGHTLY authorization. Automated queries require a confirmed selected
+submission and an active assignment; the unfiltered failure endpoint remains
+available for diagnostics.
+Authorized, unfinished submissions without a failed outcome remain eligible for
+a later nightly cycle if the Gradescope rerun was not successfully triggered.
+
+`POST /v1/feedback` checks NIGHTLY authorization before reserving quota or starting
+a new model call. Its HTTP 200 response can be `status: deferred` (awaiting nightly
+authorization) or `status: inactive`, with `request_id` and `reason`, but no model
+result. The connector stops AI requests, preserves functional scores, displays
+pending AI grading, and does not report a normal deferral as success or failure.
+Deferring a fresh attempt reopens its target's pending marker and clears the
+submission completion guard while preserving the previously reported AI outcome.
+Actual processing errors still report `FAILED`, even before nightly authorization.
+`ai-complete` accepts `completion_reason: processed` (default) or `not_needed`;
+the latter is only for successful no-call executions of feedback-only/empty
+configurations. It preserves the Java no-feedback-needed case without granting
+nightly permission. NIGHTLY requests require valid submission metadata and the
+combined Web service's database-backed repository.
+
+The caller must refresh the snapshot and recheck eligibility if the selected ID
+changes before clicking rerun. New IDs do not inherit authorization; old versions
+retain their records but leave automated queues. This API cannot observe platform
+changes until synchronized. Teacher-initiated reruns retain independent request
+identities; accepted-request polling/replay does not start another model call.
+
+Rollout requires updated shared autograder files and caller support for these
+contracts. Existing automation is not updated by this change. At the coordinated
+cutover, clear historical NIGHTLY authorization timestamps, preserve outcomes and
+feedback, synchronize selections, and authorize through the next nightly cycle.
+Deployments must apply migration `0009` before running the updated backend; it
+makes `submission.is_active_attempt` nullable so unsynced submissions remain
+distinct from superseded ones. Scheduling and live authorization resets remain
+separate deployment actions.
 
 Migration `0003` adds the provider engine; `0004` adds target analysis configuration.
 Migration `0007` adds submission AI outcomes and backfills existing target failures.
@@ -508,7 +580,7 @@ Grading run (while AI feedback is produced):
 
 | Method | What it does |
 | --- | --- |
-| `authorize_for_grading(submission_id)` | Sets `ai_authorized_at` so the next run is GRADE. The nightly trigger calls it before rerunning. |
+| `authorize_for_grading(submission_id, trigger_source)` | Checks current eligibility; only `PENDING_NIGHTLY` can grant permission. `AI_FAILURES` never grants or refreshes it. Returns whether permission was newly granted. |
 | `get_test_results(submission_id, target)` | A target's test results, oldest first, for the prompt. |
 | `save_feedback(submission_id, target, result)` | Stores every provider's response, marks the selected one and completes the target. |
 | `mark_target_failed(submission_id, target, error)` | Completes the target with `last_error` set (AD-8), so the nightly trigger does not retry it forever. |
@@ -520,7 +592,7 @@ Reads:
 | --- | --- |
 | `get_assignment_config(assignment_id)` | The assignment, its targets in display order with their current rubric, and the enabled providers (primary first). |
 | `get_selected_feedback(submission_id)` | For REEMIT: the selected feedback or error for each needed target. Opted-out targets are left out. |
-| `list_submissions_pending_ai(mode)` | For the nightly trigger: submissions in that grading mode that still have a needed, incomplete target and are not graded. Oldest first. |
+| `list_submissions_pending_ai(mode)` | Active selections awaiting work or initial authorization after failure. Excludes already-authorized failures; oldest first. |
 
 Instructor UI reads:
 

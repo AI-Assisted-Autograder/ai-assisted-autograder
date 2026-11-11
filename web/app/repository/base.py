@@ -229,7 +229,7 @@ class SubmissionSummary:
     platform_submission_id: str
     student_identifier: str | None
     submitted_at: datetime
-    is_active_attempt: bool
+    is_active_attempt: bool | None
     action: Action
     done: int
     failed: int
@@ -286,7 +286,7 @@ class SubmissionDetail:
     submitted_at: datetime
     ai_authorized_at: datetime | None
     ai_graded_submitted_at: datetime | None
-    is_active_attempt: bool
+    is_active_attempt: bool | None
     action: Action
     # Display order.
     targets: tuple[TargetDetail, ...]
@@ -501,7 +501,7 @@ def summarize(
     platform_submission_id: str,
     student_identifier: str | None,
     submitted_at: datetime,
-    is_active_attempt: bool,
+    is_active_attempt: bool | None,
     action: Action,
     statuses: list[TargetStatus],
     ai_status: str | None,
@@ -604,8 +604,18 @@ class IGradingRepository(ABC):
     def upsert_submission(self, ref: SubmissionRef) -> uuid.UUID:
         """Return the submission's id, creating it on first report.
 
+        New rows have unknown selection until Gradescope's active selections are synced.
         A rerun reports the same platform_submission_id and gets the same
         row back unchanged.
+        """
+
+    @abstractmethod
+    def sync_active_submissions(
+        self, assignment_id: uuid.UUID, platform_submission_ids: list[str],
+    ) -> list[str]:
+        """Replace an assignment's active selection with a complete platform snapshot.
+
+        Return missing platform submission IDs without changing any rows.
         """
 
     @abstractmethod
@@ -642,11 +652,22 @@ class IGradingRepository(ABC):
         """GRADE, DEFER or REEMIT for this run (AD-11)."""
 
     @abstractmethod
-    def authorize_for_grading(self, submission_id: uuid.UUID) -> None:
-        """Set ai_authorized_at, so the next run's action is GRADE (AD-11).
+    def get_ai_execution_action(self, submission_id: uuid.UUID) -> str:
+        """Return execute, deferred, or inactive without changing prior outcomes."""
 
-        The nightly trigger calls this BEFORE clicking rerun. Calling it
-        again refreshes the timestamp, which is harmless.
+    @abstractmethod
+    def defer_submission_target(self, submission_id: uuid.UUID, target: str) -> str:
+        """Atomically recheck permission and queue only an unauthorized NIGHTLY target.
+
+        Return the current execution action, retaining prior outcomes and feedback.
+        """
+
+    @abstractmethod
+    def authorize_for_grading(self, submission_id: uuid.UUID, trigger_source: str) -> bool:
+        """Check rerun eligibility and grant initial NIGHTLY permission when needed.
+
+        AI_FAILURES only checks existing permission. Return whether a new
+        authorization was granted; reject ineligible submissions with ConflictError.
         """
 
     @abstractmethod
@@ -697,17 +718,17 @@ class IGradingRepository(ABC):
     def list_submissions_pending_ai(self, mode: str) -> list[SubmissionLocator]:
         """Submissions the nightly trigger should authorize and rerun.
 
-        The 04-sequence-nightly query: the assignment is in this mode, a
-        target is still ai_needed with completed_at NULL, and the guard is
-        unset. Also restricted to active attempts (AD-14) on active
-        assignments. Oldest submission first.
+        Include unfinished submissions without a FAILED outcome and failures
+        still awaiting initial authorization. Restrict to active attempts on
+        active assignments, oldest first.
         """
 
     @abstractmethod
-    def list_submissions_failed_ai(self) -> list[SubmissionLocator]:
+    def list_submissions_failed_ai(self, retry_eligible: bool = False) -> list[SubmissionLocator]:
         """Active submissions with a FAILED AI outcome, across grading modes.
 
         Only active assignments and attempts are included, oldest first.
+        Retry eligibility requires IMMEDIATE mode or prior NIGHTLY authorization.
         """
 
     # Instructor UI reads (05-sequence-instructor). Read-only.

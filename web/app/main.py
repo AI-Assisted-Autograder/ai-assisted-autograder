@@ -1,13 +1,13 @@
 import logging
 import secrets
 from dataclasses import asdict
-from typing import Literal
+from typing import Annotated, Literal
 from uuid import UUID
 
 from fastapi import Depends, FastAPI, Header, HTTPException, Query, Response
 from fastapi.staticfiles import StaticFiles
 from starlette.middleware.sessions import SessionMiddleware
-from pydantic import BaseModel, ValidationError
+from pydantic import BaseModel, ConfigDict, Field, ValidationError
 from sqlalchemy import func, select, text
 from sqlalchemy.exc import IntegrityError
 
@@ -23,7 +23,7 @@ from .feedback_store import StoreError
 from app.models import (
     Assignment, Course, GradingTarget, LlmProviderConfig, Rubric, TriggerRun, TriggerRunSubmission,
 )
-from app.repository import NotFoundError, SqlGradingRepository
+from app.repository import ConflictError, NotFoundError, SqlGradingRepository
 from app.ui import router as ui_router
 
 app = FastAPI(title="AI-Assisted Autograder")
@@ -167,9 +167,31 @@ def create_assignment(
     return result
 
 
+class ActiveSubmissionsRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid", strict=True)
+    platform_submission_ids: list[Annotated[str, Field(min_length=1, max_length=256, pattern=r"^\S+$")]]
+
+
+@app.put("/internal/assignments/{assignment_id}/active-submissions")
+def sync_active_submissions(
+    assignment_id: UUID,
+    request: ActiveSubmissionsRequest,
+    _: None = Depends(require_integration_token),
+):
+    """Replace active selections using a complete snapshot from Gradescope."""
+    try:
+        missing = grading_repository.sync_active_submissions(assignment_id, request.platform_submission_ids)
+    except NotFoundError as error:
+        raise HTTPException(status_code=404, detail=str(error)) from error
+    if missing:
+        raise HTTPException(status_code=409, detail={"missing_submission_ids": missing})
+    return {"assignment_id": str(assignment_id), "active_submissions": len(set(request.platform_submission_ids))}
+
+
 @app.get("/internal/ai-failures/submissions")
 def failed_ai_submissions(
     response: Response,
+    retry_eligible: bool = False,
     _: None = Depends(require_integration_token),
 ):
     """List active submissions whose latest reported AI outcome failed, in either mode."""
@@ -182,7 +204,7 @@ def failed_ai_submissions(
             "platform_submission_id": item.platform_submission_id,
             "ai_status": "FAILED",
         }
-        for item in grading_repository.list_submissions_failed_ai()
+        for item in grading_repository.list_submissions_failed_ai(retry_eligible=retry_eligible)
     ]
 
 
@@ -208,17 +230,25 @@ def nightly_submissions(
     ]
 
 
+class SubmissionAuthorizationRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    trigger_source: Literal["PENDING_NIGHTLY", "AI_FAILURES"]
+
+
 @app.post("/internal/nightly/submissions/{submission_id}/authorize")
 def authorize_nightly_submission(
     submission_id: UUID,
+    request: SubmissionAuthorizationRequest,
     _: None = Depends(require_integration_token),
 ):
     """Authorize a submission before the browser clicks Rerun Autograder."""
     try:
-        grading_repository.authorize_for_grading(submission_id)
+        granted = grading_repository.authorize_for_grading(submission_id, request.trigger_source)
     except NotFoundError as error:
         raise HTTPException(status_code=404, detail=str(error)) from error
-    return {"submission_id": str(submission_id), "authorized": True}
+    except ConflictError as error:
+        raise HTTPException(status_code=409, detail=str(error)) from error
+    return {"submission_id": str(submission_id), "authorized": True, "authorization_granted": granted}
 
 
 class TriggerRunFinishRequest(BaseModel):

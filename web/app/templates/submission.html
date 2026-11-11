@@ -12,7 +12,7 @@
 <h1>
     {{ student }}
     <span class="badge {{ style }}">{{ label }}</span>
-    {% if not submission.is_active_attempt %}<span class="badge muted">Superseded</span>{% endif %}
+    {% if submission.is_active_attempt is sameas false %}<span class="badge muted">Superseded</span>{% endif %}
 </h1>
 <dl class="meta">
     <div><dt>Submission</dt><dd><code>{{ submission.platform_submission_id }}</code></dd></div>

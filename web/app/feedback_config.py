@@ -217,6 +217,7 @@ class TargetConfig(TargetSettings):
 class AssignmentConfig(StrictModel):
     id: Identifier
     enabled: bool = True
+    grading_mode: Literal["IMMEDIATE", "NIGHTLY"] = "IMMEDIATE"
     engine: Engine = "vertex"
     provider: Literal["GOOGLE", "OPENAI", "ANTHROPIC"] = "GOOGLE"
     model: ModelName

@@ -55,7 +55,7 @@ def test_pdf_text_is_extracted():
     ("empty.txt", b"  \n ", "no text"),
     ("broken.pdf", b"%PDF-1.4 not really", "could not be read"),
     ("big.txt", b"a" * (MAX_UPLOAD_BYTES + 1), "larger than"),
-])
+], ids=["unsupported-format", "binary", "empty", "invalid-pdf", "oversized"])
 def test_unusable_files_are_refused(name, data, message):
     with pytest.raises(ValueError, match=message):
         extract_text(name, data)

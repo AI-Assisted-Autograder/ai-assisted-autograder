@@ -104,10 +104,10 @@
     <tbody>
         {% for s in submissions %}
         {% set label, style = submission_state(s.action, assignment.grading_mode) %}
-        <tr{% if not s.is_active_attempt %} class="inactive"{% endif %}>
+        <tr{% if s.is_active_attempt is sameas false %} class="inactive"{% endif %}>
             <td>
                 <a href="/submissions/{{ s.id }}">{{ s.student_identifier or "(unknown student)" }}</a>
-                {% if not s.is_active_attempt %}<span class="badge muted">Superseded</span>{% endif %}
+                {% if s.is_active_attempt is sameas false %}<span class="badge muted">Superseded</span>{% endif %}
                 <div class="sub">{{ s.platform_submission_id }}</div>
             </td>
             <td class="nowrap">{{ s.submitted_at | when }}</td>
