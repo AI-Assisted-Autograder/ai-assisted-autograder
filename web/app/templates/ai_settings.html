@@ -1,0 +1,45 @@
+{% extends "base.html" %}
+
+{% block title %}AI settings{% endblock %}
+
+{% block content %}
+<h1>AI settings</h1>
+<p>These settings apply to all assignments. Any signed-in instructor can update them.</p>
+
+{% if error %}<p class="form-error" role="alert">{{ error }}</p>{% endif %}
+{% if saved %}<p class="form-success" role="status">Settings saved. New AI requests will use this configuration.</p>{% endif %}
+
+<form id="ai-settings-form" class="card form" method="post" action="/settings/ai" autocomplete="off">
+    <dl class="meta saved-ai-settings">
+        <div><dt>Saved model</dt><dd>{% if settings is none %}Unavailable{% else %}{{ models.get(settings.model, 'Not configured for Pitt') }}{% endif %}</dd></div>
+        <div><dt>Saved API key</dt><dd>{% if settings is none %}Unavailable{% elif settings.has_custom_key %}<code>********</code>{% else %}Server default{% endif %}</dd></div>
+    </dl>
+
+    <div class="ai-settings-inputs">
+        <label class="model-field">
+            Pitt model
+            <select id="pitt-model" name="model" required {% if settings is none %}disabled{% endif %}>
+                <option value="" disabled {% if selected_model not in models %}selected{% endif %}>Choose a model</option>
+                {% for model, label in models.items() %}
+                <option value="{{ model }}" {% if selected_model == model %}selected{% endif %}>{{ label }}</option>
+                {% endfor %}
+            </select>
+        </label>
+        <label>
+            Pitt API key
+            <input id="pitt-api-key" type="password" name="api_key" value="" autocomplete="new-password"
+                spellcheck="false" aria-describedby="pitt-key-hint" {% if settings is none %}disabled{% endif %}>
+        </label>
+        <button id="test-pitt-api" type="button" {% if settings is none %}disabled{% endif %}>Test API</button>
+    </div>
+    <p id="pitt-key-hint" class="hint">Leave blank to use the server default for both testing and saving. Saving blank removes the saved custom key.</p>
+    <p class="hint">Testing sends one short API request and may incur usage charges. It does not save settings.</p>
+    <p id="pitt-test-result" role="status" aria-live="polite" hidden></p>
+    <noscript><p class="hint">Enable JavaScript to test the API connection.</p></noscript>
+
+    <div class="actions">
+        <button id="save-ai-settings" type="submit" {% if settings is none %}disabled{% endif %}>Save settings</button>
+    </div>
+</form>
+<script src="/static/ai_settings.js" defer></script>
+{% endblock %}

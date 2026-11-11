@@ -23,6 +23,7 @@ from app.models import (
     Course,
     GradingTarget,
     LlmProviderConfig,
+    PittApiSettings,
     Rubric,
 )
 from app.repository import (
@@ -45,6 +46,7 @@ def reset() -> None:
     tables = ", ".join(t.name for t in Base.metadata.sorted_tables)
     with SessionLocal.begin() as s:
         s.execute(text(f"TRUNCATE {tables} CASCADE"))
+        s.add(PittApiSettings(id=1))
 
 
 def already_seeded() -> bool:

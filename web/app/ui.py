@@ -13,7 +13,7 @@ from typing import Annotated
 
 from fastapi import APIRouter, Depends, Form, Request
 from fastapi.concurrency import run_in_threadpool
-from fastapi.responses import RedirectResponse
+from fastapi.responses import JSONResponse, RedirectResponse
 from fastapi.templating import Jinja2Templates
 from starlette.datastructures import UploadFile as StarletteUploadFile
 
@@ -21,6 +21,7 @@ from app.assignment_context import MAX_FILES, MAX_TOTAL_CHARS, MAX_UPLOAD_BYTES,
 from app.auth import require_instructor
 from app.db import SessionLocal
 from app.models import GRADING_MODES, TARGET_KINDS
+from app.pitt_settings import PITT_MODELS, encrypt_pitt_key, resolve_form_key, validate_pitt_model
 from app.repository import (
     Action,
     ConflictError,
@@ -153,6 +154,107 @@ def parse_score(value: str, label: str = "max score") -> Decimal | None:
 
 def see_other(url: str) -> RedirectResponse:
     return RedirectResponse(url, status_code=303)
+
+
+def ai_settings_page(
+    request: Request,
+    repo: IGradingRepository,
+    *,
+    selected_model: str | None = None,
+    error: str | None = None,
+    saved: bool = False,
+    status_code: int = 200,
+):
+    try:
+        settings = repo.get_pitt_settings()
+    except Exception:
+        settings = None
+        error = "AI settings are unavailable. Try again later."
+        status_code = 503
+    model = selected_model if selected_model in PITT_MODELS else (settings.model if settings else None)
+    return templates.TemplateResponse(
+        request, "ai_settings.html",
+        {"settings": settings, "models": PITT_MODELS, "selected_model": model,
+         "error": error, "saved": saved and settings is not None},
+        status_code=status_code, headers={"Cache-Control": "no-store"},
+    )
+
+
+@router.get("/settings/ai")
+def ai_settings(request: Request, repo: IGradingRepository = Depends(get_repository)):
+    return ai_settings_page(request, repo, saved=request.query_params.get("saved") == "1")
+
+
+async def pitt_form_values(request: Request) -> tuple[str, str]:
+    # Parse directly so validation errors never echo submitted credentials.
+    form = await request.form()
+    model, api_key = form.get("model", ""), form.get("api_key", "")
+    if not isinstance(model, str) or not isinstance(api_key, str):
+        raise ValueError("Choose a model and enter an API key as text.")
+    return validate_pitt_model(model), api_key
+
+
+@router.post("/settings/ai")
+async def save_ai_settings(request: Request, repo: IGradingRepository = Depends(get_repository)):
+    model = None
+    try:
+        model, raw_key = await pitt_form_values(request)
+        key = resolve_form_key(raw_key)
+        encrypted_key = encrypt_pitt_key(key) if raw_key.strip() else None
+    except ValueError as error:
+        return await run_in_threadpool(
+            ai_settings_page, request, repo, selected_model=model, error=str(error), status_code=400,
+        )
+    try:
+        store = getattr(request.app.state, "feedback_store", None)
+        if store is not None:
+            await run_in_threadpool(store.allow_pitt_models)
+        await run_in_threadpool(repo.save_pitt_settings, model, encrypted_key)
+    except Exception:
+        return await run_in_threadpool(
+            ai_settings_page, request, repo, selected_model=model,
+            error="Settings could not be saved. Try again later.", status_code=503,
+        )
+    return RedirectResponse("/settings/ai?saved=1", status_code=303, headers={"Cache-Control": "no-store"})
+
+
+def test_pitt_connection(model: str, key: str) -> None:
+    from ai_grading.ILLMProvider.PittProvider import PittProvider
+
+    provider = PittProvider(model, api_key=key, timeout_seconds=30, max_output_tokens=64)
+    try:
+        provider.test_connection()
+    finally:
+        provider.close()
+
+
+@router.post("/settings/ai/test")
+async def test_ai_settings(request: Request):
+    from ai_grading.ILLMProvider.ILLMProvider import ProviderError
+
+    try:
+        model, raw_key = await pitt_form_values(request)
+        key = resolve_form_key(raw_key)
+    except ValueError as error:
+        return JSONResponse({"ok": False, "message": str(error)}, status_code=400,
+                            headers={"Cache-Control": "no-store"})
+    try:
+        await run_in_threadpool(test_pitt_connection, model, key)
+    except ProviderError as error:
+        message = {
+            "backend_auth_unavailable": "The API key was rejected or cannot access this model.",
+            "model_unavailable": "The selected model is unavailable for this API key.",
+            "rate_limited": "Pitt is rate-limiting this API key. Wait and try again.",
+            "timeout": "Pitt did not respond in time. Try again later.",
+            "provider_unavailable": "Could not connect to Pitt AI Connect. Try again later.",
+        }.get(error.code, error.message)
+        return JSONResponse({"ok": False, "message": message}, status_code=502,
+                            headers={"Cache-Control": "no-store"})
+    except Exception:
+        return JSONResponse({"ok": False, "message": "The API test could not be completed. Try again later."},
+                            status_code=502, headers={"Cache-Control": "no-store"})
+    return JSONResponse({"ok": True, "message": "API connection successful. Settings have not been saved."},
+                        headers={"Cache-Control": "no-store"})
 
 
 @router.get("/assignments/new")

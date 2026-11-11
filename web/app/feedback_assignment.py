@@ -253,6 +253,8 @@ def read_assignment_config(repository, assignment_id: str) -> AssignmentConfig:
         return AssignmentConfig(
             id=str(assignment.id), enabled=assignment.is_active,
             grading_mode=assignment.grading_mode,
+            pitt_key_source=assignment.pitt_key_source if model_config["engine"] == "pitt" else "server",
+            pitt_key_version=assignment.pitt_key_version if model_config["engine"] == "pitt" else 0,
             **model_config, targets=targets,
         )
     except (TypeError, ValueError):

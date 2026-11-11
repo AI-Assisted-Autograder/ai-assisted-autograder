@@ -205,6 +205,20 @@ class LlmProviderConfig(Base):
     is_primary: Mapped[bool] = mapped_column(server_default=false())
 
 
+class PittApiSettings(Base):
+    """The shared Pitt credential, independent of the selected model."""
+
+    __tablename__ = "pitt_api_settings"
+    __table_args__ = (
+        CheckConstraint("id = 1", name="singleton"),
+        CheckConstraint("key_version >= 0", name="key_version"),
+    )
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, default=1, server_default="1")
+    encrypted_key: Mapped[str | None] = mapped_column(Text)
+    key_version: Mapped[int] = mapped_column(Integer, nullable=False, default=0, server_default="0")
+
+
 # ---------------------------------------------------------------------
 # Runtime: written by the autograder script
 # ---------------------------------------------------------------------

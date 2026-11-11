@@ -143,6 +143,22 @@ class JsonStore:
             self._ensure_open()
             return self._state.config.model_copy(deep=True)
 
+    def allow_pitt_models(self) -> None:
+        """Enable the Web's fixed Pitt choices without replacing runtime state."""
+        from .pitt_settings import PITT_MODELS
+
+        with self._mutex:
+            self._ensure_open()
+            allowed = self._state.config.allowed_models.get("pitt", [])
+            missing = [model for model in PITT_MODELS if model not in allowed]
+            if not missing:
+                return
+            candidate = self._state.model_copy(deep=True)
+            candidate.config.allowed_models["pitt"] = [*allowed, *missing]
+            candidate.config = BackendConfig.model_validate(candidate.config.model_dump())
+            self._persist(candidate)
+            self._state = candidate
+
     def authenticate(self, raw_token: str) -> str:
         with self._mutex:
             self._ensure_open()

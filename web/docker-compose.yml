@@ -16,6 +16,7 @@ services:
       SESSION_COOKIE_SECURE: ${SESSION_COOKIE_SECURE:-false}
       GOOGLE_APPLICATION_CREDENTIALS: /run/google/application_default_credentials.json
       PITT_API_KEY: ${PITT_API_KEY:-}
+      PITT_KEY_ENCRYPTION_KEY: ${PITT_KEY_ENCRYPTION_KEY:-}
       GEMINI_API_KEY: ${GEMINI_API_KEY:-}
     depends_on:
       db:

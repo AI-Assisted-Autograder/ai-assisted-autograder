@@ -173,7 +173,7 @@ def error(code: str, status: int, request_id: str | None = None, *, accounting=N
                         headers={"Cache-Control": "no-store"})
 
 
-def default_provider_factory(config, assignment):
+def default_provider_factory(config, assignment, *, pitt_api_key=None):
     options = {"model": assignment.model, "timeout_seconds": config.timeout_seconds,
                "max_output_tokens": config.max_output_tokens}
     if assignment.engine == "vertex":
@@ -184,7 +184,7 @@ def default_provider_factory(config, assignment):
         )
     if assignment.engine == "pitt":
         from ai_grading.ILLMProvider.PittProvider import PittProvider
-        return PittProvider(**options, provider=assignment.provider)
+        return PittProvider(**options, provider=assignment.provider, api_key=pitt_api_key)
     if assignment.engine == "gemini_api":
         from ai_grading.ILLMProvider.GeminiProvider import GeminiProvider
         key = os.environ.get("GEMINI_API_KEY") or os.environ.get("GOOGLE_API_KEY")
@@ -195,7 +195,8 @@ def default_provider_factory(config, assignment):
 
 
 def create_feedback_router(state_path: str | Path, *, assignment_loader,
-                           provider_factory=None, grading_repository=None) -> APIRouter:
+                           provider_factory=None, grading_repository=None,
+                           pitt_key_resolver=None) -> APIRouter:
     factory = provider_factory or default_provider_factory
     runtime = SimpleNamespace()
 
@@ -217,6 +218,8 @@ def create_feedback_router(state_path: str | Path, *, assignment_loader,
                                   thread_name_prefix="feedback")
         runtime.pool = pool
         try:
+            if grading_repository is not None:
+                store.allow_pitt_models()
             yield
         finally:
             if runtime.jobs:
@@ -342,22 +345,30 @@ def create_feedback_router(state_path: str | Path, *, assignment_loader,
             body.extend(chunk)
         return bytes(body)
 
-    def invoke(assignment_id, rid, assignment, grading_request, deadline):
+    def invoke(assignment_id, rid, assignment, grading_request, deadline, pitt_api_key):
         if time.monotonic() >= deadline:
             raise TimeoutError
-        with runtime.provider_lock:
-            key = (assignment_id, assignment.engine, assignment.provider, assignment.model)
-            if key not in runtime.providers:
-                runtime.providers[key] = factory(runtime.store.config, assignment)
-            provider = runtime.providers[key]
-        if time.monotonic() >= deadline:
-            raise TimeoutError
+        transient = assignment.engine == "pitt" and provider_factory is None
+        if transient:
+            provider = default_provider_factory(runtime.store.config, assignment,
+                                                pitt_api_key=pitt_api_key)
+        else:
+            with runtime.provider_lock:
+                key = (assignment_id, assignment.engine, assignment.provider, assignment.model)
+                if key not in runtime.providers:
+                    runtime.providers[key] = factory(runtime.store.config, assignment)
+                provider = runtime.providers[key]
         try:
+            if time.monotonic() >= deadline:
+                raise TimeoutError
             response = provider.generate_feedback(grading_request)
         except ProviderError as exc:
             if exc.usage is not None:
                 runtime.store.record_usage(assignment_id, rid, exc.usage, exc.model_name or assignment.model)
             raise
+        finally:
+            if transient:
+                provider.close()
         runtime.store.record_usage(assignment_id, rid, response.usage, response.model_name)
         return response
 
@@ -511,6 +522,7 @@ def create_feedback_router(state_path: str | Path, *, assignment_loader,
         digest = hashlib.sha256(canonical.encode("utf-8")).hexdigest()
         # An accepted request retains its configuration snapshot while polling.
         # Current assignment/target authorization above still applies to replays.
+        pitt_api_key = None
         if existing is None:
             if target.analysis.behavior is not None and payload.config_revision is None:
                 return error("invalid_request", 422, rid)
@@ -534,6 +546,20 @@ def create_feedback_router(state_path: str | Path, *, assignment_loader,
                 PromptBuilder().prepare(grading_request)
             except ValueError:
                 return error("input_too_large", 413, rid)
+            if assignment.engine == "pitt":
+                try:
+                    if pitt_key_resolver is not None:
+                        pitt_api_key = await asyncio.to_thread(pitt_key_resolver, assignment)
+                    elif assignment.pitt_key_source == "custom":
+                        return error("backend_auth_unavailable", 503, rid)
+                    elif provider_factory is None:
+                        pitt_api_key = os.environ.get("PITT_API_KEY", "").strip()
+                        if not pitt_api_key:
+                            return error("backend_auth_unavailable", 503, rid)
+                except StoreError as exc:
+                    return error(exc.code, exc.status_code, rid)
+                except ValueError:
+                    return error("backend_auth_unavailable", 503, rid)
         # No await between checking capacity, reserving quota and occupying it.
         # Replays must still work at full capacity and after quota exhaustion.
         try:
@@ -564,7 +590,7 @@ def create_feedback_router(state_path: str | Path, *, assignment_loader,
         runtime.inflight += 1
         future = asyncio.get_running_loop().run_in_executor(
             runtime.pool, invoke, assignment_id, rid, assignment, grading_request,
-            time.monotonic() + config.timeout_seconds,
+            time.monotonic() + config.timeout_seconds, pitt_api_key,
         )
         runtime.tasks.add(future)
 

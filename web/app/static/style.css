@@ -73,6 +73,7 @@ header.site {
     border-bottom: 1px solid var(--border);
 }
 header.site .brand { font-weight: 600; color: var(--text); }
+header.site nav { display: flex; gap: 1rem; }
 header.site nav a { color: var(--muted); }
 
 main {
@@ -210,6 +211,12 @@ form.inline .grow { flex: 1 1 260px; }
 form.inline .narrow { flex: 0 1 140px; }
 
 .form-error { border-left: 3px solid var(--failed-fg); background: var(--failed-bg); color: var(--failed-fg); padding: 0.5rem 0.8rem; border-radius: 4px; }
+.form-success { border-left: 3px solid var(--done-fg); background: var(--done-bg); color: var(--done-fg); padding: 0.5rem 0.8rem; border-radius: 4px; }
+.saved-ai-settings { padding-bottom: 0.6rem; border-bottom: 1px solid var(--border); }
+.ai-settings-inputs { display: grid; grid-template-columns: minmax(160px, 1fr) minmax(180px, 1.2fr) auto; gap: 0.6rem; align-items: end; }
+.ai-settings-inputs label { min-width: 0; }
+.ai-settings-inputs button { white-space: nowrap; }
+button:disabled { cursor: default; opacity: 0.6; }
 .card-action { margin: 0.6rem 0 0; font-size: 0.9rem; display: flex; align-items: center; gap: 1rem; }
 .card-action form { margin: 0; }
 button.link { padding: 0; border: none; background: none; color: var(--link); font-weight: normal; }
@@ -218,7 +225,9 @@ button.danger { color: var(--failed-fg); }
 
 @media (max-width: 600px) {
     main { padding: 1rem; }
-    header.site { padding: 0.8rem 1rem; }
+    header.site { padding: 0.8rem 1rem; flex-wrap: wrap; }
+    .ai-settings-inputs { grid-template-columns: minmax(0, 1fr) auto; }
+    .ai-settings-inputs .model-field { grid-column: 1 / -1; }
 }
 
 header.site form.signed-in { margin-left: auto; display: flex; gap: 0.8rem; align-items: baseline; }

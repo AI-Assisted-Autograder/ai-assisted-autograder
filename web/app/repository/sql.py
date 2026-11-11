@@ -17,6 +17,7 @@ from app.models import (
     Course,
     GradingTarget,
     LlmProviderConfig,
+    PittApiSettings,
     Rubric,
     Submission,
     SubmissionTarget,
@@ -35,7 +36,10 @@ from app.repository.base import (
     FeedbackResult,
     IGradingRepository,
     NotFoundError,
+    PittCredential,
+    PittSettings,
     ProviderConfig,
+    RepositoryError,
     ResultCell,
     ResultColumn,
     ResultRow,
@@ -72,6 +76,7 @@ from app.repository.base import (
     target_status,
     to_decimal,
 )
+from app.pitt_settings import validate_pitt_model
 
 
 class SqlGradingRepository(IGradingRepository):
@@ -374,6 +379,11 @@ class SqlGradingRepository(IGradingRepository):
                 .where(LlmProviderConfig.is_enabled)
                 .order_by(LlmProviderConfig.is_primary.desc(), LlmProviderConfig.provider, LlmProviderConfig.model_name)
             ).all()
+            credential = s.execute(
+                select(PittApiSettings.encrypted_key.is_not(None), PittApiSettings.key_version)
+                .where(PittApiSettings.id == 1)
+            ).one_or_none()
+            has_custom_key, key_version = credential or (False, 0)
             return AssignmentConfig(
                 a.id,
                 a.platform,
@@ -386,7 +396,51 @@ class SqlGradingRepository(IGradingRepository):
                 tuple(ProviderConfig(p.provider, p.model_name, p.is_primary, p.engine) for p in providers),
                 a.context_notes,
                 tuple(self._context_files(s, a.id)),
+                "custom" if has_custom_key else "server",
+                key_version,
             )
+
+    def get_pitt_settings(self) -> PittSettings:
+        with self._sessions.begin() as s:
+            s.connection(execution_options={"isolation_level": "REPEATABLE READ"})
+            model = s.scalar(select(LlmProviderConfig.model_name).where(
+                LlmProviderConfig.engine == "pitt", LlmProviderConfig.is_enabled,
+                LlmProviderConfig.is_primary,
+            ))
+            credential = s.execute(
+                select(PittApiSettings.encrypted_key.is_not(None), PittApiSettings.key_version)
+                .where(PittApiSettings.id == 1)
+            ).one_or_none()
+            has_custom_key, key_version = credential or (False, 0)
+            return PittSettings(model, has_custom_key, key_version)
+
+    def get_pitt_credential(self) -> PittCredential:
+        with self._sessions.begin() as s:
+            row = s.get(PittApiSettings, 1)
+            return PittCredential(row.encrypted_key, row.key_version) if row else PittCredential(None, 0)
+
+    def save_pitt_settings(self, model: str, encrypted_key: str | None) -> None:
+        model = validate_pitt_model(model)
+        with self._sessions.begin() as s:
+            credential = s.get(PittApiSettings, 1, with_for_update=True)
+            if credential is None:
+                raise RepositoryError("Pitt settings are unavailable; apply database migrations.")
+            providers = s.scalars(
+                select(LlmProviderConfig).order_by(LlmProviderConfig.id).with_for_update()
+            ).all()
+            selected = next((p for p in providers if p.engine == "pitt" and p.model_name == model), None)
+            for provider in providers:
+                provider.is_primary = False
+            # Release the existing partial unique index entry within this transaction.
+            s.flush()
+            if selected is None:
+                selected = LlmProviderConfig(engine="pitt", provider="GOOGLE", model_name=model)
+                s.add(selected)
+            selected.provider = "GOOGLE"
+            selected.is_enabled = True
+            selected.is_primary = True
+            credential.encrypted_key = encrypted_key
+            credential.key_version += 1
 
     def get_selected_feedback(self, submission_id: uuid.UUID) -> FeedbackPackage:
         with self._sessions.begin() as s:

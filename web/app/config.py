@@ -7,6 +7,7 @@ class Settings(BaseSettings):
     database_url: str = "postgresql+psycopg://autograder:autograder@db:5432/autograder"
     integration_api_token: str | None = None
     feedback_state_path: str | None = None
+    pitt_key_encryption_key: str | None = None
     # Signs the instructor session cookie. Unset means a random key per
     # process, so every restart signs everyone out.
     session_secret: str | None = None

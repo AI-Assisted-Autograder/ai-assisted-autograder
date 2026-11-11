@@ -9,6 +9,7 @@ COPY web/app/*.py ./app/
 COPY web/app/repository/*.py ./app/repository/
 COPY web/app/templates/*.html ./app/templates/
 COPY web/app/static/*.css ./app/static/
+COPY web/app/static/*.js ./app/static/
 COPY web/alembic.ini .
 COPY web/migrations/*.py web/migrations/script.py.mako ./migrations/
 COPY web/migrations/versions/*.py ./migrations/versions/

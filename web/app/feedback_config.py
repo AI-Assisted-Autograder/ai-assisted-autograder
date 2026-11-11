@@ -221,6 +221,8 @@ class AssignmentConfig(StrictModel):
     engine: Engine = "vertex"
     provider: Literal["GOOGLE", "OPENAI", "ANTHROPIC"] = "GOOGLE"
     model: ModelName
+    pitt_key_source: Literal["server", "custom"] = "server"
+    pitt_key_version: int = Field(default=0, ge=0)
     # An assignment may not have any targets with a current rubric yet.
     targets: dict[Identifier, TargetConfig]
 

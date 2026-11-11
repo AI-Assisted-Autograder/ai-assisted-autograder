@@ -299,8 +299,7 @@ configuration and valid assignment access, including during replay.
 
 The team must provide public HTTPS to Web port 8000. The client uses short
 asynchronous polling requests; synchronous API callers need a proxy timeout longer
-than the configured generation timeout. Instructor forms have no application-level
-login, so restrict them using the deployment's existing access controls. The
+than the configured generation timeout. Instructor pages require sign-in. The
 combined service reads SQL directly; `ASSIGNMENT_API_URL` is only needed for a
 separate AI process.
 
@@ -367,6 +366,26 @@ existing model policy and limits; omit those flags.
 
 ### Change engine or model
 
+Signed-in instructors can use **AI settings** (`/settings/ai`) to switch all
+assignments between Pitt Gemini 4 Argon and Gemini 3.8 Flash. **Save settings**
+saves the model and shared API key together. An empty key field restores the
+server's `PITT_API_KEY`; a nonempty field replaces the shared key. Saved keys are
+never returned to the browser: the page displays a fixed `********` marker and
+leaves the input empty. Re-enter the custom key when saving another model if you
+want to retain it. **Test API** tests the current form values without saving or
+using assignment quota; it makes one short, billable provider request.
+
+To save custom keys, set a stable private `PITT_KEY_ENCRYPTION_KEY` in `.env`
+(generate it with `python -c "from cryptography.fernet import Fernet; print(Fernet.generate_key().decode())"`)
+and recreate Web. Keep this encryption key across restarts. Migration `0010`
+stores only encrypted credentials; it preserves the selected model and uses the
+server key until a custom key is saved. Web switches update the Pitt allowlist
+under the existing state lock, preserving quotas and request history. New requests
+use the saved settings immediately; existing requests and replays retain their
+original attempt. Models without price entries remain unpriced.
+
+For engines and models outside these two Web choices, use the manual procedure:
+
 The enabled primary DB row selects the engine/model for all assignments. The
 state's `config.allowed_models` must include that exact pair. Stop Web before
 editing state, retain tokens/quota/replay records, and restart afterward. Do not
@@ -392,8 +411,8 @@ WHERE is_primary = true;
 ```
 
 Use the matching vendor and verify that one row was updated. Read the internal
-configuration endpoint to confirm the selection. The instructor forms edit target
-configuration and rubrics, but do not edit global providers or token policy.
+configuration endpoint to confirm the selection. Token policy remains managed
+outside the instructor forms.
 
 ### Current limits and separate-process use
 
@@ -404,7 +423,9 @@ configuration and rubrics, but do not edit global providers or token policy.
   `INTEGRATION_API_TOKEN`; see `python3 -m web.app.feedback --help` from the repository
   root. Keep its state separate from the combined Web service. Export provider
   credentials in the process environment; standalone Python does not load
-  `web/.env`. API readers accept HTTPS or loopback HTTP origins only.
+  `web/.env`. API readers accept HTTPS or loopback HTTP origins only. The separate
+  process supports the server-key setting; a saved Web key requires the combined
+  Web/backend deployment and is never exported through the configuration API.
 
 ## Database schema
 

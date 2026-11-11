@@ -24,6 +24,8 @@ from app.repository.base import (
     FeedbackResult,
     IGradingRepository,
     NotFoundError,
+    PittCredential,
+    PittSettings,
     ProviderConfig,
     ResultCell,
     ResultColumn,
@@ -61,6 +63,7 @@ from app.repository.base import (
     target_status,
     to_decimal,
 )
+from app.pitt_settings import validate_pitt_model
 
 
 @dataclass
@@ -179,6 +182,7 @@ class InMemoryRepository(IGradingRepository):
         self.test_results: list[_TestResult] = []
         self.ai_feedback: list[_AiFeedback] = []
         self.providers: list[_LlmProviderConfig] = []
+        self._pitt_credential = PittCredential(None, 0)
         self.context_files: list[ContextFile] = []
         self._context_owner: dict[uuid.UUID, uuid.UUID] = {}
 
@@ -456,7 +460,31 @@ class InMemoryRepository(IGradingRepository):
             tuple(ProviderConfig(p.provider, p.model_name, p.is_primary, p.engine) for p in providers),
             a.context_notes,
             tuple(self._context_files(a.id)),
+            "custom" if self._pitt_credential.encrypted_key is not None else "server",
+            self._pitt_credential.key_version,
         )
+
+    def get_pitt_settings(self) -> PittSettings:
+        model = next((p.model_name for p in self.providers
+                      if p.engine == "pitt" and p.is_enabled and p.is_primary), None)
+        return PittSettings(model, self._pitt_credential.encrypted_key is not None,
+                            self._pitt_credential.key_version)
+
+    def get_pitt_credential(self) -> PittCredential:
+        return self._pitt_credential
+
+    def save_pitt_settings(self, model: str, encrypted_key: str | None) -> None:
+        model = validate_pitt_model(model)
+        selected = next((p for p in self.providers if p.engine == "pitt" and p.model_name == model), None)
+        for provider in self.providers:
+            provider.is_primary = False
+        if selected is None:
+            selected = _LlmProviderConfig("GOOGLE", model, True, True, "pitt")
+            self.providers.append(selected)
+        selected.provider = "GOOGLE"
+        selected.is_enabled = True
+        selected.is_primary = True
+        self._pitt_credential = PittCredential(encrypted_key, self._pitt_credential.key_version + 1)
 
     def get_selected_feedback(self, submission_id: uuid.UUID) -> FeedbackPackage:
         self._submission(submission_id)

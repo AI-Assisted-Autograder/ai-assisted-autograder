@@ -21,7 +21,7 @@ from .feedback_config import (
 )
 from .feedback_store import StoreError
 from app.models import (
-    Assignment, Course, GradingTarget, LlmProviderConfig, Rubric, TriggerRun, TriggerRunSubmission,
+    Assignment, Course, GradingTarget, LlmProviderConfig, PittApiSettings, Rubric, TriggerRun, TriggerRunSubmission,
 )
 from app.repository import ConflictError, NotFoundError, SqlGradingRepository
 from app.ui import router as ui_router
@@ -47,6 +47,7 @@ grading_repository = SqlGradingRepository(SessionLocal)
 
 if settings.feedback_state_path:
     from .feedback import create_feedback_router
+    from .pitt_settings import resolve_runtime_key
 
     app.include_router(create_feedback_router(
         settings.feedback_state_path,
@@ -54,6 +55,7 @@ if settings.feedback_state_path:
             grading_repository, assignment_id,
         ),
         grading_repository=grading_repository,
+        pitt_key_resolver=lambda assignment: resolve_runtime_key(grading_repository, assignment),
     ))
 
 
@@ -96,6 +98,7 @@ def create_assignment(
     """Atomically create instructor configuration; never write submission or feedback data."""
     try:
         with SessionLocal.begin() as session:
+            session.connection(execution_options={"isolation_level": "REPEATABLE READ"})
             existing = session.scalar(select(Assignment.id).where(
                 Assignment.platform == request.platform,
                 Assignment.platform_assignment_id == request.platform_assignment_id,
@@ -105,6 +108,13 @@ def create_assignment(
             model_config = primary_model_config(session.scalars(
                 select(LlmProviderConfig).where(LlmProviderConfig.is_enabled)
             ).all())
+            if model_config["engine"] == "pitt":
+                credential = session.execute(select(
+                    PittApiSettings.encrypted_key.is_not(None), PittApiSettings.key_version,
+                ).where(PittApiSettings.id == 1)).one_or_none()
+                has_custom_key, key_version = credential or (False, 0)
+                model_config.update(pitt_key_source="custom" if has_custom_key else "server",
+                                    pitt_key_version=key_version)
             if request.course_id is not None:
                 course = session.get(Course, request.course_id)
                 if course is None:

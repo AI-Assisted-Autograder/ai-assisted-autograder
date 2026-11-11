@@ -130,6 +130,19 @@ class ProviderConfig:
 
 
 @dataclass(frozen=True)
+class PittSettings:
+    model: str | None
+    has_custom_key: bool
+    key_version: int
+
+
+@dataclass(frozen=True)
+class PittCredential:
+    encrypted_key: str | None = field(repr=False)
+    key_version: int
+
+
+@dataclass(frozen=True)
 class ContextFile:
     """An instructor-uploaded document's extracted text (app.assignment_context)."""
 
@@ -157,6 +170,8 @@ class AssignmentConfig:
     # Added to every target's prompt background. Files in upload order.
     context_notes: str | None = None
     context_files: tuple[ContextFile, ...] = ()
+    pitt_key_source: str = "server"
+    pitt_key_version: int = 0
 
 
 @dataclass(frozen=True)
@@ -706,6 +721,18 @@ class IGradingRepository(ABC):
     @abstractmethod
     def get_assignment_config(self, assignment_id: uuid.UUID) -> AssignmentConfig:
         """Targets in display order with their current rubric, and providers."""
+
+    @abstractmethod
+    def get_pitt_settings(self) -> PittSettings:
+        """Read the shared model and credential status without secret material."""
+
+    @abstractmethod
+    def get_pitt_credential(self) -> PittCredential:
+        """Read the encrypted credential only for backend model execution."""
+
+    @abstractmethod
+    def save_pitt_settings(self, model: str, encrypted_key: str | None) -> None:
+        """Atomically select the global Pitt model and advance its credential version."""
 
     @abstractmethod
     def get_selected_feedback(self, submission_id: uuid.UUID) -> FeedbackPackage:

@@ -59,8 +59,14 @@ class PittProvider:
             "max_tokens": self._max_output_tokens,
             "stream": False,
         }
-        if req.analysis.temperature is not None:
+        if (req.analysis.temperature is not None
+                and not self.model.rsplit("/", 1)[-1].startswith("gemini-3.8-")):
             payload["temperature"] = req.analysis.temperature
+        response = self._post(payload)
+        return self._parse_response(response, req, prompt.version)
+
+    def _post(self, payload: dict, *, testing: bool = False) -> httpx.Response:
+        """Send a Pitt request without exposing upstream response bodies."""
         try:
             response = self._client.post(
                 "https://api.portkey.ai/v1/chat/completions",
@@ -79,11 +85,40 @@ class PittProvider:
                 "backend_auth_unavailable", "Backend Pitt authentication is unavailable.",
             )
         if not response.is_success:
+            code = ({404: "model_unavailable", 429: "rate_limited"}.get(
+                response.status_code, "provider_error",
+            ) if testing else "provider_error")
             raise ProviderError(
-                "provider_error",
+                code,
                 f"Pitt rejected the request (HTTP {response.status_code}).",
                 retryable=response.status_code in (408, 429) or response.status_code >= 500,
             )
+        return response
+
+    def test_connection(self) -> None:
+        """Check the selected model with one small request, without grading."""
+        response = self._post({
+            "model": self.model,
+            "messages": [{"role": "user", "content": "Reply with OK."}],
+            "max_tokens": 64,
+            "stream": False,
+        }, testing=True)
+        try:
+            data = response.json()
+            choices = data["choices"]
+            if (not isinstance(choices, list) or len(choices) != 1
+                    or not isinstance(choices[0], dict)
+                    or not isinstance(choices[0].get("message"), dict)
+                    or choices[0].get("finish_reason") not in ("stop", "length")
+                    or choices[0]["message"].get("refusal")):
+                raise ValueError
+        except (ValueError, KeyError, TypeError):
+            raise ProviderError(
+                "invalid_provider_response", "Pitt did not return a usable API test response.",
+            ) from None
+
+    def _parse_response(self, response: httpx.Response, req: FeedbackRequest,
+                        prompt_version: str) -> FeedbackResponse:
         usage = None
         model_name = self.model
         try:
@@ -125,7 +160,7 @@ class PittProvider:
                 request=req,
                 provider=self.name,
                 model_name=model_name,
-                prompt_version=prompt.version,
+                prompt_version=prompt_version,
                 input_tokens=usage.input_tokens,
                 output_tokens=usage.output_tokens,
             )
