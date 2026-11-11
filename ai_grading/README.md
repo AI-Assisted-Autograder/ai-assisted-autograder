@@ -147,28 +147,46 @@ file. Each entry uses USD per million tokens and an effective date (UTC):
   "engine": "pitt",
   "model": "@pitt-ai-connect-google-vertex/gemini-4-argon",
   "response_model": "gemini-4-argon",
-  "effective_from": "2026-10-13",
+  "effective_from": "2026-11-10",
   "input_per_million": "2.00",
   "cached_input_per_million": "0.10",
   "output_per_million": "10.00",
-  "basis": "Google Cloud Standard / Global; public rates including applicable credits"
+  "basis": "Pitt listed input/output (2026-11-10); Google Cloud public cache-read rates; no assumed future price changes"
 }
 ```
 
 The latest effective entry for the exact engine/model is selected when a request
-is reserved. The actual response model must match `response_model`. Add an entry
-when switching models; missing prices leave usage recorded and cost unavailable.
+is reserved. The actual response model must match `response_model`, including
+the dated model versions returned by Azure OpenAI. Web startup and AI settings
+saves fill missing Pitt model prices without overwriting custom price schedules.
 Stop Web before editing its state file, preserve existing tokens, quota and
 request records, then restart. Do not reinitialize state. Existing request
 estimates keep their original prices.
 
-Defaults cover Pitt Gemini 4 Argon at the [Google Cloud Standard/Global public
-rates](https://cloud.google.com/model-garden/pricing): $2 input, $0.10 cached input
-and $10 output through November 30, 2026; $4, $0.20 and $20 from December 1.
-These are estimates including the advertised promotional credits, not Pitt
-invoices; configure different rates if the Pitt route uses another region or
-pricing arrangement. Cached tokens are subtracted from ordinary input, and
-output already includes reasoning tokens.
+Default input/output rates use the Pitt AI Connect price table supplied on
+November 10, 2026. All amounts below are USD per million tokens:
+
+| Model | Input | Cached input estimate | Output |
+| --- | ---: | ---: | ---: |
+| Gemini 4 Argon | 2.00 | 0.10 | 10.00 |
+| Gemini 3.8 Flash | 0.75 | 0.075 | 3.75 |
+| Claude Sonnet 5.5 | 2.00 | 0.10 | 10.00 |
+| Claude Opus 5.5 | 4.00 | 0.20 | 20.00 |
+| GPT-6.1 Sol | 2.00 | 0.10 | 10.00 |
+| GPT-6 Luna | 0.10 | 0.01 | 0.50 |
+
+
+GPT estimates also use the default 30-minute cache-write rates: $2.50 for Sol
+and $0.125 for Luna. Reported reads and writes are subtracted from ordinary input
+before applying their rates; output already includes reasoning tokens. Missing
+required cache-write usage or an unconfigured write rate leaves cost unavailable.
+The current connector does not request explicit Claude/Google cache creation.
+These are reference estimates, not verified Pitt invoices; upstream tier, cache,
+or storage charges may differ from Pitt billing.
+
+No regional surcharge or future promotional-price increase is assumed for Pitt.
+The previous untouched two-entry Argon default schedule is replaced on Web
+startup/save; edited schedules and historical request snapshots are preserved.
 
 Usage remains recorded when feedback parsing or grading fails. A provider
 response arriving after the hook ends can update the Web total, but cannot

@@ -222,12 +222,13 @@ class FailureFeedbackItem:
 
 @dataclass(frozen=True, config=CONTRACT_CONFIG)
 class TokenUsage:
-    """Provider usage; cached input and reasoning are subsets of their totals."""
+    """Provider usage; cache reads/writes and reasoning are subsets of their totals."""
 
     input_tokens: Count | None = None
     output_tokens: Count | None = None
     cached_input_tokens: Count | None = None
     reasoning_tokens: Count | None = None
+    cache_write_tokens: Count | None = None
 
 
 @dataclass(frozen=True, config=CONTRACT_CONFIG)
@@ -247,6 +248,7 @@ class FeedbackResponse:
     output_tokens: Count | None = None
     cached_input_tokens: Count | None = field(default=None, kw_only=True)
     reasoning_tokens: Count | None = field(default=None, kw_only=True)
+    cache_write_tokens: Count | None = field(default=None, kw_only=True)
     rubric_id: Identifier | None = field(default=None, kw_only=True)
     items: tuple[FeedbackItem, ...] = ()
     failure_feedback: tuple[FailureFeedbackItem, ...] = ()
@@ -259,6 +261,7 @@ class FeedbackResponse:
             output_tokens=self.output_tokens,
             cached_input_tokens=self.cached_input_tokens,
             reasoning_tokens=self.reasoning_tokens,
+            cache_write_tokens=self.cache_write_tokens,
         )
 
 

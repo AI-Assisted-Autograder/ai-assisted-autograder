@@ -8,8 +8,12 @@ from app.config import settings
 
 
 PITT_MODELS = {
-    "@pitt-ai-connect-google-vertex/gemini-4-argon": "Gemini 4 Argon",
-    "@pitt-ai-connect-google-vertex/gemini-3.8-flash": "Gemini 3.8 Flash",
+    "@pitt-ai-connect-google-vertex/gemini-4-argon": {"label": "Gemini 4 Argon", "provider": "GOOGLE"},
+    "@pitt-ai-connect-google-vertex/gemini-3.8-flash": {"label": "Gemini 3.8 Flash", "provider": "GOOGLE"},
+    "@pitt-ai-connect/us.anthropic.claude-sonnet-5-5": {"label": "Claude Sonnet 5.5", "provider": "ANTHROPIC"},
+    "@pitt-ai-connect/us.anthropic.claude-opus-5-5": {"label": "Claude Opus 5.5", "provider": "ANTHROPIC"},
+    "@pitt-ai-connect-azure-foundry/gpt-6.1-sol": {"label": "GPT-6.1 Sol", "provider": "OPENAI"},
+    "@pitt-ai-connect-azure-foundry/gpt-6-luna": {"label": "GPT-6 Luna", "provider": "OPENAI"},
 }
 
 

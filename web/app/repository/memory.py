@@ -63,7 +63,7 @@ from app.repository.base import (
     target_status,
     to_decimal,
 )
-from app.pitt_settings import validate_pitt_model
+from app.pitt_settings import PITT_MODELS, validate_pitt_model
 
 
 @dataclass
@@ -475,13 +475,14 @@ class InMemoryRepository(IGradingRepository):
 
     def save_pitt_settings(self, model: str, encrypted_key: str | None) -> None:
         model = validate_pitt_model(model)
+        vendor = PITT_MODELS[model]["provider"]
         selected = next((p for p in self.providers if p.engine == "pitt" and p.model_name == model), None)
         for provider in self.providers:
             provider.is_primary = False
         if selected is None:
-            selected = _LlmProviderConfig("GOOGLE", model, True, True, "pitt")
+            selected = _LlmProviderConfig(vendor, model, True, True, "pitt")
             self.providers.append(selected)
-        selected.provider = "GOOGLE"
+        selected.provider = vendor
         selected.is_enabled = True
         selected.is_primary = True
         self._pitt_credential = PittCredential(encrypted_key, self._pitt_credential.key_version + 1)

@@ -76,7 +76,7 @@ from app.repository.base import (
     target_status,
     to_decimal,
 )
-from app.pitt_settings import validate_pitt_model
+from app.pitt_settings import PITT_MODELS, validate_pitt_model
 
 
 class SqlGradingRepository(IGradingRepository):
@@ -421,6 +421,7 @@ class SqlGradingRepository(IGradingRepository):
 
     def save_pitt_settings(self, model: str, encrypted_key: str | None) -> None:
         model = validate_pitt_model(model)
+        vendor = PITT_MODELS[model]["provider"]
         with self._sessions.begin() as s:
             credential = s.get(PittApiSettings, 1, with_for_update=True)
             if credential is None:
@@ -434,9 +435,9 @@ class SqlGradingRepository(IGradingRepository):
             # Release the existing partial unique index entry within this transaction.
             s.flush()
             if selected is None:
-                selected = LlmProviderConfig(engine="pitt", provider="GOOGLE", model_name=model)
+                selected = LlmProviderConfig(engine="pitt", provider=vendor, model_name=model)
                 s.add(selected)
-            selected.provider = "GOOGLE"
+            selected.provider = vendor
             selected.is_enabled = True
             selected.is_primary = True
             credential.encrypted_key = encrypted_key

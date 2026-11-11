@@ -56,14 +56,25 @@ class PittProvider:
                 {"role": "system", "content": prompt.system_instruction},
                 {"role": "user", "content": prompt.context},
             ],
-            "max_tokens": self._max_output_tokens,
+            **self._generation_parameters(self._max_output_tokens, req.analysis.temperature),
             "stream": False,
         }
-        if (req.analysis.temperature is not None
-                and not self.model.rsplit("/", 1)[-1].startswith("gemini-3.8-")):
-            payload["temperature"] = req.analysis.temperature
         response = self._post(payload)
         return self._parse_response(response, req, prompt.version)
+
+    def _generation_parameters(self, max_output_tokens: int,
+                               temperature: float | None = None) -> dict:
+        model_name = self.model.rsplit("/", 1)[-1]
+        is_gpt_reasoning = model_name in ("gpt-6.1-sol", "gpt-6-luna")
+        is_claude_5_5 = model_name in (
+            "us.anthropic.claude-sonnet-5-5", "us.anthropic.claude-opus-5-5",
+        )
+        token_parameter = "max_completion_tokens" if is_gpt_reasoning else "max_tokens"
+        parameters = {token_parameter: max_output_tokens}
+        if (temperature is not None and not is_gpt_reasoning and not is_claude_5_5
+                and not model_name.startswith("gemini-3.8-")):
+            parameters["temperature"] = temperature
+        return parameters
 
     def _post(self, payload: dict, *, testing: bool = False) -> httpx.Response:
         """Send a Pitt request without exposing upstream response bodies."""
@@ -100,7 +111,7 @@ class PittProvider:
         response = self._post({
             "model": self.model,
             "messages": [{"role": "user", "content": "Reply with OK."}],
-            "max_tokens": 64,
+            **self._generation_parameters(64),
             "stream": False,
         }, testing=True)
         try:
@@ -137,6 +148,7 @@ class PittProvider:
                 output_tokens=raw_usage.get("completion_tokens"),
                 cached_input_tokens=input_details.get("cached_tokens"),
                 reasoning_tokens=output_details.get("reasoning_tokens"),
+                cache_write_tokens=input_details.get("cache_write_tokens"),
             )
             model_name = data.get("model") or self.model
             choices = data.get("choices")
@@ -165,7 +177,8 @@ class PittProvider:
                 output_tokens=usage.output_tokens,
             )
             return replace(result, cached_input_tokens=usage.cached_input_tokens,
-                           reasoning_tokens=usage.reasoning_tokens)
+                           reasoning_tokens=usage.reasoning_tokens,
+                           cache_write_tokens=usage.cache_write_tokens)
         except ProviderError as exc:
             exc.usage = usage
             exc.model_name = model_name

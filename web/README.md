@@ -367,7 +367,9 @@ existing model policy and limits; omit those flags.
 ### Change engine or model
 
 Signed-in instructors can use **AI settings** (`/settings/ai`) to switch all
-assignments between Pitt Gemini 4 Argon and Gemini 3.8 Flash. **Save settings**
+assignments between Pitt Gemini 4 Argon, Gemini 3.8 Flash, Claude Sonnet 5.5,
+Claude Opus 5.5, GPT-6.1 Sol and GPT-6 Luna. The saved vendor follows the selected
+model (`GOOGLE`, `ANTHROPIC` or `OPENAI`). **Save settings**
 saves the model and shared API key together. An empty key field restores the
 server's `PITT_API_KEY`; a nonempty field replaces the shared key. Saved keys are
 never returned to the browser: the page displays a fixed `********` marker and
@@ -382,9 +384,13 @@ stores only encrypted credentials; it preserves the selected model and uses the
 server key until a custom key is saved. Web switches update the Pitt allowlist
 under the existing state lock, preserving quotas and request history. New requests
 use the saved settings immediately; existing requests and replays retain their
-original attempt. Models without price entries remain unpriced.
+original attempt. Missing default prices for all six choices are added at the
+same time; custom schedules and historical cost snapshots are preserved. The
+previous untouched Argon default schedule is replaced with the supplied Pitt
+rate, without an assumed future increase. See the [price estimates](../ai_grading/README.md#estimated-api-cost)
+for the Pitt input/output rates and separate public cache-rate assumptions.
 
-For engines and models outside these two Web choices, use the manual procedure:
+For engines and models outside these Web choices, use the manual procedure:
 
 The enabled primary DB row selects the engine/model for all assignments. The
 state's `config.allowed_models` must include that exact pair. Stop Web before

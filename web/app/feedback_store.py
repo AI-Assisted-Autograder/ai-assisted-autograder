@@ -14,12 +14,12 @@ import os
 from pathlib import Path
 import tempfile
 import threading
-from datetime import datetime, timezone
+from datetime import date, datetime, timezone
 from decimal import Decimal
 from typing import Any
 
 from ai_grading.models import TokenUsage
-from ai_grading.pricing import RequestAccounting, estimate_cost, select_price
+from ai_grading.pricing import ModelPrice, RequestAccounting, default_model_prices, estimate_cost, select_price
 from .feedback_config import AssignmentAccess, BackendConfig, RequestRecord, State, TokenRecord
 
 
@@ -144,17 +144,38 @@ class JsonStore:
             return self._state.config.model_copy(deep=True)
 
     def allow_pitt_models(self) -> None:
-        """Enable the Web's fixed Pitt choices without replacing runtime state."""
+        """Enable Pitt choices, fill missing prices, and correct the original Argon schedule."""
         from .pitt_settings import PITT_MODELS
 
         with self._mutex:
             self._ensure_open()
             allowed = self._state.config.allowed_models.get("pitt", [])
             missing = [model for model in PITT_MODELS if model not in allowed]
-            if not missing:
+            prices = self._state.config.model_prices
+            argon = "@pitt-ai-connect-google-vertex/gemini-4-argon"
+            original_argon = [
+                ModelPrice(engine="pitt", model=argon, response_model="gemini-4-argon",
+                           effective_from=day, input_per_million=Decimal(input_rate),
+                           cached_input_per_million=Decimal(cached_rate), output_per_million=Decimal(output_rate),
+                           basis="Google Cloud Standard / Global; public rates including applicable credits")
+                for day, input_rate, cached_rate, output_rate in (
+                    (date(2026, 10, 13), "2", "0.10", "10"),
+                    (date(2026, 12, 1), "4", "0.20", "20"),
+                )
+            ]
+            configured_argon = [price for price in prices if price.engine == "pitt" and price.model == argon]
+            # Replace only the untouched built-in promotion schedule, never instructor pricing.
+            if sorted(configured_argon, key=lambda price: price.effective_from) == original_argon:
+                prices = [price for price in prices if price.engine != "pitt" or price.model != argon]
+            priced = {(price.engine, price.model) for price in prices}
+            missing_prices = [price for price in default_model_prices()
+                              if price.engine == "pitt" and price.model in PITT_MODELS
+                              and (price.engine, price.model) not in priced]
+            if not missing and not missing_prices:
                 return
             candidate = self._state.model_copy(deep=True)
             candidate.config.allowed_models["pitt"] = [*allowed, *missing]
+            candidate.config.model_prices = [*prices, *missing_prices]
             candidate.config = BackendConfig.model_validate(candidate.config.model_dump())
             self._persist(candidate)
             self._state = candidate

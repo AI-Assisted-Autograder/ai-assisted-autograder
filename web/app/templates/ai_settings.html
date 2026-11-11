@@ -11,7 +11,7 @@
 
 <form id="ai-settings-form" class="card form" method="post" action="/settings/ai" autocomplete="off">
     <dl class="meta saved-ai-settings">
-        <div><dt>Saved model</dt><dd>{% if settings is none %}Unavailable{% else %}{{ models.get(settings.model, 'Not configured for Pitt') }}{% endif %}</dd></div>
+        <div><dt>Saved model</dt><dd>{% if settings is none %}Unavailable{% elif settings.model in models %}{{ models[settings.model].label }}{% else %}Not configured for Pitt{% endif %}</dd></div>
         <div><dt>Saved API key</dt><dd>{% if settings is none %}Unavailable{% elif settings.has_custom_key %}<code>********</code>{% else %}Server default{% endif %}</dd></div>
     </dl>
 
@@ -20,8 +20,8 @@
             Pitt model
             <select id="pitt-model" name="model" required {% if settings is none %}disabled{% endif %}>
                 <option value="" disabled {% if selected_model not in models %}selected{% endif %}>Choose a model</option>
-                {% for model, label in models.items() %}
-                <option value="{{ model }}" {% if selected_model == model %}selected{% endif %}>{{ label }}</option>
+                {% for model, details in models.items() %}
+                <option value="{{ model }}" {% if selected_model == model %}selected{% endif %}>{{ details.label }}</option>
                 {% endfor %}
             </select>
         </label>
