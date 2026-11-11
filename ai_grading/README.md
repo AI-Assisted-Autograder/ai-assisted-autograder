@@ -44,13 +44,14 @@ not stored by this path. Backend JSON retains quota, replay and cost accounting.
 
 Create the assignment through the Web form, select a target's behavior, and
 continue to its full configuration page. It edits source/context patterns, public
-assignment context (`test_plan`), evaluation focus, grading items, evidence sources,
-background and feedback guidance. The protected creation API requires an explicit
-`analysis.behavior`; both paths use the same DB configuration reader. Targets
+assignment context (`test_plan`), evaluation focus, shared grading rubric, grading
+items, evidence sources, background and feedback guidance. The protected creation
+API requires an explicit `analysis.behavior`; both paths use the same DB configuration reader. Targets
 without a current rubric are excluded from AI execution.
 
 - **`ai_grading`:** each `grading_items` entry defines an ID, requirement and points.
-  The item list is the sole scoring source; the total is derived from its points.
+  Optional `shared_grading_rules` applies to every item and appears once in the prompt.
+  Shared rules and each item's requirement define its verdict; points come only from items.
   Existing IDs remain stable when editing or reordering. Background and guidance
   provide shared context and presentation instructions.
 - **`functional_test_feedback`:** configure exactly one final Gradescope source at
@@ -67,8 +68,8 @@ Python CLASS/METHOD identifiers use [FileResolver](FileResolver.py)'s convention
 Explicit source patterns support custom layouts and other languages. Report paths
 are relative to `/autograder`.
 
-Backend-connected packages in [autograders/](../autograders/) contain their own
-client/hook copies, `config.json` with only `backend_url`, and a private
+Backend-connected packages contain copies of `local_client.py` and
+`gradescope_feedback.py`, `config.json` with only `backend_url`, and a private
 `assignment.token`. They do not carry a duplicate `ai_feedback.json`. Instructors
 add the reusable files and hook to their functional grader; Web ZIP injection is
 not implemented. Keep credentials and generated upload ZIPs outside Git.
@@ -175,24 +176,15 @@ rewrite the finished autograder log. Missing usage, missing prices and older
 requests without price snapshots are shown as unpriced, not zero-cost calls.
 The Web pages show the tracking start and unpriced/pending request counts.
 
-## RentACat feedback
-
-- **Playwright:** preserves the prototype's rubric, test cases and 11 ordered
-  criteria at 5 AI points each. Application code awards 5 for pass and 0 for fail;
-  zero-point criteria keep their blocks. The primary source must match exactly one
-  submitted file.
-- **Java:** one functional-test feedback target explains eligible failed rows from
-  the final Gradescope report inside those rows. It does not add an overall
-  `AI Feedback` block or change functional scores. All-pass runs skip AI.
+## Grading results
 
 Insufficient evidence or model failure retains the affected grading items and
 their full maxima as pending regrade. Their actual scores and the final AI total
 remain unknown. Gradescope shows provisional zero placeholders and a provisional
 combined grade until regrading completes.
 
-Both packages run the AI hook after functional grading, including error paths.
 Set Gradescope's Outline maximum to the intended grading scale; adding AI rows
-does not change that maximum. Multi-run voting is not implemented.
+does not change that maximum.
 
 ## Module layout
 
@@ -216,22 +208,14 @@ and the shared container hook does not use `ResultsPackager`.
 
 ## Deployment verification
 
-Local checks do not establish deployed acceptance. Coordinate the matching backend,
-new upload ZIPs and explicit assignment configuration migration before running the
-new autograder. Targets without `analysis.behavior` are skipped by the new hook;
+Local checks do not establish deployed acceptance. Deploy backend support before
+using new configuration fields. Backend-only rubric and prompt changes do not
+require a new autograder ZIP; connector changes require updating the package.
+Targets without `analysis.behavior` are skipped by the hook;
 legacy `expected_tests`/`points_per_test` and unsupported evidence sources need
-conversion. Backend startup and Alembic do not activate the new behaviors.
+explicit configuration conversion. Backend startup and Alembic do not activate
+new behaviors.
 
-The existing migration command supports only the two reviewed RentACat assignments.
-Run it explicitly in the deployed Web container during the upgrade:
-
-```bash
-python -m app.feedback_assignment --migrate-behavior --assignment-id ASSIGNMENT_UUID
-```
-
-It preserves assignment/target IDs, validates the original Playwright policy and
-retains only supported Gradescope evidence (Java: the selected final report).
-Other legacy assignments require their own configuration conversion. New Web/API
-assignments also need an assignment token and quota registration as described in
-the Web guide. Verify Gradescope → backend authentication/quota → DB configuration
+New Web/API assignments need an assignment token and quota registration as described
+in the Web guide. Verify Gradescope → backend authentication/quota → DB configuration
 → selected provider → Gradescope feedback after deployment and migration.

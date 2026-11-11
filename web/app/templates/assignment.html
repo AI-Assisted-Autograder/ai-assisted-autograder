@@ -191,6 +191,10 @@
         {% if t.rubric %}
         <h3>Common background <span class="sub">version {{ t.rubric.version }}</span></h3>
         {{ long_text(t.rubric.criteria_text or "(no criteria)") }}
+        {% if t.analysis_config.get('shared_grading_rules') %}
+        <h3>Shared grading rubric</h3>
+        {{ long_text(t.analysis_config.shared_grading_rules) }}
+        {% endif %}
         {% if t.analysis_config.get('grading_items') %}
         <h3>Grading items</h3>
         <ol>

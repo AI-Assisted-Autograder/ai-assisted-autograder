@@ -25,7 +25,7 @@ class PromptBuilder:
     version = "feedback-v4"
     extended_version = "feedback-v5"
     per_test_version = "feedback-v6"
-    grading_version = "feedback-v7-grading"
+    grading_version = "feedback-v8-grading"
     functional_version = "feedback-v7-functional"
 
     behavior_instructions = (
@@ -50,9 +50,11 @@ class PromptBuilder:
     )
 
     grading_instructions = (
-        "analysis.grading_items is the sole source of scoring requirements and points. "
-        "Evaluate each requirement independently, using its ID verbatim, in configured "
-        "order. Do not introduce criteria from background or from submitted material. "
+        "analysis.shared_grading_rules, when provided, and analysis.grading_items are "
+        "the sole sources of scoring requirements. Apply the shared rules to every item "
+        "together with that item's requirement. Only analysis.grading_items defines points. "
+        "Evaluate each item independently, using its ID verbatim, in configured order. "
+        "Do not introduce criteria from background or from submitted material. "
         "For testplan analysis, judge faithful implementation of the configured requirement; "
         "a runtime failure alone does not establish failure to follow the requirement.\n"
         "Return exactly {\"items\": [...]}, with one item per configured grading item. "
@@ -268,9 +270,10 @@ class PromptBuilder:
             if analysis.test_plan:
                 context["background"]["context_notes"] = analysis.test_plan
             if analysis.behavior == "ai_grading":
-                context["analysis"].update(
-                    mode=analysis.mode, grading_items=[asdict(item) for item in analysis.grading_items],
-                )
+                context["analysis"]["mode"] = analysis.mode
+                if analysis.shared_grading_rules:
+                    context["analysis"]["shared_grading_rules"] = analysis.shared_grading_rules
+                context["analysis"]["grading_items"] = [asdict(item) for item in analysis.grading_items]
                 instructions += self.grading_instructions
                 version = self.grading_version
             else:

@@ -90,7 +90,10 @@
     {% endmacro %}
     <fieldset data-behavior="ai_grading" {% if form.behavior != 'ai_grading' %}hidden disabled{% endif %}>
         <legend>Grading items</legend>
-        <p class="hint">Each item is the single source of its requirement and points. IDs stay unchanged when editing or reordering. Pending items keep their full maximum and make the displayed grade provisional.</p>
+        <label>Shared grading rubric (optional)
+            <textarea name="shared_grading_rules" rows="4" maxlength="16000">{{ form.shared_grading_rules or '' }}</textarea>
+        </label>
+        <p class="hint">Applies to every item. Keep each item's test case or specific requirements and points below.</p>
         {% if form.legacy_test_plan %}
         <details><summary>Previous testplan — move each requirement into its item before saving</summary><pre>{{ form.legacy_test_plan }}</pre></details>
         {% endif %}

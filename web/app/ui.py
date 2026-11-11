@@ -426,6 +426,7 @@ def rubric_page(
             "analysis_mode": analysis.get("mode", "code_feedback"),
             "behavior": behavior,
             "functional_result_source": functional_source,
+            "shared_grading_rules": analysis.get("shared_grading_rules", ""),
             "grading_items": analysis.get("grading_items") or [
                 {"id": identifier, "requirement": "", "points": analysis.get("points_per_test")}
                 for identifier in analysis.get("expected_tests", [])
@@ -494,6 +495,7 @@ async def save_rubric(
     if current_target is None:
         return not_found(request, "That grading target does not exist.")
     form.setdefault("test_plan", current_target.analysis_config.get("test_plan", ""))
+    form.setdefault("shared_grading_rules", current_target.analysis_config.get("shared_grading_rules", ""))
     try:
         options = {}
         if "behavior" in data:
@@ -519,6 +521,7 @@ async def save_rubric(
                 ],
             }
             if behavior == "ai_grading":
+                analysis["shared_grading_rules"] = form["shared_grading_rules"]
                 form["grading_items"] = [
                     {"id": item_id or str(uuid.uuid4()), "requirement": requirement, "points": points}
                     for item_id, requirement, points in zip(data.getlist("item_id"),

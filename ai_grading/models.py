@@ -95,6 +95,7 @@ class AnalysisConfig:
         min_length=36, max_length=36,
         pattern=r"^[0-9a-fA-F]{8}(?:-[0-9a-fA-F]{4}){3}-[0-9a-fA-F]{12}$",
     )] | None = None
+    shared_grading_rules: Annotated[str, Field(max_length=16_000)] = ""
 
     def __post_init__(self) -> None:
         if len(self.expected_tests) != len(set(self.expected_tests)):
@@ -109,6 +110,8 @@ class AnalysisConfig:
             raise ValueError("grading item identifiers must be distinct")
         if self.grading_items and self.behavior != "ai_grading":
             raise ValueError("grading items require AI grading behavior")
+        if self.shared_grading_rules and self.behavior != "ai_grading":
+            raise ValueError("shared grading rules require AI grading behavior")
         if self.behavior is not None and (self.points_per_test is not None or self.expected_tests):
             raise ValueError("explicit behaviors cannot use legacy per-test scoring configuration")
         if self.functional_result_source is not None and self.behavior != "functional_test_feedback":

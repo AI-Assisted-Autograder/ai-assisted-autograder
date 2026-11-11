@@ -1,4 +1,4 @@
-"""Read feedback configuration and explicitly activate reviewed legacy assignments."""
+"""Read feedback configuration and explicitly migrate reviewed assignments."""
 
 from dataclasses import asdict
 from decimal import Decimal
@@ -61,12 +61,12 @@ def _legacy_behavior(platform_id, target, rubric):
         grading_rules, guidance = _playwright_guidance(rubric.feedback_guidance or "")
         analysis.update(
             behavior="ai_grading", expected_tests=[], points_per_test=None, test_plan="",
+            shared_grading_rules="\n\n".join((fixture, rubric.criteria_text or "", grading_rules)),
             evidence_sources=[source for source in analysis.get("evidence_sources", [])
                               if source.get("format") == "gradescope"],
             grading_items=[{
                 "id": identifier, "points": float(points),
-                "requirement": "\n\n".join((fixture, rubric.criteria_text or "", grading_rules,
-                                             "IDENTIFIER: " + identifier + "\n" + cases[identifier])),
+                "requirement": "IDENTIFIER: " + identifier + "\n" + cases[identifier],
             } for identifier in identifiers],
         )
         background = "Assess the submitted Playwright tests against their configured grading items."
@@ -139,6 +139,56 @@ def migrate_assignment_behavior(session_factory, assignment_id: UUID) -> bool:
         target.analysis_config, target.max_score = analysis, maximum
         session.add(Rubric(grading_target_id=target.id, version=version + 1, is_current=True,
                            criteria_text=background, feedback_guidance=guidance))
+    return True
+
+
+def _shared_playwright_analysis(target) -> dict | None:
+    """Extract the reviewed common rules, preserving every item and its points."""
+    analysis = dict(target.analysis_config)
+    if analysis.get("shared_grading_rules"):
+        return None
+    items = analysis.get("grading_items", [])
+    if (analysis.get("behavior") != "ai_grading" or len(items) != 11
+            or target.max_score != 55 or any(item["points"] != 5 for item in items)):
+        raise ValueError("Shared rubric migration requires the reviewed 11 grading items at 5 points each")
+    cases = []
+    shared = None
+    for item in items:
+        marker = "IDENTIFIER: " + item["id"] + "\n"
+        prefix, separator, case = item["requirement"].partition(marker)
+        if (not separator or not case.strip()
+                or hashlib.sha256(prefix.encode("utf-8")).hexdigest()
+                != "7ec5762b919cce071426ff62baf66d9211c4c5d9e44079930de4a3da6861b69d"):
+            raise ValueError("Each item must contain the reviewed common rubric followed by its own test case")
+        # These two newlines separate the unchanged shared rules from the case.
+        shared = prefix[:-2]
+        cases.append({**item, "requirement": separator + case})
+    analysis.update(shared_grading_rules=shared, grading_items=cases)
+    settings = TargetSettings(identifier=target.identifier, kind=target.kind,
+                              analysis=analysis, max_score=target.max_score)
+    return asdict(settings.analysis)
+
+
+def migrate_shared_rubric(session_factory, assignment_id: UUID) -> bool:
+    """Explicitly deduplicate the activated Exercise 4 configuration, once."""
+    from sqlalchemy import select
+    from app.models import Assignment, GradingTarget
+
+    with session_factory.begin() as session:
+        assignment = session.get(Assignment, assignment_id, with_for_update=True)
+        if (assignment is None or assignment.platform != "GRADESCOPE"
+                or assignment.platform_assignment_id != "8904668"):
+            raise ValueError("This command only migrates the reviewed Exercise 4 assignment")
+        target = session.scalar(select(GradingTarget).where(
+            GradingTarget.assignment_id == assignment_id,
+            GradingTarget.identifier == "tests/rentacat.spec.ts",
+        ).with_for_update())
+        if target is None:
+            raise ValueError("The reviewed grading target is missing")
+        analysis = _shared_playwright_analysis(target)
+        if analysis is None:
+            return False
+        target.analysis_config = analysis
     return True
 
 
@@ -277,23 +327,29 @@ class HttpAssignmentConfigReader:
 def main() -> int:
     import argparse
 
-    parser = argparse.ArgumentParser(description="Explicitly activate a reviewed AI behavior after updating its autograder ZIP.")
-    parser.add_argument("--migrate-behavior", action="store_true", required=True,
-                        help="Convert one assignment and retain only Gradescope evidence (Java: the selected final report); never run by Web startup or Alembic")
+    parser = argparse.ArgumentParser(description="Explicitly migrate reviewed AI assignment configuration.")
+    actions = parser.add_mutually_exclusive_group(required=True)
+    actions.add_argument("--migrate-behavior", action="store_true",
+                         help="Activate a reviewed behavior after updating its autograder ZIP; never run by Web startup or Alembic")
+    actions.add_argument("--migrate-shared-rubric", action="store_true",
+                         help="Extract Exercise 4's repeated rubric without changing its rules, test cases or points")
     parser.add_argument("--assignment-id", required=True, type=UUID)
     args = parser.parse_args()
     from .db import SessionLocal
 
     try:
-        changed = migrate_assignment_behavior(SessionLocal, args.assignment_id)
+        migrate = migrate_shared_rubric if args.migrate_shared_rubric else migrate_assignment_behavior
+        changed = migrate(SessionLocal, args.assignment_id)
     except ValueError as exc:
-        parser.exit(2, f"Activation refused: {exc}.\n")
+        parser.exit(2, f"Migration refused: {exc}.\n")
     except Exception:
-        parser.exit(2, "Activation failed; check the database connection and current assignment configuration.\n")
-    print(f"Assignment {args.assignment_id}: " + (
-        "behavior activated; only Gradescope evidence retained (Java: the selected final report)."
-        if changed else "behavior already explicit; unchanged."
-    ))
+        parser.exit(2, "Migration failed; check the database connection and current assignment configuration.\n")
+    if args.migrate_shared_rubric:
+        message = "shared rubric extracted; all test cases and points preserved." if changed else "shared rubric already configured; unchanged."
+    else:
+        message = ("behavior activated; only Gradescope evidence retained (Java: the selected final report)."
+                   if changed else "behavior already explicit; unchanged.")
+    print(f"Assignment {args.assignment_id}: {message}")
     return 0
 
 

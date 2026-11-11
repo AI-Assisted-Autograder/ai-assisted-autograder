@@ -111,7 +111,7 @@ def validate_analysis(value: AnalysisConfig) -> AnalysisConfig:
         raise ValueError("expected test identifier is too long")
     if any(len(item.id) > 256 or len(item.requirement) > 16_000 for item in value.grading_items):
         raise ValueError("grading item exceeds its limits")
-    if sum(len(item.requirement) for item in value.grading_items) > 64_000:
+    if len(value.shared_grading_rules) + sum(len(item.requirement) for item in value.grading_items) > 64_000:
         raise ValueError("grading requirements exceed the context limit")
     return value
 
