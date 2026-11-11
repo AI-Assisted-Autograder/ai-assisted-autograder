@@ -14,7 +14,7 @@
     <div class="stat"><span class="value">{{ summary.students }}</span><span class="label">Students</span></div>
     <div class="stat{% if summary.with_deduction %} flagged{% endif %}"><span class="value">{{ summary.with_deduction }}</span><span class="label">With deductions</span></div>
     <div class="stat"><span class="value">{{ summary.students - summary.with_deduction }}</span><span class="label">No deductions</span></div>
-    <div class="stat{% if summary.ai_failed %} flagged{% endif %}"><span class="value">{{ summary.ai_failed }}</span><span class="label">AI runs failed</span></div>
+    <div class="stat{% if summary.ai_failed %} flagged{% endif %}"><span class="value">{{ summary.ai_failed }}</span><span class="label">Latest AI attempts failed</span></div>
     <div class="stat"><span class="value">{{ summary.waiting }}</span><span class="label">Targets waiting for AI</span></div>
 </div>
 
@@ -52,7 +52,11 @@
         <tr>
             <td>
                 <a href="/submissions/{{ r.submission_id }}">{{ r.student_identifier or "(unknown student)" }}</a>
-                {% if r.ai_status == "FAILED" %}<span class="badge failed">AI failed</span>{% endif %}
+                {% if results.grading_mode == "NIGHTLY" and r.action.value != "REEMIT" %}
+                {% set ai_label, ai_style = ai_result_state(r.ai_status, (), results.grading_mode, r.action) %}
+                <span class="badge {{ ai_style }}">{{ ai_label }}</span>
+                {% if r.ai_status == "FAILED" %}<div class="sub">Previous AI attempt failed</div>{% endif %}
+                {% elif r.ai_status == "FAILED" %}<span class="badge failed">AI failed</span>{% endif %}
                 <div class="sub nowrap">{{ r.submitted_at | when }}</div>
             </td>
             {% for c in r.cells %}

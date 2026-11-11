@@ -68,7 +68,10 @@ def submission_state(action: Action, grading_mode: str) -> tuple[str, str]:
     return "Not graded yet", "waiting"
 
 
-def ai_result_state(status: str | None, targets) -> tuple[str, str]:
+def ai_result_state(status: str | None, targets, grading_mode: str, action: Action) -> tuple[str, str]:
+    if grading_mode == "NIGHTLY" and action is not Action.REEMIT:
+        label = "Awaiting nightly authorization" if action is Action.DEFER else "Awaiting AI processing"
+        return label, "waiting"
     if status is None:
         return "—", "muted"
     behaviors = {target.analysis_config.get("behavior") for target in targets if target.rubric is not None}

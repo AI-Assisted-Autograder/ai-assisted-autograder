@@ -112,8 +112,13 @@
             </td>
             <td class="nowrap">{{ s.submitted_at | when }}</td>
             <td><span class="badge {{ style }}">{{ label }}</span></td>
-            {% set ai_label, ai_style = ai_result_state(s.ai_status, assignment.targets) %}
-            <td><span class="badge {{ ai_style }}">{{ ai_label }}</span></td>
+            {% set ai_label, ai_style = ai_result_state(s.ai_status, assignment.targets, assignment.grading_mode, s.action) %}
+            <td>
+                <span class="badge {{ ai_style }}">{{ ai_label }}</span>
+                {% if assignment.grading_mode == "NIGHTLY" and s.action.value != "REEMIT" and s.ai_status == "FAILED" %}
+                <div class="sub">Previous AI attempt failed</div>
+                {% endif %}
+            </td>
         </tr>
         {% endfor %}
     </tbody>
