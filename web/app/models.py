@@ -225,7 +225,8 @@ class Submission(Base):
     # finishes and the AD-9 guard depends on that, so it is nullable here.
     ai_graded_submitted_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
     ai_status: Mapped[str | None] = mapped_column(Text)
-    is_active_attempt: Mapped[bool] = mapped_column(server_default=true())
+    # Unknown until selection sync; only False means confirmed superseded.
+    is_active_attempt: Mapped[bool | None] = mapped_column()
 
 
 class SubmissionTarget(Base):

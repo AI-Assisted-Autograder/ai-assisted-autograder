@@ -123,7 +123,7 @@ class _Submission:
     ai_authorized_at: datetime | None = None
     ai_graded_submitted_at: datetime | None = None
     ai_status: str | None = None
-    is_active_attempt: bool = False
+    is_active_attempt: bool | None = None
 
 
 @dataclass
@@ -632,12 +632,12 @@ class InMemoryRepository(IGradingRepository):
         )
         return None if r is None else TestResultRecord(r.status, r.functional_test_feedback, r.recorded_at)
 
-    def _active_tested(self, gt: _GradingTarget) -> list[tuple[_SubmissionTarget, _Submission, TestResultRecord]]:
+    def _visible_tested(self, gt: _GradingTarget) -> list[tuple[_SubmissionTarget, _Submission, TestResultRecord]]:
         found = []
         for st in self.submission_targets.values():
             sub = self.submissions[st.submission_id]
             latest = self._latest_test(st.id)
-            if st.grading_target_id == gt.id and sub.is_active_attempt and latest is not None:
+            if st.grading_target_id == gt.id and sub.is_active_attempt is not False and latest is not None:
                 found.append((st, sub, latest))
         return found
 
@@ -650,7 +650,7 @@ class InMemoryRepository(IGradingRepository):
                 gt.identifier,
                 gt.kind,
                 gt.max_score,
-                [target_status(st.ai_needed, st.completed_at, st.last_error) for st, _, _ in self._active_tested(gt)],
+                [target_status(st.ai_needed, st.completed_at, st.last_error) for st, _, _ in self._visible_tested(gt)],
             )
             for gt in sorted(self._registered(assignment_id), key=lambda gt: sort_key(gt.display_order, gt.identifier))
         ]
@@ -673,7 +673,7 @@ class InMemoryRepository(IGradingRepository):
                     None,
                 ),
             )
-            for st, sub, latest in self._active_tested(gt)
+            for st, sub, latest in self._visible_tested(gt)
         ]
         return TargetSubmissions(
             a.id,
@@ -722,7 +722,7 @@ class InMemoryRepository(IGradingRepository):
                 tuple(cell(sub, gt) for gt in targets),
             )
             for sub in self.submissions.values()
-            if sub.assignment_id == assignment_id and sub.is_active_attempt
+            if sub.assignment_id == assignment_id and sub.is_active_attempt is not False
         ]
         return AssignmentResults(
             a.id,

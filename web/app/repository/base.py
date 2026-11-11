@@ -229,7 +229,7 @@ class SubmissionSummary:
     platform_submission_id: str
     student_identifier: str | None
     submitted_at: datetime
-    is_active_attempt: bool
+    is_active_attempt: bool | None
     action: Action
     done: int
     failed: int
@@ -286,7 +286,7 @@ class SubmissionDetail:
     submitted_at: datetime
     ai_authorized_at: datetime | None
     ai_graded_submitted_at: datetime | None
-    is_active_attempt: bool
+    is_active_attempt: bool | None
     action: Action
     # Display order.
     targets: tuple[TargetDetail, ...]
@@ -501,7 +501,7 @@ def summarize(
     platform_submission_id: str,
     student_identifier: str | None,
     submitted_at: datetime,
-    is_active_attempt: bool,
+    is_active_attempt: bool | None,
     action: Action,
     statuses: list[TargetStatus],
     ai_status: str | None,
@@ -604,7 +604,7 @@ class IGradingRepository(ABC):
     def upsert_submission(self, ref: SubmissionRef) -> uuid.UUID:
         """Return the submission's id, creating it on first report.
 
-        New rows are inactive until Gradescope's active selections are synced.
+        New rows have unknown selection until Gradescope's active selections are synced.
         A rerun reports the same platform_submission_id and gets the same
         row back unchanged.
         """

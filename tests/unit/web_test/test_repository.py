@@ -859,7 +859,6 @@ def by_target(backend):
         sid = backend.repo.upsert_submission(
             SubmissionRef(aid, platform_id, SUBMITTED + timedelta(hours=hours), student)
         )
-        backend.set_submission(sid, is_active_attempt=True)
         backend.repo.create_targets_default_needed(sid)
         return sid
 
@@ -943,7 +942,6 @@ def test_results_flag_failing_tests_and_low_scores(backend):
         sid = backend.repo.upsert_submission(
             SubmissionRef(aid, platform_id, SUBMITTED + timedelta(hours=hours), student)
         )
-        backend.set_submission(sid, is_active_attempt=True)
         backend.repo.create_targets_default_needed(sid)
         return sid
 

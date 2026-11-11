@@ -91,7 +91,7 @@ class SqlGradingRepository(IGradingRepository):
                     platform_submission_id=ref.platform_submission_id,
                     submitted_at=ref.submitted_at,
                     student_identifier=ref.student_identifier,
-                    is_active_attempt=False,
+                    is_active_attempt=None,
                 )
                 .on_conflict_do_nothing(index_elements=["assignment_id", "platform_submission_id"])
                 .returning(Submission.id)
@@ -611,7 +611,7 @@ class SqlGradingRepository(IGradingRepository):
             for st in s.scalars(
                 select(SubmissionTarget)
                 .join(Submission, SubmissionTarget.submission_id == Submission.id)
-                .where(Submission.assignment_id == assignment_id, Submission.is_active_attempt, tested)
+                .where(Submission.assignment_id == assignment_id, Submission.is_active_attempt.is_not(False), tested)
             ):
                 statuses[st.grading_target_id].append(target_status(st.ai_needed, st.completed_at, st.last_error))
             return [
@@ -628,7 +628,7 @@ class SqlGradingRepository(IGradingRepository):
             rows = s.execute(
                 select(SubmissionTarget, Submission)
                 .join(Submission, SubmissionTarget.submission_id == Submission.id)
-                .where(SubmissionTarget.grading_target_id == target_id, Submission.is_active_attempt)
+                .where(SubmissionTarget.grading_target_id == target_id, Submission.is_active_attempt.is_not(False))
             ).all()
             st_ids = [st.id for st, _ in rows]
             # In recorded order, so each target ends up with its latest.
@@ -677,7 +677,7 @@ class SqlGradingRepository(IGradingRepository):
                 key=lambda gt: sort_key(gt.display_order, gt.identifier),
             )
             subs = list(s.scalars(
-                select(Submission).where(Submission.assignment_id == assignment_id, Submission.is_active_attempt)
+                select(Submission).where(Submission.assignment_id == assignment_id, Submission.is_active_attempt.is_not(False))
             ))
             sts = list(s.scalars(
                 select(SubmissionTarget).where(SubmissionTarget.submission_id.in_([sub.id for sub in subs]))

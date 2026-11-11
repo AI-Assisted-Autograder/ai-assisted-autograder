@@ -208,8 +208,12 @@ submission IDs; the path uses the DB assignment UUID. The endpoint atomically
 replaces `is_active_attempt` flags without deleting history or granting permission.
 An empty list clears the assignment's selections. Unknown IDs return `409` with
 `detail.missing_submission_ids`, leaving the previous snapshot unchanged; do not
-continue that assignment's cycle. New submission registrations start inactive
-until synchronized. IMMEDIATE first-run AI still executes without a snapshot.
+continue that assignment's cycle. New submissions have an unknown selection
+(`is_active_attempt = NULL`) until synchronized; `true` means selected and `false`
+means superseded. Unknown submissions remain visible in Web results and target
+views without a Superseded label, but cannot enter automated queues or receive
+nightly authorization. IMMEDIATE first-run AI still executes without a snapshot.
+Synchronization preserves submission metadata, outcomes and feedback history.
 
 | Cycle | Query | Authorization request before rerun |
 | --- | --- | --- |
@@ -228,8 +232,9 @@ including failures that have never been authorized. It sets `ai_authorized_at`
 once and preserves it across subsequent retries. Authorized failures are excluded
 from the nightly list. The retry source only checks eligibility and never grants
 or refreshes authorization: it requires `FAILED` and either IMMEDIATE mode or an
-existing NIGHTLY authorization. Both queries exclude inactive submissions and
-assignments; the unfiltered failure endpoint remains available for diagnostics.
+existing NIGHTLY authorization. Automated queries require a confirmed selected
+submission and an active assignment; the unfiltered failure endpoint remains
+available for diagnostics.
 Authorized, unfinished submissions without a failed outcome remain eligible for
 a later nightly cycle if the Gradescope rerun was not successfully triggered.
 
@@ -257,7 +262,10 @@ Rollout requires updated shared autograder files and caller support for these
 contracts. Existing automation is not updated by this change. At the coordinated
 cutover, clear historical NIGHTLY authorization timestamps, preserve outcomes and
 feedback, synchronize selections, and authorize through the next nightly cycle.
-No scheduling, live reset, or database schema migration is performed by this code.
+Deployments must apply migration `0009` before running the updated backend; it
+makes `submission.is_active_attempt` nullable so unsynced submissions remain
+distinct from superseded ones. Scheduling and live authorization resets remain
+separate deployment actions.
 
 Migration `0003` adds the provider engine; `0004` adds target analysis configuration.
 Migration `0007` adds submission AI outcomes and backfills existing target failures.
