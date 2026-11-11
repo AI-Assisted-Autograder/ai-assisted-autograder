@@ -8,10 +8,10 @@ export const selectorMap = {
   loginEmail: /email|username/i,
   loginPassword: /password/i,
   loginButton: /log in|sign in/i,
-  rerunAutograder: /rerun autograder/i,
+  rerunAutograder: /rerun autograder|regrade/i,
   moreButton: /^more$/i,
   confirmationDialog: '[role="dialog"]',
-  confirmRerun: /confirm|rerun autograder/i,
+  confirmRerun: /confirm|rerun autograder|regrade/i,
   rerunSuccess: /autograder.*(queued|started|success)|rerun.*(queued|started|success)/i,
 } as const;
 
@@ -67,24 +67,42 @@ export class GradescopePlatform implements ILearningPlatform {
     }
 
     await this.page.goto(locator.platformSubmissionUrl);
-    let rerunButton = this.page
-      .locator('button:visible, a:visible')
+    const visibleControls = this.page.locator(
+      'button:visible, a:visible, [role="button"]:visible, [role="menuitem"]:visible',
+    );
+    let rerunButton = visibleControls
       .filter({ hasText: selectorMap.rerunAutograder })
       .first();
     if (!(await rerunButton.isVisible().catch(() => false))) {
-      const moreButton = this.page.getByRole('button', { name: selectorMap.moreButton }).first();
+      const moreButton = visibleControls
+        .filter({ hasText: selectorMap.moreButton })
+        .first();
       if (await moreButton.isVisible().catch(() => false)) {
         await moreButton.click();
+        await this.page.waitForTimeout(250);
       }
     }
-    await expect(rerunButton).toBeVisible();
+    rerunButton = visibleControls
+      .filter({ hasText: selectorMap.rerunAutograder })
+      .first();
+    if (!(await rerunButton.isVisible().catch(() => false))) {
+      const controls = (await visibleControls.allTextContents())
+        .map((text) => text.trim())
+        .filter(Boolean)
+        .slice(-20)
+        .join(' | ');
+      throw new Error(
+        'Gradescope rerun control was not found at ' + this.page.url() + '. ' +
+        'Visible controls: ' + (controls || '(none)'),
+      );
+    }
     await rerunButton.click();
 
     let confirmed = false;
     const dialog = this.page.locator(selectorMap.confirmationDialog);
     if (await dialog.isVisible().catch(() => false)) {
       const confirmButton = dialog
-        .locator('button:visible, a:visible')
+        .locator('button:visible, a:visible, [role="button"]:visible, [role="menuitem"]:visible')
         .filter({ hasText: selectorMap.confirmRerun })
         .first();
       await expect(confirmButton).toBeVisible();
@@ -92,11 +110,17 @@ export class GradescopePlatform implements ILearningPlatform {
       confirmed = true;
     }
 
+    const confirmationTimeoutMs = this.readPositiveInteger(
+      'GRADESCOPE_RERUN_CONFIRMATION_TIMEOUT_MS',
+      60_000,
+    );
     const configuredSuccessText = process.env.GRADESCOPE_RERUN_SUCCESS_TEXT;
     const successPattern = configuredSuccessText
       ? new RegExp(configuredSuccessText, 'i')
       : selectorMap.rerunSuccess;
-    await expect(this.page.getByText(successPattern).first()).toBeVisible({ timeout: 15_000 });
+    await expect(this.page.getByText(successPattern).first()).toBeVisible({
+      timeout: confirmationTimeoutMs,
+    });
 
     return {
       submissionId: locator.submissionId,
