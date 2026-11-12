@@ -1,30 +1,179 @@
-name: Render UML
+name: CI
 
 on:
   push:
-    branches: [main]
-    paths:
-      - 'docs/architecture/**.puml'
-      - '.github/workflows/render-uml.yml'
+    branches:
+      - main
+      - '**'
   pull_request:
-    paths:
-      - 'docs/architecture/**.puml'
-      - '.github/workflows/render-uml.yml'
   workflow_dispatch:
 
-# Pin the PlantUML version so a diagram does not silently change
-# appearance because upstream shipped a new layout engine.
+permissions:
+  contents: read
+  pull-requests: read
+
 env:
   PLANTUML_VERSION: '1.2025.4'
 
 jobs:
-  render:
+  # Node.js tests
+  node-tests:
+    name: E2E and TypeScript Tests
     runs-on: ubuntu-latest
+    timeout-minutes: 30
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+
+      - name: Install dependencies
+        id: dependencies
+        run: npm ci
+
+      - name: Install Playwright Chromium
+        id: playwright
+        run: npx playwright install --with-deps chromium
+
+      - name: Run E2E tests
+        if: github.event_name != 'pull_request' || github.event.pull_request.base.ref == 'main'
+        run: npx playwright test
+        env:
+          GRADESCOPE_USERNAME: ${{ secrets.GRADESCOPE_USERNAME }}
+          GRADESCOPE_PASSWORD: ${{ secrets.GRADESCOPE_PASSWORD }}
+          INSTRUCTOR_USERNAME: ${{ secrets.INSTRUCTOR_USERNAME }}
+          INSTRUCTOR_PASSWORD: ${{ secrets.INSTRUCTOR_PASSWORD }}
+
+      - name: Upload Playwright report
+        if: ${{ always() && (github.event_name != 'pull_request' || github.event.pull_request.base.ref == 'main') }}
+        uses: actions/upload-artifact@v4
+        with:
+          name: playwright-report
+          path: |
+            playwright-report/
+            test-results/
+          retention-days: 7
+
+      - name: TypeScript type check
+        if: ${{ !cancelled() && steps.dependencies.outcome == 'success' && steps.playwright.outcome == 'success' }}
+        run: npm run typecheck
+
+      - name: Run TypeScript unit tests
+        if: ${{ !cancelled() && steps.dependencies.outcome == 'success' && steps.playwright.outcome == 'success' }}
+        run: npx playwright test tests/unit/typescript
+
+  # PowerShell tests
+  powershell-tests:
+    name: PowerShell Tests
+    runs-on: ubuntu-slim
+    timeout-minutes: 15
+
+    if: >-
+      (github.event_name == 'push' && github.ref == 'refs/heads/main') ||
+      (github.event_name == 'pull_request' && github.event.pull_request.base.ref == 'main')
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Verify PowerShell
+        shell: pwsh
+        run: |
+          $PSVersionTable
+
+      - name: Install Pester
+        shell: pwsh
+        run: |
+          Set-PSRepository PSGallery -InstallationPolicy Trusted
+          Install-Module Pester -RequiredVersion 6.2.0 -Force -Scope CurrentUser
+
+      - name: Run PowerShell tests
+        shell: pwsh
+        run: |
+          Invoke-Pester ./tests/unit/powershell -Output Detailed
+
+  # Python tests
+  python-tests:
+    name: Python Tests
+    runs-on: ubuntu-slim
+    timeout-minutes: 15
+
+    if: github.event_name == 'push' || github.event_name == 'pull_request'
+
+    outputs:
+      uml: ${{ steps.filter.outputs.uml }}
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Detect UML changes
+        id: filter
+        uses: dorny/paths-filter@v4
+        with:
+          base: ${{ github.ref }}
+          filters: |
+            uml:
+              - 'docs/architecture/**.puml'
+              - '.github/workflows/ci.yml'
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Create virtual environment
+        run: python -m venv .venv
+
+      - name: Install test dependencies
+        run: |
+          source .venv/bin/activate
+          python -m pip install --upgrade pip
+          python -m pip install -r tests/requirements.txt
+
+      - name: Run AI grading tests
+        run: |
+          source .venv/bin/activate
+          cd tests/unit/ai_grading_test
+          pytest -v
+
+      - name: Run web tests
+        run: |
+          source .venv/bin/activate
+          cd tests/unit/web_test
+          pytest -v
+
+  # UML rendering
+  render-uml:
+    name: Render UML
+    runs-on: ubuntu-latest
+    needs: python-tests
+
+    if: >-
+      always() &&
+      (
+        github.event_name == 'workflow_dispatch' ||
+        (
+          needs.python-tests.outputs.uml == 'true' &&
+          (
+            github.event_name == 'pull_request' ||
+            (github.event_name == 'push' && github.ref == 'refs/heads/main')
+          )
+        )
+      )
+
     permissions:
       contents: write
 
     steps:
-      - name: Check out repository
+      - name: Checkout repository
         uses: actions/checkout@v4
 
       - name: Install Graphviz
@@ -53,28 +202,29 @@ jobs:
             "https://github.com/plantuml/plantuml/releases/download/v${PLANTUML_VERSION}/plantuml-${PLANTUML_VERSION}.jar" \
             -o ~/.plantuml/plantuml.jar
 
-      # DECISIONS.md carries a generated table of contents. Fail if it no
-      # longer matches the headings, so a renamed section cannot leave a
-      # stale link behind.
       - name: Check DECISIONS.md table of contents
         run: |
           python3 - docs/architecture/DECISIONS.md <<'PYEOF'
           import re, sys
           s = open(sys.argv[1]).read()
+
           def anchor(t):
               t = t.lower()
               t = re.sub(r'[^\w\s-]', '', t)
               return re.sub(r'\s+', '-', t.strip())
+
           want = []
           for m in re.finditer(r'^(#{2,3}) (.+)$', s, re.M):
               lvl, title = len(m.group(1)), m.group(2)
               if title == 'Contents':
                   continue
               want.append(f"{'  '*(lvl-2)}- [{title}](#{anchor(title)})")
+
           block = re.search(r'^## Contents\n\n(.*?)\n\n---', s, re.M | re.S)
           if not block:
               print('::error file=docs/architecture/DECISIONS.md::no Contents block')
               sys.exit(1)
+
           have = block.group(1).split('\n')
           if have != want:
               print('::error file=docs/architecture/DECISIONS.md::table of contents is stale')
@@ -85,9 +235,6 @@ jobs:
               sys.exit(1)
           PYEOF
 
-      # PlantUML names output from the "@startuml <name>" directive, not
-      # from the filename. If they drift, a rename produces output under
-      # the old name and the stale file looks legitimate.
       - name: Check @startuml names match filenames
         run: |
           drift=0
@@ -101,14 +248,6 @@ jobs:
           done
           exit "$drift"
 
-      # Check one file at a time. Across a glob, PlantUML reports only
-      # "Some diagram description contains errors" and exits 200 without
-      # naming the file, which is useless in CI. Per-file, the output is
-      # attributable and lands as a GitHub annotation on the right file.
-      # Sequence diagrams cannot use a floating "note as X". Notes there
-      # must be attached: note over / note left of / note right of.
-      # PlantUML reports this only as the generic "contains errors", so
-      # catch it here where the message can say what is wrong.
       - name: Check sequence-diagram note syntax
         run: |
           bad=0
@@ -144,12 +283,6 @@ jobs:
           done
           exit "$status"
 
-      # Delete previously rendered images before regenerating. Without
-      # this, a renamed or deleted .puml leaves an orphaned .svg/.png in
-      # the repo forever. Worse, the freshness check below is a git diff,
-      # and an orphan is not a *change*, so it would pass clean while
-      # stale diagrams accumulate. Scoped to the two generated
-      # extensions so .gitkeep survives.
       - name: Remove previously rendered images
         run: |
           mkdir -p docs/architecture/rendered
@@ -162,10 +295,12 @@ jobs:
             -tsvg -failfast2 \
             -o "$(pwd)/docs/architecture/rendered" \
             docs/architecture/*.puml
+
           java -Djava.awt.headless=true -jar ~/.plantuml/plantuml.jar \
             -tpng -failfast2 -DPLANTUML_LIMIT_SIZE=16384 \
             -o "$(pwd)/docs/architecture/rendered" \
             docs/architecture/*.puml
+
           ls -la docs/architecture/rendered
 
       - name: Upload rendered diagrams as artifact
@@ -175,14 +310,6 @@ jobs:
           path: docs/architecture/rendered/
           if-no-files-found: error
 
-      # On a pull request, do not commit. Just report whether the
-      # checked-in images match the sources, so a stale diagram cannot be
-      # merged. This also avoids the permission failure that
-      # commit-to-PR hits on forks.
-      #
-      # `git status --porcelain` rather than `git diff --quiet`: diff
-      # alone does not report untracked additions, and after the delete
-      # step above a newly named file arrives as untracked.
       - name: Check rendered diagrams are up to date (PR only)
         if: github.event_name == 'pull_request'
         run: |
@@ -195,19 +322,18 @@ jobs:
           fi
           echo 'Rendered diagrams are up to date.'
 
-      # On a push to main, commit the refreshed images so the README and
-      # docs site show current diagrams without anyone installing
-      # Graphviz. `git add -A` on the directory stages deletions as well
-      # as additions, which is what retires an orphaned image.
       - name: Commit rendered diagrams (main only)
         if: github.event_name == 'push' && github.ref == 'refs/heads/main'
         run: |
-          git config user.name  'github-actions[bot]'
+          git config user.name 'github-actions[bot]'
           git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+
           git add -A docs/architecture/rendered
+
           if git diff --cached --quiet; then
             echo 'No diagram changes to commit.'
             exit 0
           fi
+
           git commit -m 'docs: re-render UML diagrams [skip ci]'
           git push
