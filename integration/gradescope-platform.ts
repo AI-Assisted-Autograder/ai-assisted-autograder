@@ -8,7 +8,7 @@ export const selectorMap = {
   loginEmail: /email|username/i,
   loginPassword: /password/i,
   loginButton: /log in|sign in/i,
-  rerunAutograder: /rerun autograder|regrade/i,
+  rerunAutograder: /^\s*(?:rerun autograder|regrade)\s*$/i,
   moreButton: /^more$/i,
   confirmationDialog: '[role="dialog"]',
   confirmRerun: /confirm|rerun autograder|regrade/i,

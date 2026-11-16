@@ -126,3 +126,23 @@ test('triggerRerun leaves an already running autograder untouched', async ({ pag
   );
   await expect(page.locator('body')).not.toHaveAttribute('data-clicked', 'yes');
 });
+
+test('triggerRerun opens More and ignores the Regrade Requests link', async ({ page }) => {
+  process.env.GRADESCOPE_ALLOW_RERUN = '1';
+  process.env.GRADESCOPE_RERUN_CONFIRMATION_TIMEOUT_MS = '500';
+  await page.route(submission.platformSubmissionUrl, (route) => route.fulfill({
+    contentType: 'text/html',
+    body: `<a href="#requests" onclick="document.body.dataset.wrongControl = 'yes'">Regrade Requests</a>
+      <div aria-label="submission rubric and results">
+        <div class="submissionOutlineHeader--statusContainer">Graded</div>
+      </div>
+      <button onclick="document.getElementById('rerun').hidden = false">More</button>
+      <button id="rerun" hidden onclick="document.querySelector('.submissionOutlineHeader--statusContainer').textContent = 'Running'">Rerun Autograder</button>`,
+  }));
+
+  const result = await new GradescopePlatform(page).triggerRerun(submission);
+
+  expect(result.confirmationEvidence).toBe('status-text');
+  await expect(page).toHaveURL(submission.platformSubmissionUrl);
+  await expect(page.locator('body')).not.toHaveAttribute('data-wrong-control', 'yes');
+});
