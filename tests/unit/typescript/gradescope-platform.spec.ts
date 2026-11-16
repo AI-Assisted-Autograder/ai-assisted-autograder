@@ -117,7 +117,9 @@ test('triggerRerun leaves an already running autograder untouched', async ({ pag
   await page.route(submission.platformSubmissionUrl, (route) => route.fulfill({
     contentType: 'text/html',
     body: `<div aria-label="submission rubric and results">
-      <div class="submissionOutlineHeader--statusContainer">Running</div>
+      <div class="submissionOutlineHeader--statusContainer">Ungraded</div>
+    </div><div id="view-switcher-tabpanel-results">
+      <div class="msg msg-success">The autograder hasn't finished running yet.</div>
     </div><button onclick="document.body.dataset.clicked = 'yes'">Rerun Autograder</button>`,
   }));
 
@@ -136,8 +138,12 @@ test('triggerRerun opens More and ignores the Regrade Requests link', async ({ p
       <div aria-label="submission rubric and results">
         <div class="submissionOutlineHeader--statusContainer">Graded</div>
       </div>
+      <div id="view-switcher-tabpanel-results">
+        <div class="testCase"><div class="msg">The autograder hasn't finished running yet.</div></div>
+        <div id="running" class="msg msg-success" hidden>The autograder hasn't finished running yet.</div>
+      </div>
       <button onclick="document.getElementById('rerun').hidden = false"><span> More</span></button>
-      <button id="rerun" hidden onclick="document.querySelector('.submissionOutlineHeader--statusContainer').textContent = 'Running'"> Rerun Autograder</button>`,
+      <button id="rerun" hidden onclick="document.querySelector('.submissionOutlineHeader--statusContainer').textContent = 'Ungraded'; document.getElementById('running').hidden = false"> Rerun Autograder</button>`,
   }));
 
   const result = await new GradescopePlatform(page).triggerRerun(submission);

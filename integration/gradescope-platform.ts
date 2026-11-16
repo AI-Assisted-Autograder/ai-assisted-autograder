@@ -361,7 +361,10 @@ export class GradescopePlatform implements ILearningPlatform {
     const status = this.page.locator(
       '[aria-label="submission rubric and results"] .submissionOutlineHeader--statusContainer',
     );
-    const statusText = (await status.innerText({ timeout: 500 }).catch(() => '')).trim();
+    const statusText = [
+      await status.innerText({ timeout: 500 }).catch(() => ''),
+      ...await this.page.locator('#view-switcher-tabpanel-results > .msg:visible').allInnerTexts(),
+    ].join('\n').trim();
     const output = this.page.locator('#view-switcher-tabpanel-results .testCase')
       .filter({ has: this.page.locator('.testCase--header')
         .filter({ hasText: /^Autograder Output \(hidden from students\)$/ }) })
