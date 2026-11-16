@@ -75,7 +75,7 @@
     {% endif %}
     <div class="responses">
         {% for f in t.feedback %}
-        <article class="response{% if f.is_selected %} selected{% endif %}">
+        <article class="response{% if f.is_selected %} selected{% endif %}" id="feedback-{{ f.id }}">
             <header>
                 <strong>{{ f.provider | title }}</strong>
                 <code>{{ f.model_name }}</code>
@@ -95,6 +95,35 @@
                 <div><dt>Tokens</dt><dd>{{ f.input_tokens or 0 }} in / {{ f.output_tokens or 0 }} out</dd></div>
                 {% endif %}
             </dl>
+            {% set r = f.review %}
+            <div class="review">
+                {% if r %}
+                <p class="review-current">
+                    <span class="stars" aria-label="Rated {{ r.rating }} out of 5">{{ "★" * r.rating }}{{ "☆" * (5 - r.rating) }}</span>
+                    <span class="sub">{{ r.reviewer or "Instructor" }}, {{ r.reviewed_at | when }}</span>
+                </p>
+                {% if r.comment %}<p class="prose review-comment">{{ r.comment }}</p>{% endif %}
+                {% endif %}
+                <details{% if not r or (review_error and review_error[0] == f.id) %} open{% endif %}>
+                    <summary>{{ "Change rating" if r else "Rate this feedback" }}</summary>
+                    <form class="form review-form" method="post" action="/feedback/{{ f.id }}/review">
+                        <input type="hidden" name="submission_id" value="{{ submission.id }}">
+                        {% if review_error and review_error[0] == f.id %}<p class="form-error">{{ review_error[1] }}</p>{% endif %}
+                        <fieldset class="rating">
+                            <legend>Quality (1 poor, 5 excellent)</legend>
+                            <div class="rating-choices">
+                                {% for n in REVIEW_RATINGS %}
+                                <label class="choice"><input type="radio" name="rating" value="{{ n }}" required{% if r and r.rating == n %} checked{% endif %}> {{ n }}</label>
+                                {% endfor %}
+                            </div>
+                        </fieldset>
+                        <label>Comment <span class="sub">(optional)</span>
+                            <textarea name="comment" rows="2" maxlength="{{ REVIEW_COMMENT_LIMIT }}">{{ r.comment if r and r.comment else "" }}</textarea>
+                        </label>
+                        <div class="actions"><button type="submit">Save rating</button></div>
+                    </form>
+                </details>
+            </div>
         </article>
         {% endfor %}
     </div>

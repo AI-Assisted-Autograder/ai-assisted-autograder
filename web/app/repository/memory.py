@@ -22,6 +22,7 @@ from app.repository.base import (
     FeedbackDetail,
     FeedbackPackage,
     FeedbackResult,
+    FeedbackReview,
     IGradingRepository,
     NotFoundError,
     PittCredential,
@@ -48,6 +49,7 @@ from app.repository.base import (
     assignment_sort_key,
     check_assignment_fields,
     check_gradable,
+    check_review,
     check_target_analysis,
     check_target_fields,
     clean,
@@ -181,6 +183,8 @@ class InMemoryRepository(IGradingRepository):
         self.submission_targets: dict[uuid.UUID, _SubmissionTarget] = {}
         self.test_results: list[_TestResult] = []
         self.ai_feedback: list[_AiFeedback] = []
+        # ai_feedback_id -> its reviews, oldest first.
+        self.reviews: dict[uuid.UUID, list[FeedbackReview]] = {}
         self.providers: list[_LlmProviderConfig] = []
         self._pitt_credential = PittCredential(None, 0)
         self.context_files: list[ContextFile] = []
@@ -617,6 +621,7 @@ class InMemoryRepository(IGradingRepository):
                         f.input_tokens,
                         f.output_tokens,
                         f.generated_at,
+                        (self.reviews.get(f.id) or [None])[-1],
                     )
                     for f in self.ai_feedback
                     if f.submission_target_id == st.id
@@ -652,6 +657,16 @@ class InMemoryRepository(IGradingRepository):
             derive_action(a.grading_mode, sub.submitted_at, sub.ai_authorized_at, sub.ai_graded_submitted_at),
             tuple(targets),
         )
+
+    def create_review(
+        self, ai_feedback_id: uuid.UUID, *, rating: int, comment: str | None, reviewer: str | None
+    ) -> uuid.UUID:
+        comment = check_review(rating, comment)
+        f = next((f for f in self.ai_feedback if f.id == ai_feedback_id), None)
+        if f is None:
+            raise NotFoundError(f"AI feedback {ai_feedback_id} not found")
+        self.reviews.setdefault(f.id, []).append(FeedbackReview(rating, comment, clean(reviewer), _now()))
+        return self.submission_targets[f.submission_target_id].submission_id
 
     def _latest_test(self, submission_target_id: uuid.UUID) -> TestResultRecord | None:
         r = max(

@@ -157,6 +157,17 @@ ul.tests li { padding: 0.25rem 0; }
 .response.selected { border-color: var(--done-fg); }
 .response header { display: flex; flex-wrap: wrap; align-items: center; gap: 0.4rem; margin-bottom: 0.3rem; }
 
+/* Instructor rating of a response (FR-11) */
+.review { margin-top: 0.7rem; padding-top: 0.6rem; border-top: 1px solid var(--border); font-size: 0.9rem; }
+.review summary { cursor: pointer; color: var(--link); }
+.review-current { display: flex; flex-wrap: wrap; align-items: baseline; gap: 0.5rem; margin: 0 0 0.3rem; }
+.review-comment { margin: 0 0 0.4rem; }
+.stars { color: var(--link); letter-spacing: 0.1em; }
+.review-form { margin-top: 0.5rem; }
+.rating-choices { display: flex; flex-wrap: wrap; gap: 0.2rem 1rem; }
+form.form .rating-choices label.choice { align-items: center; gap: 0.3rem; }
+.rating-choices label.choice input { margin-top: 0; }
+
 .failure { border-left: 3px solid var(--failed-fg); background: var(--failed-bg); padding: 0.6rem 0.8rem; border-radius: 4px; }
 .failure .sub { margin: 0.4rem 0 0; }
 

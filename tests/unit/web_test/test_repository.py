@@ -921,6 +921,62 @@ def test_submission_detail_unknown(backend):
         backend.repo.get_submission_detail(uuid.uuid4())
 
 
+# ---------------------------------------------------------------------
+# create_review (FR-11)
+# ---------------------------------------------------------------------
+def rated_submission(backend):
+    aid, sid = started(backend)
+    rubric = backend.add_rubric(aid, "add")
+    backend.repo.save_feedback(sid, "add", result_for(rubric, selected=1))
+    selected, other = backend.repo.get_submission_detail(sid).targets[0].feedback
+    return sid, selected, other
+
+
+def test_feedback_has_no_review_until_rated(backend):
+    _, selected, other = rated_submission(backend)
+    assert selected.review is None and other.review is None
+
+
+def test_create_review_shows_latest_on_its_response_only(backend):
+    sid, selected, other = rated_submission(backend)
+
+    returned = backend.repo.create_review(selected.id, rating=2, comment="  Too vague.  ", reviewer="ada@example.edu")
+    backend.repo.create_review(selected.id, rating=4, comment="", reviewer="ada@example.edu")
+
+    assert returned == sid
+    first, second = backend.repo.get_submission_detail(sid).targets[0].feedback
+    assert first.id == selected.id
+    assert (first.review.rating, first.review.comment, first.review.reviewer) == (4, None, "ada@example.edu")
+    assert first.review.reviewed_at is not None
+    assert second.review is None
+
+
+def test_create_review_keeps_comment_trimmed(backend):
+    sid, selected, _ = rated_submission(backend)
+    backend.repo.create_review(selected.id, rating=1, comment="  Wrong method.  ", reviewer=None)
+    review = backend.repo.get_submission_detail(sid).targets[0].feedback[0].review
+    assert (review.rating, review.comment, review.reviewer) == (1, "Wrong method.", None)
+
+
+@pytest.mark.parametrize("rating", [0, 6, -1])
+def test_create_review_rejects_out_of_range_rating(backend, rating):
+    sid, selected, _ = rated_submission(backend)
+    with pytest.raises(ValueError, match="1 to 5"):
+        backend.repo.create_review(selected.id, rating=rating, comment=None, reviewer=None)
+    assert backend.repo.get_submission_detail(sid).targets[0].feedback[0].review is None
+
+
+def test_create_review_rejects_overlong_comment(backend):
+    _, selected, _ = rated_submission(backend)
+    with pytest.raises(ValueError, match="at most"):
+        backend.repo.create_review(selected.id, rating=3, comment="x" * 4001, reviewer=None)
+
+
+def test_create_review_unknown_feedback(backend):
+    with pytest.raises(NotFoundError):
+        backend.repo.create_review(uuid.uuid4(), rating=3, comment=None, reviewer=None)
+
+
 def by_target(backend):
     """add tested for three students, one of them superseded; sub tested for one."""
     aid = backend.add_assignment("IMMEDIATE", (("sub", 2), ("add", 1), ("mul", 3)))

@@ -12,6 +12,7 @@ from app.models import (
     GRADING_MODES,
     TEST_STATUSES,
     AiFeedback,
+    AiFeedbackReview,
     Assignment,
     AssignmentContextFile,
     Course,
@@ -34,6 +35,7 @@ from app.repository.base import (
     FeedbackDetail,
     FeedbackPackage,
     FeedbackResult,
+    FeedbackReview,
     IGradingRepository,
     NotFoundError,
     PittCredential,
@@ -61,6 +63,7 @@ from app.repository.base import (
     assignment_sort_key,
     check_assignment_fields,
     check_gradable,
+    check_review,
     check_target_analysis,
     check_target_fields,
     clean,
@@ -601,6 +604,16 @@ class SqlGradingRepository(IGradingRepository):
                 tests[r.submission_target_id].append(
                     TestResultRecord(r.status, r.functional_test_feedback, r.recorded_at)
                 )
+            latest_review: dict[uuid.UUID, FeedbackReview] = {}
+            for r in s.scalars(
+                select(AiFeedbackReview)
+                .join(AiFeedback, AiFeedbackReview.ai_feedback_id == AiFeedback.id)
+                .where(AiFeedback.submission_target_id.in_(st_ids))
+                .order_by(AiFeedbackReview.reviewed_at)
+            ):
+                latest_review[r.ai_feedback_id] = FeedbackReview(
+                    r.instructor_rating, r.instructor_comment, r.reviewer, r.reviewed_at
+                )
             feedback: dict[uuid.UUID, list[FeedbackDetail]] = {i: [] for i in st_ids}
             for f, version in s.execute(
                 select(AiFeedback, Rubric.version)
@@ -621,6 +634,7 @@ class SqlGradingRepository(IGradingRepository):
                         f.input_tokens,
                         f.output_tokens,
                         f.generated_at,
+                        latest_review.get(f.id),
                     )
                 )
             return SubmissionDetail(
@@ -652,6 +666,26 @@ class SqlGradingRepository(IGradingRepository):
                     for st, gt in rows
                 ),
             )
+
+    def create_review(
+        self, ai_feedback_id: uuid.UUID, *, rating: int, comment: str | None, reviewer: str | None
+    ) -> uuid.UUID:
+        comment = check_review(rating, comment)
+        with self._sessions.begin() as s:
+            submission_id = s.scalar(
+                select(SubmissionTarget.submission_id)
+                .join(AiFeedback, AiFeedback.submission_target_id == SubmissionTarget.id)
+                .where(AiFeedback.id == ai_feedback_id)
+            )
+            if submission_id is None:
+                raise NotFoundError(f"AI feedback {ai_feedback_id} not found")
+            s.add(AiFeedbackReview(
+                ai_feedback_id=ai_feedback_id,
+                instructor_rating=rating,
+                instructor_comment=comment,
+                reviewer=clean(reviewer),
+            ))
+            return submission_id
 
     def list_target_summaries(self, assignment_id: uuid.UUID) -> list[TargetSummary]:
         with self._sessions.begin() as s:

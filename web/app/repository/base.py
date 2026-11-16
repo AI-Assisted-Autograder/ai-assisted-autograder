@@ -254,6 +254,16 @@ class SubmissionSummary:
 
 
 @dataclass(frozen=True)
+class FeedbackReview:
+    """An instructor's rating of one provider's response (FR-11)."""
+
+    rating: int
+    comment: str | None
+    reviewer: str | None
+    reviewed_at: datetime
+
+
+@dataclass(frozen=True)
 class FeedbackDetail:
     """One provider's response, as the instructor reviews it."""
 
@@ -269,6 +279,8 @@ class FeedbackDetail:
     input_tokens: int | None
     output_tokens: int | None
     generated_at: datetime
+    # The latest rating. Re-rating adds a row, so older ones stay in ai_feedback_review.
+    review: FeedbackReview | None = None
 
 
 @dataclass(frozen=True)
@@ -578,6 +590,20 @@ def required(value: str | None, label: str) -> str:
     return cleaned
 
 
+REVIEW_RATINGS = range(1, 6)
+REVIEW_COMMENT_LIMIT = 4000
+
+
+def check_review(rating: int, comment: str | None) -> str | None:
+    """Validate an FR-11 rating and return the cleaned comment."""
+    if rating not in REVIEW_RATINGS:
+        raise ValueError("Rating must be a whole number from 1 to 5")
+    comment = clean(comment)
+    if comment is not None and len(comment) > REVIEW_COMMENT_LIMIT:
+        raise ValueError(f"Comment must be at most {REVIEW_COMMENT_LIMIT} characters")
+    return comment
+
+
 def check_assignment_fields(grading_mode: str, language: str) -> tuple[str, str]:
     if grading_mode not in GRADING_MODES:
         raise ValueError(f"grading mode must be one of {', '.join(GRADING_MODES)}, not {grading_mode!r}")
@@ -774,6 +800,17 @@ class IGradingRepository(ABC):
     @abstractmethod
     def get_submission_detail(self, submission_id: uuid.UUID) -> SubmissionDetail:
         """A submission's targets with their test results and every provider's feedback."""
+
+    @abstractmethod
+    def create_review(
+        self, ai_feedback_id: uuid.UUID, *, rating: int, comment: str | None, reviewer: str | None
+    ) -> uuid.UUID:
+        """Record an instructor's 1-5 rating of one response (FR-11).
+
+        Every call inserts a row, so re-rating keeps the earlier ratings as history.
+        Returns the id of the submission the response belongs to.
+        Raises NotFoundError for an unknown response and ValueError for a bad rating.
+        """
 
     @abstractmethod
     def list_target_summaries(self, assignment_id: uuid.UUID) -> list[TargetSummary]:

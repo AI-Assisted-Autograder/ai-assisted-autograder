@@ -18,7 +18,7 @@ from fastapi.templating import Jinja2Templates
 from starlette.datastructures import UploadFile as StarletteUploadFile
 
 from app.assignment_context import MAX_FILES, MAX_TOTAL_CHARS, MAX_UPLOAD_BYTES, check_context, clean_filename, extract_text
-from app.auth import require_instructor
+from app.auth import InstructorAccount, require_instructor
 from app.db import SessionLocal
 from app.models import GRADING_MODES, TARGET_KINDS
 from app.pitt_settings import PITT_MODELS, encrypt_pitt_key, resolve_form_key, validate_pitt_model
@@ -30,6 +30,7 @@ from app.repository import (
     SqlGradingRepository,
     TargetStatus,
 )
+from app.repository.base import REVIEW_COMMENT_LIMIT, REVIEW_RATINGS
 
 # Every page here needs a signed-in instructor; /login itself is in app.auth.
 router = APIRouter(dependencies=[Depends(require_instructor)])
@@ -655,12 +656,55 @@ async def save_rubric(
     return see_other(f"/assignments/{assignment_id}#targets")
 
 
-@router.get("/submissions/{submission_id}")
-def submission(
-    request: Request, submission_id: uuid.UUID, repo: IGradingRepository = Depends(get_repository)
+def submission_page(
+    request: Request,
+    repo: IGradingRepository,
+    submission_id: uuid.UUID,
+    *,
+    review_error: tuple[uuid.UUID, str] | None = None,
+    status_code: int = 200,
 ):
     try:
         detail = repo.get_submission_detail(submission_id)
     except NotFoundError:
         return not_found(request, "That submission does not exist.")
-    return templates.TemplateResponse(request, "submission.html", {"submission": detail})
+    return templates.TemplateResponse(request, "submission.html", {
+        "submission": detail,
+        "review_error": review_error,
+        "REVIEW_RATINGS": REVIEW_RATINGS,
+        "REVIEW_COMMENT_LIMIT": REVIEW_COMMENT_LIMIT,
+    }, status_code=status_code)
+
+
+@router.get("/submissions/{submission_id}")
+def submission(
+    request: Request, submission_id: uuid.UUID, repo: IGradingRepository = Depends(get_repository)
+):
+    return submission_page(request, repo, submission_id)
+
+
+@router.post("/feedback/{feedback_id}/review")
+def review_feedback(
+    request: Request,
+    feedback_id: uuid.UUID,
+    rating: Annotated[str, Form()] = "",
+    comment: Annotated[str, Form()] = "",
+    # Only used to show a validation error on the page the form came from.
+    submission_id: Annotated[str, Form()] = "",
+    account: InstructorAccount = Depends(require_instructor),
+    repo: IGradingRepository = Depends(get_repository),
+):
+    """Rate one provider's response 1-5, with an optional comment (FR-11)."""
+    try:
+        stars = int(rating) if rating.strip().isdigit() else 0
+        sid = repo.create_review(feedback_id, rating=stars, comment=comment, reviewer=account.email)
+    except NotFoundError:
+        return not_found(request, "That feedback does not exist.")
+    except ValueError as error:
+        message, status = form_error(error)
+        try:
+            back = uuid.UUID(submission_id)
+        except ValueError:
+            return JSONResponse({"detail": message}, status_code=status)
+        return submission_page(request, repo, back, review_error=(feedback_id, message), status_code=status)
+    return see_other(f"/submissions/{sid}#feedback-{feedback_id}")

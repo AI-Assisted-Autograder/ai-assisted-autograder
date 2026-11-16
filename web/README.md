@@ -467,7 +467,7 @@ Runtime, written as submissions are tested and graded:
 | `submission_target` | Target within a submission | `ai_needed` false means opted out. `completed_at` set means done, with `last_error` set if it failed (AD-8). Also holds the provider agreement and why the feedback was selected. |
 | `test_result` | Test outcome against a target | `status` is PASS, FAIL, ERROR or SKIP (AD-10). |
 | `ai_feedback` | Provider response for a target | Records the rubric, model, prompt version, score, confidence and tokens. The one sent back to the student has `is_selected` (at most one per target). |
-| `ai_feedback_review` | Instructor rating of a response | Not written by anything yet. |
+| `ai_feedback_review` | Instructor rating of a response | 1-5 plus an optional comment, from the submission page (FR-11). Re-rating adds a row, and the page shows the latest. `reviewer` is the signed-in instructor's email. |
 | `trigger_run` | Nightly trigger run | Audit row: start and finish times, status and counts. Written by the `/internal/nightly/runs` endpoints. |
 
 Each submission gets a `submission_target` row for every target on its
@@ -538,7 +538,7 @@ needs a signed-in instructor (see "Instructor sign-in" below):
 | --- | --- |
 | `/` | Every assignment, with its mode, language and target and submission counts. |
 | `/assignments/{id}` | Its submissions (newest first, with each one's status and targets counted by state), its targets with their current rubric, and the providers. |
-| `/submissions/{id}` | Each target's test results, and every provider's feedback side by side with the one sent to the student marked. Opted-out, waiting and failed targets each say why there is no feedback. |
+| `/submissions/{id}` | Each target's test results, and every provider's feedback side by side with the one sent to the student marked. Opted-out, waiting and failed targets each say why there is no feedback. Each response can be rated 1-5 with a comment (`POST /feedback/{id}/review`, FR-11). |
 
 The routes get the repository from `get_repository`, which the tests in
 `test_ui.py` override with an `InMemoryRepository`. LLM output is
@@ -711,8 +711,8 @@ extracted text is stored (`assignment_context_file`, migration 0008), and
 `/v1/feedback` and the container's `/internal/assignments/{id}/config` see
 it. Scanned PDFs without a text layer are refused. New dependency: `pypdf`.
 
-Not done yet in the instructor UI: feedback rating (FR-11), and the
-NIGHTLY-only review-before-release gate (OQ-3, answered but not built).
+Not done yet in the instructor UI: the NIGHTLY-only review-before-release
+gate (OQ-3, answered but not built).
 
 ## Known limitations
 

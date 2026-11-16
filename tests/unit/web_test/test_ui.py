@@ -172,6 +172,57 @@ def test_nightly_submission_waiting_for_its_run(client, repo):
     assert "The next nightly run will grade it." in response.text
 
 
+def first_feedback_id(repo, sid):
+    return repo.get_submission_detail(sid).targets[0].feedback[0].id
+
+
+def test_submission_page_offers_rating_form(client, repo):
+    _, sid = graded_submission(repo)
+    fid = first_feedback_id(repo, sid)
+
+    text = client.get(f"/submissions/{sid}").text
+
+    assert f'action="/feedback/{fid}/review"' in text
+    assert f'id="feedback-{fid}"' in text
+    assert text.count("Rate this feedback") == 2
+
+
+def test_rate_feedback_records_reviewer_and_redirects(client, repo):
+    _, sid = graded_submission(repo)
+    fid = first_feedback_id(repo, sid)
+
+    response = client.post(f"/feedback/{fid}/review", data={
+        "rating": "4", "comment": "Good, but <too> long.", "submission_id": str(sid),
+    }, follow_redirects=False)
+
+    assert response.status_code == 303
+    assert response.headers["location"] == f"/submissions/{sid}#feedback-{fid}"
+    review = repo.get_submission_detail(sid).targets[0].feedback[0].review
+    assert (review.rating, review.comment, review.reviewer) == (4, "Good, but <too> long.", "ada@example.edu")
+    text = client.get(f"/submissions/{sid}").text
+    assert "Rated 4 out of 5" in text
+    assert "Good, but &lt;too&gt; long." in text
+    assert "Change rating" in text and "Rate this feedback" in text
+    assert 'value="4" required checked' in text
+
+
+@pytest.mark.parametrize("rating", ["", "0", "6", "abc", "2.5"])
+def test_rate_feedback_rejects_bad_rating(client, repo, rating):
+    _, sid = graded_submission(repo)
+    fid = first_feedback_id(repo, sid)
+
+    response = client.post(f"/feedback/{fid}/review", data={"rating": rating, "submission_id": str(sid)})
+
+    assert response.status_code == 400
+    assert "Rating must be a whole number from 1 to 5" in response.text
+    assert repo.get_submission_detail(sid).targets[0].feedback[0].review is None
+
+
+def test_rate_unknown_feedback(client, repo):
+    response = client.post(f"/feedback/{uuid.uuid4()}/review", data={"rating": "3"})
+    assert response.status_code == 404
+
+
 def test_assignment_by_target_view_links_each_target(client, repo):
     aid, _ = graded_submission(repo)
     targets = {t.identifier: t.id for t in repo.get_assignment_config(aid).targets}
