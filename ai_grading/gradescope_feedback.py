@@ -21,7 +21,7 @@ import uuid
 
 from local_client import (
     ClientError, ConfigChangedError, MAX_FILES_BYTES, complete_submission, get_assignment_config,
-    request_feedback, stable_request_id,
+    report_test_results, request_feedback, stable_request_id,
 )
 
 
@@ -441,6 +441,15 @@ def add_feedback(root=Path('/autograder'), *, run_id=None):
         if hidden_stdout:
             print(f"Instructor AI run: {json.dumps(run_context)}")
         base, previous_ai, blocked, cleanup_diagnostics = clean_results(original)
+        if submission_context and config.get('backend_url'):
+            # Before any AI work, so the dashboard gets test results even if AI fails.
+            try:
+                report_test_results(backend_url=config['backend_url'], token_file=token_file,
+                                    run_id=run_id, results=base,
+                                    timeout=max(1, min(20, deadline - time.monotonic())),
+                                    **submission_context)
+            except Exception as exc:
+                print(f'Test results were not recorded in the grading database: {exc}', file=sys.stderr)
         ai_failed = bool(cleanup_diagnostics)
         manifest = None
         records = []

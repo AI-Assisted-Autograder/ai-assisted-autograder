@@ -3,6 +3,7 @@ from decimal import Decimal
 
 from sqlalchemy import Uuid, and_, delete, exists, func, literal, or_, select, update
 from sqlalchemy.dialects.postgresql import insert
+from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session, sessionmaker
 
 from app.assignment_context import check_context
@@ -58,6 +59,7 @@ from app.repository.base import (
     TargetSubmission,
     TargetSubmissions,
     TargetSummary,
+    TargetTestOutcome,
     TestResultRecord,
     UnknownTargetError,
     assignment_sort_key,
@@ -65,6 +67,7 @@ from app.repository.base import (
     check_gradable,
     check_review,
     check_target_analysis,
+    check_test_outcomes,
     check_target_fields,
     clean,
     derive_action,
@@ -666,6 +669,44 @@ class SqlGradingRepository(IGradingRepository):
                     for st, gt in rows
                 ),
             )
+
+    def record_test_run(
+        self, submission_id: uuid.UUID, run_id: str, outcomes: list[TargetTestOutcome]
+    ) -> int:
+        check_test_outcomes(outcomes)
+        try:
+            with self._sessions.begin() as s:
+                self._submission(s, submission_id)
+                targets = {
+                    gt.identifier: st
+                    for st, gt in s.execute(
+                        select(SubmissionTarget, GradingTarget)
+                        .join(GradingTarget, SubmissionTarget.grading_target_id == GradingTarget.id)
+                        .where(SubmissionTarget.submission_id == submission_id)
+                        .with_for_update(of=SubmissionTarget)
+                    )
+                }
+                ids = [st.id for st in targets.values()]
+                if ids and s.scalar(select(exists().where(
+                    TestResult.submission_target_id.in_(ids), TestResult.run_id == run_id,
+                ))):
+                    return 0
+                added = 0
+                for o in outcomes:
+                    st = targets.get(o.target)
+                    if st is None:
+                        continue
+                    if o.status is not None:
+                        s.add(TestResult(submission_target_id=st.id, status=o.status,
+                                         functional_test_feedback=o.message, run_id=run_id))
+                        added += 1
+                    if o.ai_needed is not None:
+                        st.ai_needed = o.ai_needed
+                s.flush()
+                return added
+        except IntegrityError:
+            # A concurrent retry of the same run got there first.
+            return 0
 
     def create_review(
         self, ai_feedback_id: uuid.UUID, *, rating: int, comment: str | None, reviewer: str | None

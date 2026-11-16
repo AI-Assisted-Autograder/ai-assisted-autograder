@@ -30,6 +30,7 @@ from ai_grading.ILLMProvider.ILLMProvider import ProviderError
 from .feedback_store import JsonStore, StoreError
 from .feedback_config import validate_relative_path
 from .repository.base import FeedbackResult, ProviderFeedback, SubmissionRef
+from .run_results import map_outcomes
 
 LOG = logging.getLogger(__name__)
 MESSAGES = {
@@ -92,6 +93,32 @@ class FeedbackInput(BaseModel):
                     or len(item.scope) > 512 or len(item.summary) > 4_000):
                 raise ValueError("evidence exceeds its limits")
         return self
+
+
+TEST_RESULTS_MAX_BYTES = 2_097_152
+
+
+class TestRow(BaseModel):
+    """One row of Gradescope's results.json "tests" list, as the hook sends it."""
+
+    __test__ = False  # Not a pytest test class, despite the name.
+    model_config = ConfigDict(extra="ignore")
+    name: str | None = Field(default=None, max_length=1_024)
+    status: str | None = Field(default=None, max_length=32)
+    score: float | None = None
+    max_score: float | None = None
+    output: str | None = Field(default=None, max_length=16_000)
+    visibility: str | None = Field(default=None, max_length=32)
+
+
+class TestResultsInput(BaseModel):
+    __test__ = False
+    model_config = ConfigDict(extra="forbid")
+    submission: SubmissionContext
+    run_id: str = Field(min_length=1, max_length=128, pattern=r"^[A-Za-z0-9_.:-]+$")
+    # results.json's top-level default for rows without their own visibility.
+    visibility: str | None = Field(default=None, max_length=32)
+    tests: list[TestRow] = Field(default_factory=list, max_length=2_000)
 
 
 class AiCompleteInput(BaseModel):
@@ -680,6 +707,59 @@ def create_feedback_router(state_path: str | Path, *, assignment_loader,
         return JSONResponse(
             {"status": "completed", "submission_id": platform_submission_id,
              "ai_status": payload.ai_status},
+            headers={"Cache-Control": "no-store"},
+        )
+
+    @router.post("/v1/submissions/{platform_submission_id}/test-results")
+    async def test_results(platform_submission_id: str, request: Request):
+        """Record one run's test results and opt-outs for the instructor dashboard.
+
+        The hook sends results.json's rows once per run, before any AI call;
+        app.run_results maps them to targets. Repeats of a run_id add nothing.
+        """
+        store = runtime.store
+        headers = request.headers.getlist("authorization")
+        if len(headers) != 1:
+            return error("unauthorized", 401)
+        scheme, _, token = headers[0].partition(" ")
+        if scheme.lower() != "bearer" or not token or len(token) > 256 or not token.isascii():
+            return error("unauthorized", 401)
+        try:
+            assignment_id = store.authenticate(token)
+            raw = await asyncio.wait_for(read_body(request, TEST_RESULTS_MAX_BYTES),
+                                         timeout=store.config.timeout_seconds)
+            payload = TestResultsInput.model_validate_json(raw)
+        except StoreError as exc:
+            return error(exc.code, exc.status_code)
+        except OverflowError:
+            return error("input_too_large", 413)
+        except Exception:
+            return error("invalid_request", 422)
+        if payload.submission.platform_submission_id != platform_submission_id:
+            return error("invalid_request", 422)
+        if grading_repository is None:
+            return error("backend_error", 503)
+        try:
+            assignment = await asyncio.to_thread(
+                grading_repository.get_assignment_config, UUID(assignment_id),
+            )
+            if str(assignment.id) != assignment_id or not assignment.is_active:
+                return error("assignment_forbidden", 403)
+            submission_id = await asyncio.to_thread(db_submission, assignment_id, payload.submission)
+            outcomes = map_outcomes(
+                assignment.targets, [row.model_dump() for row in payload.tests], payload.visibility,
+            )
+            recorded = await asyncio.to_thread(
+                grading_repository.record_test_run, submission_id, payload.run_id, outcomes,
+            )
+        except StoreError as exc:
+            return error(exc.code, exc.status_code)
+        except Exception:
+            LOG.error("test_results_failed", exc_info=True)
+            return error("backend_error", 503)
+        return JSONResponse(
+            {"status": "recorded", "submission_id": platform_submission_id,
+             "recorded": recorded, "targets": len(outcomes)},
             headers={"Cache-Control": "no-store"},
         )
 

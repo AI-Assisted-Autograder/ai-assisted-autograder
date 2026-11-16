@@ -271,7 +271,17 @@ class SubmissionTarget(Base):
 class TestResult(Base):
     __test__ = False  # Not a pytest test class, despite the name.
     __tablename__ = "test_result"
-    __table_args__ = (one_of("status", TEST_STATUSES),)
+    __table_args__ = (
+        one_of("status", TEST_STATUSES),
+        # One result per target per autograder run, so a retried report adds nothing.
+        Index(
+            "uq_test_result_target_run",
+            "submission_target_id",
+            "run_id",
+            unique=True,
+            postgresql_where=text("run_id IS NOT NULL"),
+        ),
+    )
 
     id: Mapped[uuid.UUID] = uuid_pk()
     submission_target_id: Mapped[uuid.UUID] = mapped_column(
@@ -279,6 +289,8 @@ class TestResult(Base):
     )
     status: Mapped[str] = mapped_column(Text)
     functional_test_feedback: Mapped[str | None] = mapped_column(Text)
+    # The hook's run id; None for rows from seed.py and the Gradescope import.
+    run_id: Mapped[str | None] = mapped_column(Text)
     recorded_at: Mapped[datetime] = created_now()
 
 

@@ -43,6 +43,7 @@ from app.repository import (
     SqlGradingRepository,
     SubmissionRef,
     TargetStatus,
+    TargetTestOutcome,
     UnknownTargetError,
     derive_action,
     is_deduction,
@@ -919,6 +920,59 @@ def test_submission_detail_shows_every_target_state(backend):
 def test_submission_detail_unknown(backend):
     with pytest.raises(NotFoundError):
         backend.repo.get_submission_detail(uuid.uuid4())
+
+
+# ---------------------------------------------------------------------
+# record_test_run
+# ---------------------------------------------------------------------
+def test_record_test_run_stores_results_and_opt_outs(backend):
+    _, sid = started(backend, targets=(("add", 1), ("sub", 2), ("mul", 3)))
+
+    added = backend.repo.record_test_run(sid, "run-1", [
+        TargetTestOutcome("add", "FAIL", "test_add: expected 3"),
+        TargetTestOutcome("sub", "PASS", None, ai_needed=False),
+        TargetTestOutcome("missing", "PASS"),
+    ])
+
+    assert added == 2
+    add, sub, mul = backend.repo.get_submission_detail(sid).targets
+    assert [(r.status, r.functional_test_feedback) for r in add.test_results] == [("FAIL", "test_add: expected 3")]
+    assert add.status is TargetStatus.WAITING
+    assert [r.status for r in sub.test_results] == ["PASS"] and sub.status is TargetStatus.OPTED_OUT
+    assert mul.test_results == ()
+
+
+def test_record_test_run_ignores_a_repeated_run(backend):
+    _, sid = started(backend)
+    outcomes = [TargetTestOutcome("add", "FAIL", "first")]
+
+    assert backend.repo.record_test_run(sid, "run-1", outcomes) == 1
+    assert backend.repo.record_test_run(sid, "run-1", [TargetTestOutcome("add", "PASS", None, ai_needed=False)]) == 0
+    assert backend.repo.record_test_run(sid, "run-2", [TargetTestOutcome("add", "PASS")]) == 1
+
+    add = backend.repo.get_submission_detail(sid).targets[0]
+    # The repeat changed nothing, not even the opt-out; the new run adds the latest result.
+    assert [r.status for r in add.test_results] == ["FAIL", "PASS"]
+    assert add.status is TargetStatus.WAITING
+
+
+def test_record_test_run_can_opt_a_target_back_in(backend):
+    _, sid = started(backend)
+    backend.repo.record_test_run(sid, "run-1", [TargetTestOutcome("add", "PASS", None, ai_needed=False)])
+    backend.repo.record_test_run(sid, "run-2", [TargetTestOutcome("add", "FAIL", "broke", ai_needed=True)])
+    assert backend.repo.get_submission_detail(sid).targets[0].status is TargetStatus.WAITING
+
+
+def test_record_test_run_rejects_bad_status(backend):
+    _, sid = started(backend)
+    with pytest.raises(ValueError, match="status must be one of"):
+        backend.repo.record_test_run(sid, "run-1", [TargetTestOutcome("add", "BROKEN")])
+    assert backend.repo.get_submission_detail(sid).targets[0].test_results == ()
+
+
+def test_record_test_run_unknown_submission(backend):
+    with pytest.raises(NotFoundError):
+        backend.repo.record_test_run(uuid.uuid4(), "run-1", [])
 
 
 # ---------------------------------------------------------------------

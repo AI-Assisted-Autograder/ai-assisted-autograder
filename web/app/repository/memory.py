@@ -44,6 +44,7 @@ from app.repository.base import (
     TargetSubmission,
     TargetSubmissions,
     TargetSummary,
+    TargetTestOutcome,
     TestResultRecord,
     UnknownTargetError,
     assignment_sort_key,
@@ -51,6 +52,7 @@ from app.repository.base import (
     check_gradable,
     check_review,
     check_target_analysis,
+    check_test_outcomes,
     check_target_fields,
     clean,
     derive_action,
@@ -150,6 +152,7 @@ class _TestResult:
     status: str
     functional_test_feedback: str | None
     recorded_at: datetime
+    run_id: str | None = None
 
 
 @dataclass
@@ -657,6 +660,31 @@ class InMemoryRepository(IGradingRepository):
             derive_action(a.grading_mode, sub.submitted_at, sub.ai_authorized_at, sub.ai_graded_submitted_at),
             tuple(targets),
         )
+
+    def record_test_run(
+        self, submission_id: uuid.UUID, run_id: str, outcomes: list[TargetTestOutcome]
+    ) -> int:
+        check_test_outcomes(outcomes)
+        self._submission(submission_id)
+        targets = {
+            self.grading_targets[st.grading_target_id].identifier: st
+            for st in self.submission_targets.values()
+            if st.submission_id == submission_id
+        }
+        ids = {st.id for st in targets.values()}
+        if any(r.run_id == run_id and r.submission_target_id in ids for r in self.test_results):
+            return 0
+        added = 0
+        for o in outcomes:
+            st = targets.get(o.target)
+            if st is None:
+                continue
+            if o.status is not None:
+                self.test_results.append(_TestResult(st.id, o.status, o.message, _now(), run_id))
+                added += 1
+            if o.ai_needed is not None:
+                st.ai_needed = o.ai_needed
+        return added
 
     def create_review(
         self, ai_feedback_id: uuid.UUID, *, rating: int, comment: str | None, reviewer: str | None

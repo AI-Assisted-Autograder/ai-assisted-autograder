@@ -538,6 +538,90 @@ def complete_submission(
         raise ClientError("Backend returned an invalid completion response.") from None
 
 
+TEST_RESULTS_MAX_BYTES = 2_000_000
+TEST_ROW_FIELDS = ("name", "status", "score", "max_score", "output", "visibility")
+
+
+def _test_rows(tests, output_limit: int) -> list[dict]:
+    rows = []
+    for test in list(tests or [])[:2000]:
+        if not isinstance(test, dict):
+            continue
+        row = {key: test[key] for key in TEST_ROW_FIELDS if test.get(key) is not None}
+        if isinstance(row.get("output"), str):
+            row["output"] = row["output"][:output_limit]
+        for key, limit in (("name", 1000), ("status", 32), ("visibility", 32)):
+            if key in row:
+                row[key] = str(row[key])[:limit]
+        for key in ("score", "max_score"):
+            if key in row and (isinstance(row[key], bool) or not isinstance(row[key], (int, float))
+                               or not math.isfinite(row[key])):
+                del row[key]
+        rows.append(row)
+    return rows
+
+
+def report_test_results(
+    *, backend_url: str, token_file: str | Path, platform_submission_id: str,
+    submitted_at: str, run_id: str, results: dict, student_identifier: str | None = None,
+    timeout: float = 30,
+) -> dict:
+    """Send this run's Gradescope test rows so the instructor dashboard shows them.
+
+    The backend maps rows to targets with each target's evidence rules and
+    ignores a repeated run_id, so this is safe to retry.
+    """
+    if not math.isfinite(timeout) or not 0 < timeout <= 300:
+        raise ClientError("Client timeout must be between 0 and 300 seconds.")
+    origin = validate_backend_url(backend_url)
+    token = read_assignment_token(token_file)
+    visibility = results.get("visibility", results.get("test_visibility"))
+    for output_limit in (4000, 500, 0):
+        payload = json.dumps({
+            "submission": {
+                "platform_submission_id": platform_submission_id,
+                "submitted_at": submitted_at,
+                "student_identifier": student_identifier,
+            },
+            "run_id": run_id,
+            "visibility": str(visibility) if visibility is not None else None,
+            "tests": _test_rows(results.get("tests"), output_limit),
+        }, ensure_ascii=False).encode("utf-8")
+        if len(payload) <= TEST_RESULTS_MAX_BYTES:
+            break
+    else:
+        raise ClientError("Test results exceed the backend limit.")
+    request = Request(
+        origin + "/v1/submissions/" + quote(platform_submission_id, safe="") + "/test-results",
+        data=payload,
+        headers={"Authorization": "Bearer " + token, "Content-Type": "application/json",
+                 "Accept": "application/json"},
+        method="POST",
+    )
+    opener = build_opener(ProxyHandler({}), _NoRedirects())
+    try:
+        with opener.open(request, timeout=timeout) as response:
+            raw = response.read(MAX_RESPONSE_BYTES + 1)
+            if len(raw) > MAX_RESPONSE_BYTES or token.encode("ascii") in raw:
+                raise ClientError("Backend returned an invalid response.")
+    except HTTPError as error:
+        status = error.code
+        error.close()
+        raise _safe_http_error(status) from None
+    except (TimeoutError, socket.timeout):
+        raise ClientError("Backend request timed out.") from None
+    except (URLError, OSError, ValueError, HTTPException):
+        raise ClientError("Cannot reach the backend. Check its address and running process.") from None
+    try:
+        result = json.loads(raw)
+        if (not isinstance(result, dict) or result.get("submission_id") != platform_submission_id
+                or result.get("status") != "recorded"):
+            raise ValueError
+        return result
+    except (UnicodeError, ValueError, TypeError):
+        raise ClientError("Backend returned an invalid test results response.") from None
+
+
 def _backend_from_config(path: Path) -> str:
     if not path.exists():
         return DEFAULT_BACKEND_URL

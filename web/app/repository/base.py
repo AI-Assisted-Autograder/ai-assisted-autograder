@@ -19,7 +19,7 @@ from enum import Enum
 from pydantic import TypeAdapter
 
 from app.feedback_config import Analysis, RubricInput, TargetSettings, resolve_target_analysis
-from app.models import GRADING_MODES, TARGET_KINDS
+from app.models import GRADING_MODES, TARGET_KINDS, TEST_STATUSES
 
 
 class Action(str, Enum):
@@ -251,6 +251,18 @@ class SubmissionSummary:
     waiting: int
     opted_out: int
     ai_status: str | None
+
+
+@dataclass(frozen=True)
+class TargetTestOutcome:
+    """One target's result from one autograder run (app.run_results)."""
+
+    target: str
+    # PASS, FAIL, ERROR or SKIP; None when the run's tests don't map to this target.
+    status: str | None
+    message: str | None = None
+    # False opts the target out, True opts it back in, None leaves it alone.
+    ai_needed: bool | None = None
 
 
 @dataclass(frozen=True)
@@ -608,6 +620,12 @@ def check_review(rating: int, comment: str | None) -> str | None:
     return comment
 
 
+def check_test_outcomes(outcomes: list["TargetTestOutcome"]) -> None:
+    for o in outcomes:
+        if o.status is not None and o.status not in TEST_STATUSES:
+            raise ValueError(f"status must be one of {', '.join(TEST_STATUSES)}, not {o.status!r}")
+
+
 def check_assignment_fields(grading_mode: str, language: str) -> tuple[str, str]:
     if grading_mode not in GRADING_MODES:
         raise ValueError(f"grading mode must be one of {', '.join(GRADING_MODES)}, not {grading_mode!r}")
@@ -804,6 +822,17 @@ class IGradingRepository(ABC):
     @abstractmethod
     def get_submission_detail(self, submission_id: uuid.UUID) -> SubmissionDetail:
         """A submission's targets with their test results and every provider's feedback."""
+
+    @abstractmethod
+    def record_test_run(
+        self, submission_id: uuid.UUID, run_id: str, outcomes: list[TargetTestOutcome]
+    ) -> int:
+        """Store one autograder run's test results and opt-outs, all or nothing.
+
+        A run already recorded for this submission is skipped, so the hook can
+        retry safely. Returns the number of test_result rows added (0 on a repeat).
+        Outcomes for targets the submission doesn't have are ignored.
+        """
 
     @abstractmethod
     def create_review(

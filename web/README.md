@@ -169,6 +169,7 @@ reader. Global provider settings and assignment tokens are managed separately.
 | `GET /internal/assignments/{id}/config` | `X-Internal-Token` | Read current AI configuration |
 | `POST /v1/feedback` | Assignment Bearer token | Generate and persist feedback for one submission target |
 | `POST /v1/submissions/{platform_submission_id}/ai-complete` | Assignment Bearer token | Record the whole execution's required `ai_status`: `SUCCEEDED` or `FAILED` |
+| `POST /v1/submissions/{platform_submission_id}/test-results` | Assignment Bearer token | Record one run's Gradescope test rows for the results dashboard; see below |
 | `GET /internal/ai-failures/submissions` | `X-Internal-Token` | List active submissions with `ai_status=FAILED`, across IMMEDIATE and NIGHTLY assignments |
 | `GET /v1/assignment/config` | Assignment Bearer token | Read the token's target collection rules and revision, without using call quota |
 
@@ -177,6 +178,18 @@ existing `course_id` or a new `course`; duplicate platform assignment IDs return
 409. The assignment UUID binds its token, and target UUIDs identify feedback
 requests. These are DB UUIDs, not Gradescope assignment numbers or filenames.
 Targets without a current rubric are excluded from AI execution.
+
+Before any AI call, the hook sends every row of `results.json` once to
+`test-results` (`submission`, `run_id`, top-level `visibility`, and `tests`
+with each row's `name`, `status`, `score`, `max_score`, `output`, `visibility`).
+`app/run_results.py` maps rows to targets with each target's stored rules:
+rows matched by a `results/results.json` evidence source's `include` patterns
+(every row when it has none), otherwise rows named in `expected_tests`. Any
+failing row is `FAIL`; a missing expected test or unreadable row is `ERROR`;
+otherwise `PASS`. A `functional_test_feedback` target with no visible failure
+is opted out. Rows are stored per `run_id` (migration 0011), so repeating a run
+adds nothing and a rerun adds one fresh row per target. A failure here is
+logged and never stops the AI step.
 
 The connector reports `submission` metadata and `ai_status` to `ai-complete`
 after writing `results.json`. Any AI-processing failure in the execution makes
@@ -716,8 +729,6 @@ gate (OQ-3, answered but not built).
 
 ## Known limitations
 
-- A `NIGHTLY` rerun runs the test suite again, so it records duplicate
-  test results.
 - A `NIGHTLY` submission whose targets were all opted out still gets
   DEFER, though there is nothing to grade.
 - Provider configuration is global, so every assignment uses the same
