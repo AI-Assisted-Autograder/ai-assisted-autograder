@@ -30,9 +30,9 @@ test('NightlyTrigger authorizes and reruns every pending submission', async () =
   expect(summary).toMatchObject({ found: 2, authorized: 2, rerun: 2, failed: 0 });
   expect(summary.outcomes).toEqual([
     { submissionId: 'submission-1', status: 'AUTHORIZED' },
-    { submissionId: 'submission-1', status: 'RERUN_SUBMITTED' },
+    { submissionId: 'submission-1', status: 'RERUN_SUBMITTED', confirmationEvidence: 'confirmation-dialog' },
     { submissionId: 'submission-2', status: 'AUTHORIZED' },
-    { submissionId: 'submission-2', status: 'RERUN_SUBMITTED' },
+    { submissionId: 'submission-2', status: 'RERUN_SUBMITTED', confirmationEvidence: 'confirmation-dialog' },
     { submissionId: 'submission-1', status: 'RERUN_SUCCEEDED' },
     { submissionId: 'submission-2', status: 'RERUN_SUCCEEDED' },
   ]);
@@ -90,9 +90,9 @@ test('NightlyTrigger keeps a real rerun successful when only its audit write fai
   });
   expect(summary.outcomes).toEqual([
     { submissionId: 'submission-1', status: 'AUTHORIZED' },
-    { submissionId: 'submission-1', status: 'RERUN_SUBMITTED' },
+    { submissionId: 'submission-1', status: 'RERUN_SUBMITTED', confirmationEvidence: 'confirmation-dialog' },
     { submissionId: 'submission-2', status: 'AUTHORIZED' },
-    { submissionId: 'submission-2', status: 'RERUN_SUBMITTED' },
+    { submissionId: 'submission-2', status: 'RERUN_SUBMITTED', confirmationEvidence: 'confirmation-dialog' },
     { submissionId: 'submission-1', status: 'RERUN_SUCCEEDED' },
     { submissionId: 'submission-2', status: 'RERUN_SUCCEEDED' },
   ]);
