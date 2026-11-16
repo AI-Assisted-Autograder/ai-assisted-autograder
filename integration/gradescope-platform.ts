@@ -1,4 +1,4 @@
-import { expect, Page } from '@playwright/test';
+import { Dialog, expect, Page } from '@playwright/test';
 import type { ILearningPlatform, RerunResult, SubmissionLocator } from './interfaces';
 
 export type { RerunResult, SubmissionLocator } from './interfaces';
@@ -12,7 +12,8 @@ export const selectorMap = {
   moreButton: /^more$/i,
   confirmationDialog: '[role="dialog"]',
   confirmRerun: /confirm|rerun autograder|regrade/i,
-  rerunSuccess: /autograder.*(queued|started|success)|rerun.*(queued|started|success)/i,
+  rerunSuccess:
+    /(?:autograder|grader|regrade|rerun).*(?:queued|queue|started|start|submitted|processing|running|success)|(?:queued|queue|started|start|submitted|processing|running|success).*(?:autograder|grader|regrade|rerun)/i,
 } as const;
 
 export type AutograderState = 'RUNNING' | 'COMPLETE' | 'FAILED' | 'UNKNOWN';
@@ -96,10 +97,29 @@ export class GradescopePlatform implements ILearningPlatform {
         'Visible controls: ' + (controls || '(none)'),
       );
     }
-    await rerunButton.click();
+    let nativeDialogAccepted = false;
+    const nativeDialogHandler = async (dialog: Dialog) => {
+      if (dialog.type() === 'confirm') {
+        nativeDialogAccepted = true;
+        await dialog.accept();
+      } else {
+        await dialog.dismiss();
+      }
+    };
+    this.page.on('dialog', nativeDialogHandler);
+
+    try {
+      await rerunButton.click();
+    } finally {
+      this.page.off('dialog', nativeDialogHandler);
+    }
 
     let confirmed = false;
     const dialog = this.page.locator(selectorMap.confirmationDialog);
+    // The confirmation dialog can be rendered asynchronously after the first
+    // click. Give it a short grace period before deciding that this is a
+    // direct-action button.
+    await dialog.waitFor({ state: 'visible', timeout: 1_500 }).catch(() => undefined);
     if (await dialog.isVisible().catch(() => false)) {
       const confirmButton = dialog
         .locator('button:visible, a:visible, [role="button"]:visible, [role="menuitem"]:visible')
@@ -110,24 +130,62 @@ export class GradescopePlatform implements ILearningPlatform {
       confirmed = true;
     }
 
-    const confirmationTimeoutMs = this.readPositiveInteger(
-      'GRADESCOPE_RERUN_CONFIRMATION_TIMEOUT_MS',
-      60_000,
+    const evidence = await this.waitForRerunAcceptance(
+      dialog,
+      confirmed,
+      nativeDialogAccepted,
     );
-    const configuredSuccessText = process.env.GRADESCOPE_RERUN_SUCCESS_TEXT;
-    const successPattern = configuredSuccessText
-      ? new RegExp(configuredSuccessText, 'i')
-      : selectorMap.rerunSuccess;
-    await expect(this.page.getByText(successPattern).first()).toBeVisible({
-      timeout: confirmationTimeoutMs,
-    });
 
     return {
       submissionId: locator.submissionId,
       clicked: true,
       confirmed,
+      confirmationEvidence: evidence,
       url: this.page.url(),
     };
+  }
+
+  private async waitForRerunAcceptance(
+    dialog: ReturnType<Page['locator']>,
+    confirmed: boolean,
+    nativeDialogAccepted: boolean,
+  ): Promise<RerunResult['confirmationEvidence']> {
+    const timeoutMs = this.readPositiveInteger(
+      'GRADESCOPE_RERUN_CONFIRMATION_TIMEOUT_MS',
+      10_000,
+    );
+    const configuredSuccessText = process.env.GRADESCOPE_RERUN_SUCCESS_TEXT;
+    const successPattern = configuredSuccessText
+      ? new RegExp(configuredSuccessText, 'i')
+      : selectorMap.rerunSuccess;
+    const deadline = Date.now() + timeoutMs;
+
+    while (Date.now() <= deadline) {
+      const bodyText = await this.page.locator('body').innerText().catch(() => '');
+      if (successPattern.test(bodyText)) {
+        return 'status-text';
+      }
+
+      // A confirmed dialog disappearing is the actual browser-level evidence
+      // that Gradescope accepted the request. Do not require a particular
+      // English toast, because that text varies across Gradescope pages.
+      if ((confirmed || nativeDialogAccepted) && !(await dialog.isVisible().catch(() => false))) {
+        return nativeDialogAccepted ? 'native-dialog' : 'confirmation-dialog';
+      }
+
+      await this.page.waitForTimeout(250);
+    }
+
+    // Some Gradescope pages use a direct action with no dialog or toast. The
+    // click itself completed without navigation/error, so record it as a
+    // submitted trigger and let waitForRerun verify the actual autograder run.
+    if (!confirmed && !nativeDialogAccepted) {
+      return 'direct-click';
+    }
+
+    throw new Error(
+      `Gradescope did not confirm the rerun request within ${timeoutMs} ms at ${this.page.url()}.`,
+    );
   }
 
   public async waitForRerun(locator: SubmissionLocator): Promise<void> {

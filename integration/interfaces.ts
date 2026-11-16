@@ -6,10 +6,15 @@ export type SubmissionLocator = {
 
 export type TriggerSource = 'PENDING_NIGHTLY' | 'AI_FAILURES';
 
+export type TriggerOptions = {
+  waitForCompletion?: boolean;
+};
+
 export type RerunResult = {
   submissionId: string;
   clicked: boolean;
   confirmed: boolean;
+  confirmationEvidence: 'status-text' | 'confirmation-dialog' | 'native-dialog' | 'direct-click';
   url: string;
 };
 
@@ -42,6 +47,7 @@ export type SubmissionOutcome = {
   status: SubmissionOutcomeStatus;
   kind?: FailureKind;
   message?: string;
+  confirmationEvidence?: RerunResult['confirmationEvidence'];
 };
 
 export interface ILearningPlatform {
@@ -65,7 +71,8 @@ export interface IGradingClient {
   startRun(): Promise<void>;
   listSubmissionsPendingAi(mode: 'NIGHTLY'): Promise<SubmissionLocator[]>;
   listSubmissionsFailedOnAi(): Promise<SubmissionLocator[]>;
-  authorizeForGrading(submissionId: string): Promise<void>;
+  hasAiFailure(submissionId: string): Promise<boolean>;
+  authorizeForGrading(submissionId: string, source: TriggerSource): Promise<void>;
   recordSubmissionResult(
     submissionId: string,
     status: 'AUTHORIZED' | 'RERUN_SUBMITTED' | 'RERUN_SUCCEEDED' | 'RERUN_FAILED',

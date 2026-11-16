@@ -3,6 +3,7 @@ import type { ILearningPlatform, RerunResult, SubmissionLocator } from './interf
 /** Test double for the browser boundary. It never opens a browser. */
 export class FakePlatform implements ILearningPlatform {
   public readonly rerunCalls: SubmissionLocator[] = [];
+  public readonly waitForRerunCalls: SubmissionLocator[] = [];
   public authenticated = false;
 
   public constructor(private readonly failingSubmissionIds = new Set<string>()) {}
@@ -20,11 +21,13 @@ export class FakePlatform implements ILearningPlatform {
       submissionId: locator.submissionId,
       clicked: true,
       confirmed: true,
+      confirmationEvidence: 'confirmation-dialog',
       url: locator.platformSubmissionUrl,
     };
   }
 
   public async waitForRerun(locator: SubmissionLocator): Promise<void> {
+    this.waitForRerunCalls.push(locator);
     if (this.failingSubmissionIds.has(locator.submissionId)) {
       throw new Error(`fake rerun failure for ${locator.submissionId}`);
     }

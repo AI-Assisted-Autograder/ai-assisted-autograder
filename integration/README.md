@@ -44,6 +44,11 @@ The current implementation is a rerun prototype:
 - The runner supports two sources: PENDING_NIGHTLY for the initial nightly
   batch and AI_FAILURES for retrying only submissions returned by the
   backend's AI-failure endpoint.
+- A scheduled trigger can run in submit-only mode by setting
+  `NIGHTLY_WAIT_FOR_COMPLETION=0`. In that mode it records the browser trigger
+  as `RERUN_SUBMITTED` and exits without waiting for Gradescope or AI results.
+  A later scheduled run can query `AI_FAILURES` (or `PENDING_NIGHTLY`) and
+  submit the next retry batch.
 - Each submission failure now includes a phase (authorization, trigger, or
   completion) and a coarse kind such as DATABASE, TIMEOUT, AI_FEEDBACK, or
   AUTOGRADER. These labels help operations triage failures; the backend remains
@@ -52,12 +57,19 @@ The current implementation is a rerun prototype:
   follow-up audit write fails. The summary exposes that problem as auditErrors
   so a database/API compatibility issue cannot be reported as a false
   Gradescope failure.
+- The trigger summary records how the rerun was accepted: `status-text`,
+  `confirmation-dialog`, `native-dialog`, or `direct-click`. The first three
+  are explicit browser confirmations; `direct-click` means the Gradescope
+  control accepted the click without exposing a stable toast, so the later
+  completion poll remains the source of truth for the autograder.
 - The runner also emits an outcome timeline per submission:
   AUTHORIZED -> RERUN_SUBMITTED -> RERUN_SUCCEEDED on the normal path.
   Failures are labeled AUTHORIZATION_FAILED, RERUN_TRIGGER_FAILED, or
   RERUN_COMPLETION_FAILED. RERUN_SUCCEEDED means the Gradescope/autograder
-  phase completed; it does not by itself prove that every AI target produced
-  feedback.
+  phase completed and the backend no longer reports an AI failure for that
+  submission. If the backend still reports an AI failure after the
+  autograder completes, the runner records an AI_FEEDBACK failure instead of
+  incorrectly reporting success.
 - `GradingApiClient` reads pending `NIGHTLY` submissions, starts an audit run,
   authorizes submissions, and writes the aggregate result back to the Web API.
 - The intended batch flow is database-driven: the Web API returns each eligible
@@ -69,6 +81,10 @@ The current implementation is a rerun prototype:
   each submission's authorization, success, or failure separately.
 - `nightly-runner.ts` is the scheduler entrypoint. A cron or GitHub Actions
   workflow can invoke it later.
+- The Oracle wrapper supports two local-time slots: `NIGHTLY_LOCAL_TIME` for
+  the initial `PENDING_NIGHTLY` batch and `NIGHTLY_RETRY_LOCAL_TIME` for the
+  later retry scan. The retry source is configurable with
+  `NIGHTLY_RETRY_TRIGGER_SOURCE` and defaults to `AI_FAILURES`.
 
 ## Files
 

@@ -21,10 +21,11 @@ async function main(): Promise<void> {
     if (configuredSource !== 'PENDING_NIGHTLY' && configuredSource !== 'AI_FAILURES') {
       throw new Error('NIGHTLY_TRIGGER_SOURCE must be PENDING_NIGHTLY or AI_FAILURES.');
     }
+    const waitForCompletion = process.env.NIGHTLY_WAIT_FOR_COMPLETION !== '0';
     const summary = await new NightlyTrigger(
       new HttpGradingClient(),
       new GradescopePlatform(page),
-    ).run(configuredSource as TriggerSource);
+    ).run(configuredSource as TriggerSource, { waitForCompletion });
     console.log(JSON.stringify(summary));
   } finally {
     await browser.close();

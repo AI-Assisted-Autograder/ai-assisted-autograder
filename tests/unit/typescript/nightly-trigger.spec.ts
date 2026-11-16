@@ -114,3 +114,51 @@ test('NightlyTrigger retries only submissions returned by the AI-failure query',
     failed: 0,
   });
 });
+
+test('NightlyTrigger can submit without waiting for completion', async () => {
+  const client = new FakeGradingClient(submissions);
+  const platform = new FakePlatform();
+
+  const summary = await new NightlyTrigger(client, platform).run('PENDING_NIGHTLY', {
+    waitForCompletion: false,
+  });
+
+  expect(platform.rerunCalls).toHaveLength(2);
+  expect(platform.waitForRerunCalls).toHaveLength(0);
+  expect(summary).toMatchObject({ found: 2, authorized: 2, rerun: 2, failed: 0 });
+  expect(summary.outcomes).not.toContainEqual({
+    submissionId: 'submission-1',
+    status: 'RERUN_SUCCEEDED',
+  });
+  expect(client.recordedResults).toContainEqual({
+    submissionId: 'submission-1',
+    status: 'RERUN_SUBMITTED',
+  });
+});
+
+test('NightlyTrigger does not report success while backend still reports an AI failure', async () => {
+  const failedSubmission = submissions[0];
+  const client = new FakeGradingClient(
+    submissions,
+    undefined,
+    submissions,
+    [failedSubmission],
+  );
+  const platform = new FakePlatform();
+
+  const summary = await new NightlyTrigger(client, platform).run();
+
+  expect(summary).toMatchObject({
+    rerun: 2,
+    failed: 1,
+    failures: [{
+      submissionId: 'submission-1',
+      phase: 'completion',
+      kind: 'AI_FEEDBACK',
+    }],
+  });
+  expect(client.recordedResults).not.toContainEqual({
+    submissionId: 'submission-1',
+    status: 'RERUN_SUCCEEDED',
+  });
+});

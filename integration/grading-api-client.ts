@@ -60,6 +60,11 @@ export class HttpGradingClient implements IGradingClient {
     return this.toSubmissionLocators(rows);
   }
 
+  public async hasAiFailure(submissionId: string): Promise<boolean> {
+    const failures = await this.listSubmissionsFailedOnAi();
+    return failures.some((submission) => submission.submissionId === submissionId);
+  }
+
   private toSubmissionLocators(
     response: PendingSubmissionDto[] | PendingSubmissionDto,
   ): SubmissionLocator[] {
@@ -78,13 +83,24 @@ export class HttpGradingClient implements IGradingClient {
     }));
   }
 
-  public async authorizeForGrading(submissionId: string): Promise<void> {
+  public async authorizeForGrading(
+    submissionId: string,
+    source: 'PENDING_NIGHTLY' | 'AI_FAILURES',
+  ): Promise<void> {
     const response = await fetch(
       `${this.baseUrl}/internal/nightly/submissions/${submissionId}/authorize`,
-      { method: 'POST', headers: this.headers() },
+      {
+        method: 'POST',
+        headers: { ...this.headers(), 'Content-Type': 'application/json' },
+        body: JSON.stringify({ trigger_source: source }),
+      },
     );
     if (!response.ok) {
-      throw new Error(`Database API returned ${response.status} while authorizing ${submissionId}.`);
+      const detail = await response.text().catch(() => '');
+      throw new Error(
+        `Database API returned ${response.status} while authorizing ${submissionId}.` +
+          (detail ? ` ${detail}` : ''),
+      );
     }
   }
 

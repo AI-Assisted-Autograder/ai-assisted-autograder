@@ -3,7 +3,9 @@ import type {
   ILearningPlatform,
   SubmissionFailure,
   SubmissionLocator,
+  SubmissionOutcome,
   SubmissionOutcomeStatus,
+  TriggerOptions,
   TriggerSource,
   TriggerRunSummary,
 } from './interfaces';
@@ -18,7 +20,10 @@ export class NightlyTrigger {
     private readonly platform: ILearningPlatform,
   ) {}
 
-  public async run(source: TriggerSource = 'PENDING_NIGHTLY'): Promise<TriggerRunSummary> {
+  public async run(
+    source: TriggerSource = 'PENDING_NIGHTLY',
+    options: TriggerOptions = {},
+  ): Promise<TriggerRunSummary> {
     const summary: TriggerRunSummary = { found: 0, authorized: 0, rerun: 0, failed: 0 };
     await this.client.startRun();
     let runError: unknown;
@@ -35,7 +40,7 @@ export class NightlyTrigger {
       for (const submission of pending) {
         try {
           // Authorization must happen before the browser click to avoid a DEFER race.
-          await this.client.authorizeForGrading(submission.submissionId);
+          await this.client.authorizeForGrading(submission.submissionId, source);
           summary.authorized += 1;
           await this.client.recordSubmissionResult(submission.submissionId, 'AUTHORIZED');
           this.recordOutcome(summary, submission.submissionId, 'AUTHORIZED');
@@ -45,10 +50,17 @@ export class NightlyTrigger {
         }
 
         try {
-          await this.platform.triggerRerun(submission);
+          const rerunResult = await this.platform.triggerRerun(submission);
           submitted.push(submission);
           summary.rerun += 1;
-          this.recordOutcome(summary, submission.submissionId, 'RERUN_SUBMITTED');
+          this.recordOutcome(
+            summary,
+            submission.submissionId,
+            'RERUN_SUBMITTED',
+            undefined,
+            undefined,
+            rerunResult.confirmationEvidence,
+          );
         } catch (error) {
           await this.recordFailure(summary, submission, 'trigger', error);
           continue;
@@ -63,14 +75,21 @@ export class NightlyTrigger {
         }
       }
 
-      // Submit every accepted rerun before waiting for any one autograder.
-      for (const submission of submitted) {
-        try {
-          await this.platform.waitForRerun(submission);
-          await this.client.recordSubmissionResult(submission.submissionId, 'RERUN_SUCCEEDED');
-          this.recordOutcome(summary, submission.submissionId, 'RERUN_SUCCEEDED');
-        } catch (error) {
-          await this.recordFailure(summary, submission, 'completion', error);
+      if (options.waitForCompletion !== false) {
+        // Submit every accepted rerun before waiting for any one autograder.
+        for (const submission of submitted) {
+          try {
+            await this.platform.waitForRerun(submission);
+            if (await this.client.hasAiFailure(submission.submissionId)) {
+              throw new Error(
+                `Backend still reports an AI feedback failure for ${submission.submissionId}.`,
+              );
+            }
+            await this.client.recordSubmissionResult(submission.submissionId, 'RERUN_SUCCEEDED');
+            this.recordOutcome(summary, submission.submissionId, 'RERUN_SUCCEEDED');
+          } catch (error) {
+            await this.recordFailure(summary, submission, 'completion', error);
+          }
         }
       }
     } catch (error) {
@@ -129,15 +148,18 @@ export class NightlyTrigger {
     status: SubmissionOutcomeStatus,
     kind?: SubmissionFailure['kind'],
     message?: string,
+    confirmationEvidence?: SubmissionOutcome['confirmationEvidence'],
   ): void {
     const outcome = { submissionId, status } as {
       submissionId: string;
       status: SubmissionOutcomeStatus;
       kind?: SubmissionFailure['kind'];
       message?: string;
+      confirmationEvidence?: SubmissionOutcome['confirmationEvidence'];
     };
     if (kind !== undefined) outcome.kind = kind;
     if (message !== undefined) outcome.message = message;
+    if (confirmationEvidence !== undefined) outcome.confirmationEvidence = confirmationEvidence;
     (summary.outcomes ??= []).push(outcome);
   }
 

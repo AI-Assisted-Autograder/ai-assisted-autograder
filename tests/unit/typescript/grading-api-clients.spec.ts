@@ -150,14 +150,18 @@ test('authorizeForGrading sends a POST request for the selected submission', asy
 
   const client = new HttpGradingClient();
 
-  await client.authorizeForGrading('submission-123');
+  await client.authorizeForGrading('submission-123', 'PENDING_NIGHTLY');
 
   expect(fetchMock.mock.calls[0].arguments[0]).toBe(
     'http://localhost:8000/internal/nightly/submissions/submission-123/authorize',
   );
   expect(fetchMock.mock.calls[0].arguments[1]).toMatchObject({
     method: 'POST',
-    headers: { 'X-Internal-Token': 'test-token' },
+    headers: {
+      'X-Internal-Token': 'test-token',
+      'Content-Type': 'application/json',
+    },
+    body: JSON.stringify({ trigger_source: 'PENDING_NIGHTLY' }),
   });
 });
 
