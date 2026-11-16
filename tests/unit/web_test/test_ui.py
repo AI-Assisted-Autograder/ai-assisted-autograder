@@ -463,6 +463,12 @@ def test_results_dashboard_flags_deductions(client, repo):
     assert "3 / 5" in text
     assert '<span class="badge failed">AI failed</span>' in text
     assert "Opted out" in text
+    # Each cell with feedback has a dropdown showing the text sent to the student, escaped.
+    assert text.count('<details class="cell-feedback">') == 2
+    assert "<summary>Feedback</summary>" in text
+    assert "Handle &lt;negative&gt; numbers." in text
+    # The failed target shows why instead.
+    assert "<summary>Why it failed</summary>" in text and "429 Resource exhausted" in text
 
 
 def test_results_dashboard_filters_to_deductions(client, repo):

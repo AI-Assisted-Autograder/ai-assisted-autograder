@@ -1107,6 +1107,10 @@ def test_results_flag_failing_tests_and_low_scores(backend):
     # ERROR counts; sub has no max score, so only the test can flag it.
     assert (b.cells[1].test_status, b.cells[1].status, b.cells[1].deduction) == ("ERROR", TargetStatus.FAILED, True)
     assert b.deduction_count == 2
+    # The selected feedback text and the failure reason, for the cell dropdowns.
+    assert (b.cells[0].feedback, b.cells[0].last_error) == ("Fine.", None)
+    assert (b.cells[1].feedback, b.cells[1].last_error) == (None, "boom")
+    assert (a.cells[0].feedback, a.cells[0].last_error) == (None, None)
 
     assert c.submission_id == carol
     assert (c.cells[0].suggested_score, c.cells[0].deduction) == (Decimal("1"), False)

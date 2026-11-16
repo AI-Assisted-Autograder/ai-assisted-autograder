@@ -390,6 +390,10 @@ class ResultCell:
     # The selected provider's, once feedback is given.
     suggested_score: Decimal | None
     deduction: bool
+    # The selected provider's feedback text, as sent to the student.
+    feedback: str | None = None
+    # Why feedback generation failed, when it did.
+    last_error: str | None = None
 
 
 @dataclass(frozen=True)

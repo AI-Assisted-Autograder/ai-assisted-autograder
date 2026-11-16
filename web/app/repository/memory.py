@@ -746,13 +746,15 @@ class InMemoryRepository(IGradingRepository):
                 return None
             latest = self._latest_test(st.id)
             test = None if latest is None else latest.status
-            score = next(
-                (f.suggested_score for f in self.ai_feedback if f.submission_target_id == st.id and f.is_selected),
+            chosen = next(
+                (f for f in self.ai_feedback if f.submission_target_id == st.id and f.is_selected),
                 None,
             )
+            score = None if chosen is None else chosen.suggested_score
             return ResultCell(
                 target_status(st.ai_needed, st.completed_at, st.last_error),
                 test, score, is_deduction(test, score, gt.max_score),
+                None if chosen is None else chosen.body, st.last_error,
             )
 
         rows = [

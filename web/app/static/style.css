@@ -255,6 +255,16 @@ header.site form.signed-in { margin-left: auto; display: flex; gap: 0.8rem; alig
 table.results td.cell { white-space: nowrap; }
 table.results td.deduction { background: var(--failed-bg); }
 table.results .score-line { font-variant-numeric: tabular-nums; font-size: 0.9rem; margin-top: 0.2rem; }
+table.results td.cell { vertical-align: top; }
+.cell-feedback { margin-top: 0.3rem; font-size: 0.85rem; }
+.cell-feedback summary { cursor: pointer; color: var(--link); }
+.cell-feedback .prose, .cell-feedback code.wrap {
+    white-space: pre-wrap;
+    width: min(22rem, 70vw);
+    max-height: 14rem;
+    overflow-y: auto;
+    margin-top: 0.3rem;
+}
 table.results tfoot th { border-top: 1px solid var(--border); border-bottom: none; font-variant-numeric: tabular-nums; }
 
 /* Assignment context */

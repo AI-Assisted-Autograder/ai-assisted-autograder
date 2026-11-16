@@ -71,6 +71,17 @@
                 {% elif c.status.value != "DONE" %}
                 <div><span class="badge {{ ai_style }}">{{ ai_label }}</span></div>
                 {% endif %}
+                {% if c.feedback %}
+                <details class="cell-feedback">
+                    <summary>Feedback</summary>
+                    <p class="prose">{{ c.feedback }}</p>
+                </details>
+                {% elif c.status.value == "FAILED" and c.last_error %}
+                <details class="cell-feedback">
+                    <summary>Why it failed</summary>
+                    <code class="wrap">{{ c.last_error }}</code>
+                </details>
+                {% endif %}
             </td>
             {% endif %}
             {% endfor %}

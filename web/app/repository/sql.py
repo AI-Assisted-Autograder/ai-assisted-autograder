@@ -780,20 +780,25 @@ class SqlGradingRepository(IGradingRepository):
                 .order_by(TestResult.recorded_at)
             ):
                 latest[st_id] = status
-            scores = dict(s.execute(
-                select(AiFeedback.submission_target_id, AiFeedback.suggested_score)
-                .where(AiFeedback.submission_target_id.in_(st_ids), AiFeedback.is_selected)
-            ).all())
+            selected = {
+                st_id: (score, body)
+                for st_id, score, body in s.execute(
+                    select(AiFeedback.submission_target_id, AiFeedback.suggested_score, AiFeedback.body)
+                    .where(AiFeedback.submission_target_id.in_(st_ids), AiFeedback.is_selected)
+                )
+            }
             by_pair = {(st.submission_id, st.grading_target_id): st for st in sts}
 
             def cell(sub: Submission, gt: GradingTarget) -> ResultCell | None:
                 st = by_pair.get((sub.id, gt.id))
                 if st is None:
                     return None
-                test, score = latest.get(st.id), scores.get(st.id)
+                test = latest.get(st.id)
+                score, body = selected.get(st.id, (None, None))
                 return ResultCell(
                     target_status(st.ai_needed, st.completed_at, st.last_error),
                     test, score, is_deduction(test, score, gt.max_score),
+                    body, st.last_error,
                 )
 
             rows = [
