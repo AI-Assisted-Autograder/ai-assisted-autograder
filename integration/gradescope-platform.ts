@@ -214,8 +214,8 @@ export class GradescopePlatform implements ILearningPlatform {
       .filter({ hasText: selectorMap.rerunAutograder })
       .first();
     if (!(await rerunButton.isVisible().catch(() => false))) {
-      const moreButton = visibleControls
-        .filter({ hasText: selectorMap.moreButton })
+      const moreButton = this.page
+        .getByRole('button', { name: selectorMap.moreButton })
         .first();
       if (await moreButton.isVisible().catch(() => false)) {
         await moreButton.click();
