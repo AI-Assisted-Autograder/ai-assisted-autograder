@@ -31,16 +31,47 @@ export class NightlyTrigger {
 
     try {
       await this.platform.authenticate();
-      const pending: SubmissionLocator[] =
+      const courseAssignmentIds = new Set(await this.platform.listAssignmentIds());
+      const assignments = (await this.client.listAssignments()).filter((assignment) =>
+        courseAssignmentIds.has(assignment.platformAssignmentId),
+      );
+      const managedAssignmentIds = new Set<string>();
+      for (const assignment of assignments) {
+        try {
+          const submissionIds = await this.platform.listActiveSubmissionIds(assignment.platformAssignmentId);
+          await this.client.syncActiveSubmissions(assignment.assignmentId, submissionIds);
+          managedAssignmentIds.add(assignment.platformAssignmentId);
+        } catch (error) {
+          const message = error instanceof Error ? error.message : String(error);
+          (summary.syncErrors ??= []).push({ assignmentId: assignment.assignmentId, message });
+          console.error(`Could not synchronize assignment ${assignment.assignmentId}:`, message);
+        }
+      }
+      const candidates = new Map<string, { submission: SubmissionLocator; source: TriggerSource }>();
+      const submissions =
         source === 'AI_FAILURES'
-          ? await this.client.listSubmissionsFailedOnAi()
+          ? await this.client.listSubmissionsFailedOnAi(true)
           : await this.client.listSubmissionsPendingAi('NIGHTLY');
+      for (const submission of submissions) {
+        candidates.set(submission.submissionId, { submission, source });
+      }
+      if (source === 'AI_FAILURES') {
+        // Recover failed nightly attempts without authorizing new submissions early.
+        for (const submission of await this.client.listSubmissionsPendingAi('NIGHTLY', true)) {
+          if (!candidates.has(submission.submissionId)) {
+            candidates.set(submission.submissionId, { submission, source: 'PENDING_NIGHTLY' });
+          }
+        }
+      }
+      const pending = [...candidates.values()].filter(({ submission }) =>
+        managedAssignmentIds.has(submission.platformAssignmentId),
+      );
       summary.found = pending.length;
 
-      for (const submission of pending) {
+      for (const { submission, source: authorizationSource } of pending) {
         try {
           // Authorization must happen before the browser click to avoid a DEFER race.
-          await this.client.authorizeForGrading(submission.submissionId, source);
+          await this.client.authorizeForGrading(submission.submissionId, authorizationSource);
           summary.authorized += 1;
           await this.client.recordSubmissionResult(submission.submissionId, 'AUTHORIZED');
           this.recordOutcome(summary, submission.submissionId, 'AUTHORIZED');

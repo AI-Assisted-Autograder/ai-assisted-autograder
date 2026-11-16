@@ -89,6 +89,23 @@ def assignment_config(
         ) from None
 
 
+@app.get("/internal/assignments")
+def list_assignments(
+    response: Response,
+    _: None = Depends(require_integration_token),
+):
+    """List active Gradescope assignments for integration selection syncing."""
+    response.headers["Cache-Control"] = "no-store"
+    return [
+        {
+            "assignment_id": str(item.id),
+            "platform_assignment_id": item.platform_assignment_id,
+        }
+        for item in grading_repository.list_assignments()
+        if item.is_active and item.platform == "GRADESCOPE"
+    ]
+
+
 @app.post("/internal/assignments", status_code=201, response_model=CreatedAssignmentConfig)
 def create_assignment(
     request: AssignmentCreateInput,
@@ -221,6 +238,7 @@ def failed_ai_submissions(
 @app.get("/internal/nightly/submissions")
 def nightly_submissions(
     mode: str = Query(default="NIGHTLY"),
+    retry_failed: bool = False,
     _: None = Depends(require_integration_token),
 ):
     """Return database-backed submissions that the nightly trigger may process."""
@@ -228,6 +246,31 @@ def nightly_submissions(
         raise HTTPException(status_code=400, detail="mode must be NIGHTLY")
 
     submissions = grading_repository.list_submissions_pending_ai(mode)
+    if retry_failed and submissions:
+        # Rank all attempts first: a later submitted/running attempt supersedes
+        # an older failure and must not be retriggered by the recovery scan.
+        latest = (
+            select(
+                TriggerRunSubmission.submission_id,
+                TriggerRunSubmission.status,
+                TriggerRun.finished_at,
+                func.row_number().over(
+                    partition_by=TriggerRunSubmission.submission_id,
+                    order_by=(TriggerRun.started_at.desc(), TriggerRunSubmission.recorded_at.desc(),
+                              TriggerRunSubmission.id.desc()),
+                ).label("position"),
+            )
+            .join(TriggerRun, TriggerRun.id == TriggerRunSubmission.trigger_run_id)
+            .where(TriggerRunSubmission.submission_id.in_([item.submission_id for item in submissions]))
+            .subquery()
+        )
+        with SessionLocal() as session:
+            failed_ids = set(session.scalars(select(latest.c.submission_id).where(
+                latest.c.position == 1,
+                latest.c.status == "RERUN_FAILED",
+                latest.c.finished_at.is_not(None),
+            )))
+        submissions = [item for item in submissions if item.submission_id in failed_ids]
     return [
         {
             "submission_id": str(item.submission_id),

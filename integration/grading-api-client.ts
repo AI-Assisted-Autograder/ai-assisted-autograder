@@ -1,4 +1,4 @@
-import type { IGradingClient, SubmissionLocator, TriggerRunSummary } from './interfaces';
+import type { AssignmentLocator, IGradingClient, SubmissionLocator, TriggerRunSummary } from './interfaces';
 
 type PendingSubmissionDto = {
   submission_id: string;
@@ -33,11 +33,50 @@ export class HttpGradingClient implements IGradingClient {
     this.runId = body.run_id;
   }
 
-  public async listSubmissionsPendingAi(mode: 'NIGHTLY'): Promise<SubmissionLocator[]> {
+  public async listAssignments(): Promise<AssignmentLocator[]> {
+    const response = await fetch(`${this.baseUrl}/internal/assignments`, {
+      headers: this.headers(),
+    });
+    if (!response.ok) {
+      throw new Error(`Database API returned ${response.status} while listing assignments.`);
+    }
+    const rows = (await response.json()) as Array<{
+      assignment_id: string;
+      platform_assignment_id: string;
+    }>;
+    return rows.map((row) => ({
+      assignmentId: row.assignment_id,
+      platformAssignmentId: row.platform_assignment_id,
+    }));
+  }
+
+  public async syncActiveSubmissions(
+    assignmentId: string,
+    platformSubmissionIds: string[],
+  ): Promise<void> {
+    const response = await fetch(
+      `${this.baseUrl}/internal/assignments/${assignmentId}/active-submissions`,
+      {
+        method: 'PUT',
+        headers: { ...this.headers(), 'Content-Type': 'application/json' },
+        body: JSON.stringify({ platform_submission_ids: platformSubmissionIds }),
+      },
+    );
+    if (!response.ok) {
+      const detail = await response.text().catch(() => '');
+      throw new Error(
+        `Database API returned ${response.status} while synchronizing active submissions for ${assignmentId}.` +
+          (detail ? ` ${detail}` : ''),
+      );
+    }
+  }
+
+  public async listSubmissionsPendingAi(mode: 'NIGHTLY', retryFailed = false): Promise<SubmissionLocator[]> {
     if (mode !== 'NIGHTLY') {
       throw new Error('The nightly trigger only supports NIGHTLY submissions.');
     }
-    const response = await fetch(`${this.baseUrl}/internal/nightly/submissions?mode=NIGHTLY`, {
+    const query = retryFailed ? '&retry_failed=true' : '';
+    const response = await fetch(`${this.baseUrl}/internal/nightly/submissions?mode=NIGHTLY${query}`, {
       headers: this.headers(),
     });
     if (!response.ok) {
@@ -48,8 +87,9 @@ export class HttpGradingClient implements IGradingClient {
     return this.toSubmissionLocators(rows);
   }
 
-  public async listSubmissionsFailedOnAi(): Promise<SubmissionLocator[]> {
-    const response = await fetch(`${this.baseUrl}/internal/ai-failures/submissions`, {
+  public async listSubmissionsFailedOnAi(retryEligible = false): Promise<SubmissionLocator[]> {
+    const query = retryEligible ? '?retry_eligible=true' : '';
+    const response = await fetch(`${this.baseUrl}/internal/ai-failures/submissions${query}`, {
       headers: this.headers(),
     });
     if (!response.ok) {
@@ -61,14 +101,15 @@ export class HttpGradingClient implements IGradingClient {
   }
 
   public async hasAiFailure(submissionId: string): Promise<boolean> {
-    const failures = await this.listSubmissionsFailedOnAi();
+    const failures = await this.listSubmissionsFailedOnAi(false);
     return failures.some((submission) => submission.submissionId === submissionId);
   }
 
   private toSubmissionLocators(
     response: PendingSubmissionDto[] | PendingSubmissionDto,
   ): SubmissionLocator[] {
-    const rows = Array.isArray(response) ? response : [response];
+    const rows = (Array.isArray(response) ? response : [response])
+      .filter((row) => row.platform === 'GRADESCOPE');
     const courseId = process.env.GRADESCOPE_COURSE_ID;
     if (!courseId && rows.length > 0) {
       throw new Error('Set GRADESCOPE_COURSE_ID to build Gradescope submission URLs.');
@@ -130,7 +171,7 @@ export class HttpGradingClient implements IGradingClient {
       method: 'POST',
       headers: { ...this.headers(), 'Content-Type': 'application/json' },
       body: JSON.stringify({
-        status: summary.failed === 0 && !summary.fatalError ? 'SUCCEEDED' : 'FAILED',
+        status: summary.failed === 0 && !summary.fatalError && !summary.syncErrors?.length ? 'SUCCEEDED' : 'FAILED',
         submissions_authorized: summary.authorized,
         submissions_rerun: summary.rerun,
         submissions_failed_to_trigger: summary.failed,

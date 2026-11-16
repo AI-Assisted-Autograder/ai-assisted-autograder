@@ -6,13 +6,13 @@ test.describe('Gradescope autograder state classification', () => {
   test('keeps a running submission out of the completed state', () => {
     expect(
       classifyAutograderState(
-        "Autograder Results The autograder hasn't finished running yet",
+        "Autograder Results\nThe autograder hasn't finished running yet",
       ),
     ).toBe('RUNNING');
   });
 
   test('recognizes a completed autograder result', () => {
-    expect(classifyAutograderState('Autograder Results Score 110.0 / 110.0')).toBe('COMPLETE');
+    expect(classifyAutograderState('Graded\nAutograder Results\n[autograder +0s] grading started')).toBe('COMPLETE');
   });
 
   test('recognizes an autograder failure', () => {

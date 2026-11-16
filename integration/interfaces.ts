@@ -1,3 +1,8 @@
+export type AssignmentLocator = {
+  assignmentId: string;
+  platformAssignmentId: string;
+};
+
 export type SubmissionLocator = {
   submissionId: string;
   platformAssignmentId: string;
@@ -14,7 +19,7 @@ export type RerunResult = {
   submissionId: string;
   clicked: boolean;
   confirmed: boolean;
-  confirmationEvidence: 'status-text' | 'confirmation-dialog' | 'native-dialog' | 'direct-click';
+  confirmationEvidence: 'status-text' | 'run-id';
   url: string;
 };
 
@@ -52,6 +57,8 @@ export type SubmissionOutcome = {
 
 export interface ILearningPlatform {
   authenticate(): Promise<void>;
+  listAssignmentIds(): Promise<string[]>;
+  listActiveSubmissionIds(platformAssignmentId: string): Promise<string[]>;
   triggerRerun(locator: SubmissionLocator): Promise<RerunResult>;
   waitForRerun(locator: SubmissionLocator): Promise<void>;
 }
@@ -65,12 +72,15 @@ export type TriggerRunSummary = {
   failures?: SubmissionFailure[];
   outcomes?: SubmissionOutcome[];
   auditErrors?: string[];
+  syncErrors?: Array<{ assignmentId: string; message: string }>;
 };
 
 export interface IGradingClient {
   startRun(): Promise<void>;
-  listSubmissionsPendingAi(mode: 'NIGHTLY'): Promise<SubmissionLocator[]>;
-  listSubmissionsFailedOnAi(): Promise<SubmissionLocator[]>;
+  listAssignments(): Promise<AssignmentLocator[]>;
+  syncActiveSubmissions(assignmentId: string, platformSubmissionIds: string[]): Promise<void>;
+  listSubmissionsPendingAi(mode: 'NIGHTLY', retryFailed?: boolean): Promise<SubmissionLocator[]>;
+  listSubmissionsFailedOnAi(retryEligible?: boolean): Promise<SubmissionLocator[]>;
   hasAiFailure(submissionId: string): Promise<boolean>;
   authorizeForGrading(submissionId: string, source: TriggerSource): Promise<void>;
   recordSubmissionResult(

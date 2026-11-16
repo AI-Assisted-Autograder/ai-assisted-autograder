@@ -13,6 +13,7 @@ import uuid
 from datetime import datetime, timedelta, timezone
 from decimal import Decimal
 from typing import NamedTuple
+from unittest.mock import patch
 
 import pytest
 from sqlalchemy import create_engine, select, text, update
@@ -29,6 +30,8 @@ from app.models import (
     Rubric,
     Submission,
     SubmissionTarget,
+    TriggerRun,
+    TriggerRunSubmission,
 )
 from app.repository import (
     Action,
@@ -744,6 +747,73 @@ def test_pending_ai_skips_graded_submissions(backend):
 def test_pending_ai_rejects_unknown_mode(backend):
     with pytest.raises(ValueError):
         backend.repo.list_submissions_pending_ai("WEEKLY")
+
+
+def test_nightly_retry_uses_latest_audit_and_current_eligibility(sql_sessions):
+    from fastapi.testclient import TestClient
+    from web.app import main
+
+    backend = SqlBackend(sql_sessions)
+    aid = backend.add_assignment("NIGHTLY", (("add", 1),))
+    cases = {
+        "failed_trigger": ("RERUN_FAILED",),
+        "authorization_failed": ("RERUN_FAILED",),
+        "never_attempted": (),
+        "authorized_only": ("AUTHORIZED",),
+        "later_submitted": ("RERUN_FAILED", "RERUN_SUBMITTED"),
+        "later_succeeded": ("RERUN_FAILED", "RERUN_SUCCEEDED"),
+        "later_authorized": ("RERUN_FAILED", "AUTHORIZED"),
+        "later_failed": ("RERUN_SUBMITTED", "RERUN_FAILED"),
+        "unfinished_cycle": ("RERUN_FAILED",),
+        "ai_succeeded": ("RERUN_FAILED",),
+        "superseded": ("RERUN_FAILED",),
+    }
+    ids = {}
+    for name, statuses in cases.items():
+        sid = backend.repo.upsert_submission(SubmissionRef(aid, name, SUBMITTED))
+        ids[name] = sid
+        backend.repo.create_targets_default_needed(sid)
+        for index, status in enumerate(statuses):
+            with sql_sessions.begin() as session:
+                started = SUBMITTED + timedelta(hours=index + 1)
+                run = TriggerRun(
+                    trigger="SCHEDULE", started_at=started,
+                    status="RUNNING" if name == "unfinished_cycle" else "FAILED",
+                    finished_at=None if name == "unfinished_cycle" else started + timedelta(minutes=1),
+                )
+                session.add(run)
+                session.flush()
+                session.add(TriggerRunSubmission(
+                    trigger_run_id=run.id, submission_id=sid, status=status, recorded_at=started,
+                ))
+    backend.repo.sync_active_submissions(aid, [name for name in cases if name != "superseded"])
+    backend.repo.authorize_for_grading(ids["failed_trigger"], "PENDING_NIGHTLY")
+    authorized_at, _ = backend.submission(ids["failed_trigger"])
+    backend.repo.set_submission_ai_status(ids["ai_succeeded"], "SUCCEEDED")
+
+    with patch.object(main, "grading_repository", backend.repo), \
+         patch.object(main, "SessionLocal", sql_sessions), \
+         patch.object(main.settings, "integration_api_token", "test-token"), \
+         TestClient(main.app) as client:
+        path = "/internal/nightly/submissions?mode=NIGHTLY&retry_failed=true"
+        assert client.get(path).status_code == 401
+        response = client.get(path, headers={"X-Internal-Token": "test-token"})
+        assert response.status_code == 200
+        assert {row["platform_submission_id"] for row in response.json()} == {
+            "failed_trigger", "authorization_failed", "later_failed",
+        }
+        # A recovered trigger still goes through normal nightly authorization.
+        authorized = client.post(
+            f"/internal/nightly/submissions/{ids['failed_trigger']}/authorize",
+            json={"trigger_source": "PENDING_NIGHTLY"}, headers={"X-Internal-Token": "test-token"},
+        )
+        assert authorized.status_code == 200
+        assert authorized.json()["authorization_granted"] is False
+        assert backend.submission(ids["failed_trigger"])[0] == authorized_at
+        assert client.post(
+            f"/internal/nightly/submissions/{ids['authorization_failed']}/authorize",
+            json={"trigger_source": "PENDING_NIGHTLY"}, headers={"X-Internal-Token": "test-token"},
+        ).json()["authorization_granted"] is True
 
 
 # ---------------------------------------------------------------------

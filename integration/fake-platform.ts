@@ -6,10 +6,23 @@ export class FakePlatform implements ILearningPlatform {
   public readonly waitForRerunCalls: SubmissionLocator[] = [];
   public authenticated = false;
 
-  public constructor(private readonly failingSubmissionIds = new Set<string>()) {}
+  public constructor(
+    private readonly submissions: SubmissionLocator[],
+    private readonly failingSubmissionIds = new Set<string>(),
+  ) {}
 
   public async authenticate(): Promise<void> {
     this.authenticated = true;
+  }
+
+  public async listAssignmentIds(): Promise<string[]> {
+    return [...new Set(this.submissions.map((row) => row.platformAssignmentId))];
+  }
+
+  public async listActiveSubmissionIds(platformAssignmentId: string): Promise<string[]> {
+    return this.submissions
+      .filter((row) => row.platformAssignmentId === platformAssignmentId)
+      .map((row) => new URL(row.platformSubmissionUrl).pathname.split('/').pop()!);
   }
 
   public async triggerRerun(locator: SubmissionLocator): Promise<RerunResult> {
@@ -21,7 +34,7 @@ export class FakePlatform implements ILearningPlatform {
       submissionId: locator.submissionId,
       clicked: true,
       confirmed: true,
-      confirmationEvidence: 'confirmation-dialog',
+      confirmationEvidence: 'status-text',
       url: locator.platformSubmissionUrl,
     };
   }

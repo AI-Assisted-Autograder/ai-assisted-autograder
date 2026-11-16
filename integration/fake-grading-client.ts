@@ -1,6 +1,8 @@
 import type {
+  AssignmentLocator,
   IGradingClient,
   SubmissionLocator,
+  TriggerSource,
   TriggerRunSummary,
 } from './interfaces';
 
@@ -26,8 +28,15 @@ export class FakeGradingClient implements IGradingClient {
     this.started = true;
   }
 
-  public async listSubmissionsPendingAi(): Promise<SubmissionLocator[]> {
-    return this.pending;
+  public async listAssignments(): Promise<AssignmentLocator[]> {
+    return [...new Set([...this.pending, ...this.failedAi].map((row) => row.platformAssignmentId))]
+      .map((id) => ({ assignmentId: `db-${id}`, platformAssignmentId: id }));
+  }
+
+  public async syncActiveSubmissions(_assignmentId: string, _platformSubmissionIds: string[]): Promise<void> {}
+
+  public async listSubmissionsPendingAi(_mode: 'NIGHTLY', retryFailed = false): Promise<SubmissionLocator[]> {
+    return retryFailed ? [] : this.pending;
   }
 
   public async listSubmissionsFailedOnAi(): Promise<SubmissionLocator[]> {
@@ -38,7 +47,7 @@ export class FakeGradingClient implements IGradingClient {
     return this.failedAiAfterRerun.some((submission) => submission.submissionId === submissionId);
   }
 
-  public async authorizeForGrading(submissionId: string): Promise<void> {
+  public async authorizeForGrading(submissionId: string, _source: TriggerSource): Promise<void> {
     this.authorizedSubmissionIds.push(submissionId);
   }
 

@@ -237,6 +237,11 @@ submission and an active assignment; the unfiltered failure endpoint remains
 available for diagnostics.
 Authorized, unfinished submissions without a failed outcome remain eligible for
 a later nightly cycle if the Gradescope rerun was not successfully triggered.
+Retry scans can also query
+`GET /internal/nightly/submissions?mode=NIGHTLY&retry_failed=true`: this restricts
+the pending list to submissions whose latest audit is `RERUN_FAILED` in a finished
+cycle. A newer authorization, submitted rerun, or successful rerun excludes an
+older failure. These recovery candidates still use `PENDING_NIGHTLY` authorization.
 
 `POST /v1/feedback` checks NIGHTLY authorization before reserving quota or starting
 a new model call. Its HTTP 200 response can be `status: deferred` (awaiting nightly

@@ -42,8 +42,14 @@ The current implementation is a rerun prototype:
 - `NightlyTrigger` authorizes and submits every pending rerun first, then polls
   the accepted reruns in a separate completion phase.
 - The runner supports two sources: PENDING_NIGHTLY for the initial nightly
-  batch and AI_FAILURES for retrying only submissions returned by the
-  backend's AI-failure endpoint.
+  batch and AI_FAILURES for retrying eligible AI failures plus pending nightly
+  submissions whose latest audited attempt failed in a finished cycle. Those
+  pending submissions use PENDING_NIGHTLY authorization; new submissions without
+  a failed attempt wait for the next nightly batch.
+- Each assignment needs a complete, successfully synchronized selection snapshot.
+  A snapshot failure is reported in `syncErrors` and makes the cycle unsuccessful,
+  while other synchronized assignments continue. Already-running autograders are
+  left untouched.
 - A scheduled trigger can run in submit-only mode by setting
   `NIGHTLY_WAIT_FOR_COMPLETION=0`. In that mode it records the browser trigger
   as `RERUN_SUBMITTED` and exits without waiting for Gradescope or AI results.
@@ -53,15 +59,16 @@ The current implementation is a rerun prototype:
   completion) and a coarse kind such as DATABASE, TIMEOUT, AI_FEEDBACK, or
   AUTOGRADER. These labels help operations triage failures; the backend remains
   the source of truth for AI grading state.
-- A successful Gradescope click is counted as a submitted rerun even if the
-  follow-up audit write fails. The summary exposes that problem as auditErrors
+- A confirmed Gradescope rerun is counted as submitted even if the follow-up
+  audit write fails. The summary exposes that problem as auditErrors
   so a database/API compatibility issue cannot be reported as a false
   Gradescope failure.
-- The trigger summary records how the rerun was accepted: `status-text`,
-  `confirmation-dialog`, `native-dialog`, or `direct-click`. The first three
-  are explicit browser confirmations; `direct-click` means the Gradescope
-  control accepted the click without exposing a stable toast, so the later
-  completion poll remains the source of truth for the autograder.
+- The trigger summary records acceptance as `status-text` or `run-id`.
+  `status-text` means Gradescope changed from completed/failed to running, or
+  newly matched the configured confirmation pattern in its own status text.
+  `run-id` means the same submission's hidden instructor output contains a
+  different AI run ID from the one observed before the click. Completion
+  polling follows acceptance when waiting is enabled.
 - The runner also emits an outcome timeline per submission:
   AUTHORIZED -> RERUN_SUBMITTED -> RERUN_SUCCEEDED on the normal path.
   Failures are labeled AUTHORIZATION_FAILED, RERUN_TRIGGER_FAILED, or
@@ -112,11 +119,11 @@ $env:GRADESCOPE_ALLOW_RERUN="1"
 The platform adapter also accepts only HTTPS URLs under
 `www.gradescope.com`.
 
-After clicking `Rerun Autograder`, the adapter waits for a visible success
-message before recording `RERUN_SUBMITTED`; the click itself is not treated as
-proof that Gradescope accepted the request. Completion polling happens after
-the submission phase. If the site uses different wording, set a regular
-expression in `GRADESCOPE_RERUN_SUCCESS_TEXT`.
+After clicking `Rerun Autograder`, the adapter requires a status transition or
+changed run ID before recording `RERUN_SUBMITTED`. A click or dismissed dialog
+alone is insufficient. Completion polling happens after the submission phase
+when waiting is enabled. `GRADESCOPE_RERUN_SUCCESS_TEXT` can specify a regular
+expression that must newly match Gradescope's own status text after the click.
 
 ## Direct rerun test
 
@@ -143,7 +150,8 @@ exposes the operations needed before and after the browser action:
 
 ```text
 GET  /internal/nightly/submissions?mode=NIGHTLY
-GET  /internal/ai-failures/submissions
+GET  /internal/nightly/submissions?mode=NIGHTLY&retry_failed=true
+GET  /internal/ai-failures/submissions?retry_eligible=true
 POST /internal/nightly/submissions/{submission_id}/authorize
 POST /internal/nightly/runs
 POST /internal/nightly/runs/{run_id}/submissions/{submission_id}
@@ -162,10 +170,11 @@ The API query filters for active `NIGHTLY` assignments, active submissions,
 AI-needed targets that are not completed, and submissions that have not
 already been AI-graded.
 
-For an AI retry cycle, set NIGHTLY_TRIGGER_SOURCE=AI_FAILURES. The runner then
-calls GET /internal/ai-failures/submissions and reruns only the returned
-submissions. The endpoint is the backend source of truth for ai_status=FAILED;
-the Playwright layer does not infer AI failure from the Gradescope page.
+For an AI retry cycle, set NIGHTLY_TRIGGER_SOURCE=AI_FAILURES. The runner queries
+GET /internal/ai-failures/submissions?retry_eligible=true and
+GET /internal/nightly/submissions?mode=NIGHTLY&retry_failed=true. The latter
+recovers failed nightly triggers that never reached AI processing. AI failure
+remains determined by the backend's reported outcome.
 
 The database is the source of the work list, but it does not itself perform a
 Gradescope rerun. A submission row represents the work to process; the actual
@@ -300,20 +309,23 @@ not recorded as final success. The default wait is 30 minutes because a real
 rerun includes the full autograder and AI feedback phases. Configure it with
 `GRADESCOPE_RERUN_TIMEOUT_MS` (default `1800000`) and
 `GRADESCOPE_RERUN_POLL_INTERVAL_MS` (default five seconds).
-The post-click confirmation wait defaults to 60 seconds and can be configured
-with `GRADESCOPE_RERUN_CONFIRMATION_TIMEOUT_MS`.
+The pre-click status check and post-click confirmation each default to 10 seconds
+(`10000` ms), configured with `GRADESCOPE_RERUN_CONFIRMATION_TIMEOUT_MS`.
+The `.env.local.example` file explicitly overrides this to `60000` ms (60 seconds).
 
 The login test is read-only with respect to Gradescope. The rerun test changes
 Gradescope state and must be run only for an intentionally selected submission.
 
-For an AI-failure retry cycle, set:
+For a retry cycle, set:
 
     $env:NIGHTLY_TRIGGER_SOURCE="AI_FAILURES"
     npm run nightly:trigger
 
-This reruns only the submissions returned by
-/internal/ai-failures/submissions. Test either mode against a controlled
-assignment before scheduling it.
+This scans eligible AI failures and pending nightly submissions whose latest
+audited attempt failed in a finished cycle. The latter use `PENDING_NIGHTLY`
+authorization; new nightly submissions without a failed attempt wait for the
+next nightly batch. Test either mode against a controlled assignment before
+scheduling it.
 
 ## Running the nightly trigger on another machine
 

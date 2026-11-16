@@ -28,6 +28,11 @@ test.afterEach(() => {
 
 test('authenticate rejects missing credentials', async ({ page }) => {
   delete process.env.GRADESCOPE_USERNAME;
+  await page.route('**/account', (route) => route.fulfill({
+    status: 302,
+    headers: { location: '/login' },
+  }));
+  await page.route('**/login', (route) => route.fulfill({ body: '<h1>Log in</h1>' }));
 
   const platform = new GradescopePlatform(page);
 
@@ -105,4 +110,19 @@ test('triggerRerun requires the live rerun flag before navigating', async ({
   );
 
   expect(navigated).toBe(false);
+});
+
+test('triggerRerun leaves an already running autograder untouched', async ({ page }) => {
+  process.env.GRADESCOPE_ALLOW_RERUN = '1';
+  await page.route(submission.platformSubmissionUrl, (route) => route.fulfill({
+    contentType: 'text/html',
+    body: `<div aria-label="submission rubric and results">
+      <div class="submissionOutlineHeader--statusContainer">Running</div>
+    </div><button onclick="document.body.dataset.clicked = 'yes'">Rerun Autograder</button>`,
+  }));
+
+  await expect(new GradescopePlatform(page).triggerRerun(submission)).rejects.toThrow(
+    'Gradescope autograder is already running; no rerun was triggered.',
+  );
+  await expect(page.locator('body')).not.toHaveAttribute('data-clicked', 'yes');
 });

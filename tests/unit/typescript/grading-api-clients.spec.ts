@@ -112,6 +112,16 @@ test('listSubmissionsPendingAi rejects a missing course ID when submissions exis
   ).rejects.toThrow('Set GRADESCOPE_COURSE_ID');
 });
 
+test('nightly recovery requests only previously failed attempts', async () => {
+  const fetchMock = mockFetch([{ status: 200, body: [] }]);
+
+  await new HttpGradingClient().listSubmissionsPendingAi('NIGHTLY', true);
+
+  expect(fetchMock.mock.calls[0].arguments[0]).toBe(
+    'http://localhost:8000/internal/nightly/submissions?mode=NIGHTLY&retry_failed=true',
+  );
+});
+
 test('listSubmissionsFailedOnAi calls the AI-failure endpoint and maps rows', async () => {
   const fetchMock = mockFetch([
     {
@@ -230,6 +240,26 @@ test('finishRun sends the aggregate summary', async () => {
       submissions_authorized: 2,
       submissions_rerun: 1,
       submissions_failed_to_trigger: 1,
+    }),
+  });
+});
+
+test('finishRun records a failed cycle when an assignment snapshot could not be synchronized', async () => {
+  const fetchMock = mockFetch([
+    { status: 200, body: { run_id: 'run-123' } },
+    { status: 200, body: {} },
+  ]);
+  const client = new HttpGradingClient();
+  await client.startRun();
+
+  await client.finishRun({
+    found: 0, authorized: 0, rerun: 0, failed: 0,
+    syncErrors: [{ assignmentId: 'assignment-1', message: '409 missing_submission_ids' }],
+  });
+
+  expect(fetchMock.mock.calls[1].arguments[1]).toMatchObject({
+    body: JSON.stringify({
+      status: 'FAILED', submissions_authorized: 0, submissions_rerun: 0, submissions_failed_to_trigger: 0,
     }),
   });
 });

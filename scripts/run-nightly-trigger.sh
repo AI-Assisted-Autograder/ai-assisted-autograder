@@ -34,6 +34,10 @@ if [[ -f "${CONFIG_DIR}/runner.env" ]]; then
   if [[ -n "${configured_fallback_times}" ]]; then
     FALLBACK_LOCAL_TIMES="${configured_fallback_times}"
   fi
+  configured_wait="$(sed -n 's/^NIGHTLY_WAIT_FOR_COMPLETION=//p' "${CONFIG_DIR}/runner.env" | tail -n 1)"
+  if [[ -n "${configured_wait}" ]]; then
+    WAIT_FOR_COMPLETION="${configured_wait}"
+  fi
 fi
 
 # Cron runs hourly in UTC on the server. This local-time guard keeps the
@@ -41,13 +45,10 @@ fi
 current_local_time="$(TZ=America/New_York date +%H:%M)"
 if [[ "${current_local_time}" == "${NIGHTLY_LOCAL_TIME}" ]]; then
   TRIGGER_SOURCE="PENDING_NIGHTLY"
-  WAIT_FOR_COMPLETION="0"
 elif [[ "${current_local_time}" == "${NIGHTLY_RETRY_LOCAL_TIME}" ]]; then
   TRIGGER_SOURCE="${RETRY_TRIGGER_SOURCE}"
-  WAIT_FOR_COMPLETION="0"
 elif [[ ",${FALLBACK_LOCAL_TIMES}," == *",${current_local_time},"* ]]; then
   TRIGGER_SOURCE="${RETRY_TRIGGER_SOURCE}"
-  WAIT_FOR_COMPLETION="0"
 else
   exit 0
 fi
