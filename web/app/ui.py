@@ -20,6 +20,7 @@ from starlette.datastructures import UploadFile as StarletteUploadFile
 from app.assignment_context import MAX_FILES, MAX_TOTAL_CHARS, MAX_UPLOAD_BYTES, check_context, clean_filename, extract_text
 from app.auth import InstructorAccount, require_instructor
 from app.db import SessionLocal
+from app.feedback_store import COST_PERIODS
 from app.models import GRADING_MODES, TARGET_KINDS
 from app.pitt_settings import PITT_MODELS, encrypt_pitt_key, resolve_form_key, validate_pitt_model
 from app.repository import (
@@ -55,7 +56,7 @@ def number(value: Decimal | None) -> str:
     return format(value.normalize(), "f")
 
 
-def usd(value: str) -> str:
+def usd(value: str | Decimal) -> str:
     return f"${Decimal(value):.6f}"
 
 
@@ -98,6 +99,7 @@ LANGUAGES = ("JAVA", "PYTHON", "TYPESCRIPT", "JAVASCRIPT")
 
 templates.env.filters["when"] = when
 templates.env.filters["number"] = number
+templates.env.filters["decimal"] = Decimal
 templates.env.filters["usd"] = usd
 templates.env.globals["submission_state"] = submission_state
 templates.env.globals["ai_result_state"] = ai_result_state
@@ -335,12 +337,17 @@ def assignment_page(
     except NotFoundError:
         return not_found(request, "That assignment does not exist.")
     store = getattr(request.app.state, "feedback_store", None)
+    cost_period = request.query_params.get("cost_range", "7d")
+    if cost_period not in COST_PERIODS:
+        cost_period = "7d"
     return templates.TemplateResponse(
         request,
         "assignment.html",
         {
             "assignment": config,
-            "cost_summary": store.cost_summary(str(assignment_id)) if store is not None else None,
+            "cost_summary": store.cost_summary(str(assignment_id), period=cost_period) if store is not None else None,
+            "cost_period": cost_period,
+            "cost_periods": COST_PERIODS,
             "by_target": by_target,
             "submissions": submissions,
             "target_summaries": target_summaries,

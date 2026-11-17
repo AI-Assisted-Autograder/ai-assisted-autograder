@@ -178,6 +178,27 @@ form.form .rating-choices label.choice { align-items: center; gap: 0.3rem; }
 .tabs a[aria-current="page"] { background: var(--mode-bg); color: var(--mode-fg); }
 .title-row h2 { margin-bottom: 0.6rem; }
 
+/* Assignment API cost history */
+#api-cost { scroll-margin-top: 1rem; }
+.cost-ranges { flex-wrap: wrap; }
+.cost-total { display: flex; flex-wrap: wrap; align-items: baseline; gap: 0.6rem; margin: 0.7rem 0; }
+.cost-total strong { font-size: 1.5rem; font-variant-numeric: tabular-nums; }
+.cost-chart { margin: 1rem 0; padding: 0.8rem; background: var(--surface); border: 1px solid var(--border); border-radius: 8px; }
+.cost-chart-scroll { overflow-x: auto; }
+.cost-chart svg { display: block; width: 100%; min-width: 640px; }
+.cost-chart figcaption { margin-top: 0.4rem; }
+.cost-detail { min-height: 3em; margin: 0.6rem 0 0; font-size: 0.9rem; font-variant-numeric: tabular-nums; }
+.cost-grid { stroke: var(--border); stroke-width: 1; }
+.cost-axis { fill: var(--muted); font-size: 12px; font-variant-numeric: tabular-nums; }
+.cost-bar { fill: var(--link); }
+.cost-bin { cursor: pointer; }
+.cost-hit-area { fill: transparent; }
+.cost-bin.is-active .cost-hit-area { fill: var(--mode-bg); }
+.cost-bin:focus-visible .cost-hit-area { stroke: var(--link); stroke-width: 2; }
+.cost-bin:focus { outline: none; }
+.cost-unknown { fill: var(--waiting-fg); }
+.cost-unknown-key { color: var(--waiting-fg); }
+
 /* Forms */
 .title-row { display: flex; flex-wrap: wrap; align-items: center; justify-content: space-between; gap: 0.5rem; }
 button, a.button {

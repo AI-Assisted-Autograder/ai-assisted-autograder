@@ -14,13 +14,21 @@ import os
 from pathlib import Path
 import tempfile
 import threading
-from datetime import date, datetime, timezone
+from datetime import date, datetime, timedelta, timezone
 from decimal import Decimal
 from typing import Any
 
 from ai_grading.models import TokenUsage
 from ai_grading.pricing import ModelPrice, RequestAccounting, default_model_prices, estimate_cost, select_price
 from .feedback_config import AssignmentAccess, BackendConfig, RequestRecord, State, TokenRecord
+
+
+COST_PERIODS = {
+    "24h": "Last 24h",
+    "7d": "Last 7 days",
+    "30d": "Last 30 days",
+    "all": "All time",
+}
 
 
 class StoreError(Exception):
@@ -238,32 +246,94 @@ class JsonStore:
             self._state = candidate
             return accounting.model_copy(deep=True)
 
-    def cost_summary(self, assignment_id: str) -> dict[str, Any] | None:
+    def cost_summary(self, assignment_id: str, *, period: str | None = None) -> dict[str, Any] | None:
+        """Summarize recorded costs, optionally grouped by request start time in UTC."""
+        if period is not None and period not in COST_PERIODS:
+            raise ValueError("invalid cost period")
         with self._mutex:
             self._ensure_open()
             if assignment_id not in self._state.assignments:
                 return None
+            records = self._state.requests.get(assignment_id, {}).values()
+            tracking_since = self._state.cost_tracking_started_at
+            if tracking_since is not None:
+                if tracking_since.tzinfo is None:
+                    tracking_since = tracking_since.replace(tzinfo=timezone.utc)
+                tracking_since = tracking_since.astimezone(timezone.utc)
+            buckets: dict[datetime, dict[str, Any]] = {}
+            if period is not None:
+                end = utc_now()
+                if period == "all":
+                    earliest_request = min((record.created_at for record in records),
+                                           default=tracking_since or end)
+                    start = min(end, earliest_request).astimezone(timezone.utc)
+                    span = end - start
+                    granularity = "day" if span <= timedelta(days=31) else (
+                        "week" if span <= timedelta(days=180) else "month")
+                else:
+                    start = end - {"24h": timedelta(hours=24), "7d": timedelta(days=7),
+                                   "30d": timedelta(days=30)}[period]
+                    granularity = "hour" if period == "24h" else "day"
+
+                def bucket_start(value: datetime) -> datetime:
+                    value = value.astimezone(timezone.utc).replace(minute=0, second=0, microsecond=0)
+                    if granularity == "hour":
+                        return value
+                    value = value.replace(hour=0)
+                    if granularity == "week":
+                        return value - timedelta(days=value.weekday())
+                    return value.replace(day=1) if granularity == "month" else value
+
+                cursor = bucket_start(start)
+                while start < end and cursor < end:
+                    if granularity == "month":
+                        next_start = cursor.replace(year=cursor.year + (cursor.month == 12),
+                                                    month=cursor.month % 12 + 1)
+                    else:
+                        next_start = cursor + {"hour": timedelta(hours=1), "day": timedelta(days=1),
+                                               "week": timedelta(days=7)}[granularity]
+                    buckets[cursor] = {
+                        "start": max(cursor, start), "end": min(next_start, end),
+                        "estimated_cost_usd": Decimal(0), "priced_requests": 0,
+                        "unpriced_requests": 0, "pending_requests": 0,
+                    }
+                    cursor = next_start
+
             total = Decimal(0)
-            priced = unpriced = pending = 0
+            counts = {"priced_requests": 0, "unpriced_requests": 0, "pending_requests": 0}
             tokens = {key: 0 for key in ("input_tokens", "output_tokens", "cached_input_tokens")}
-            for record in self._state.requests.get(assignment_id, {}).values():
+            for record in records:
+                if period is not None and not start <= record.created_at < end:
+                    continue
                 accounting = record.accounting
                 if accounting is not None:
                     for key in tokens:
                         count = getattr(accounting.usage, key)
                         if count is not None:
                             tokens[key] += count
+                amount = Decimal(0)
                 if accounting is not None and accounting.estimated_cost_usd is not None:
-                    total += accounting.estimated_cost_usd
-                    priced += 1
+                    amount = accounting.estimated_cost_usd
+                    status = "priced_requests"
                 elif record.status == "processing":
-                    pending += 1
+                    status = "pending_requests"
                 else:
-                    unpriced += 1
-            return {"estimated_cost_usd": str(total), **tokens,
-                    "priced_requests": priced, "unpriced_requests": unpriced,
-                    "pending_requests": pending,
-                    "tracking_since": self._state.cost_tracking_started_at}
+                    status = "unpriced_requests"
+                total += amount
+                counts[status] += 1
+                if period is not None:
+                    bucket = buckets[bucket_start(record.created_at)]
+                    bucket["estimated_cost_usd"] += amount
+                    bucket[status] += 1
+            summary = {"estimated_cost_usd": str(total), **tokens, **counts,
+                       "tracking_since": tracking_since}
+            if period is not None:
+                maximum = max((bucket["estimated_cost_usd"] for bucket in buckets.values()), default=Decimal(0))
+                for bucket in buckets.values():
+                    bucket["estimated_cost_usd"] = str(bucket["estimated_cost_usd"])
+                summary["chart"] = {"start": start, "end": end, "granularity": granularity,
+                                    "max_cost_usd": str(maximum), "buckets": list(buckets.values())}
+            return summary
 
     def cost_summaries(self) -> dict[str, dict[str, Any]]:
         with self._mutex:

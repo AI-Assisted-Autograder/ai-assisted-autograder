@@ -135,9 +135,15 @@ cache; backend replay still applies.
 
 The backend prices reported token usage once per request and persists it with
 the request's model, run ID and price snapshot. The hidden autograder output
-shows the current run's estimate; the assignment list and detail pages show the
+shows the current run's estimate. The assignment list shows each assignment's
 cumulative estimate across submissions and reruns. Polling and intentional
 request replay do not add cost. Functional scores are unaffected.
+
+The assignment detail page defaults to the last 7 days. Its total and bar chart
+cover the selected range, using the time each request started in UTC. The last
+24 hours are grouped by hour, and the last 7 or 30 days by day. **All time**
+starts with the assignment's first recorded request and groups costs by day,
+week, or month according to the length of its history.
 
 Prices are configured centrally in `config.model_prices` in the backend state
 file. Each entry uses USD per million tokens and an effective date (UTC):

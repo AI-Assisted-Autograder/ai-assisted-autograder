@@ -27,17 +27,26 @@
     <div><dt>{{ assignment.platform | title }} id</dt><dd><code>{{ assignment.platform_assignment_id }}</code></dd></div>
 </dl>
 
-<h2>Estimated API cost (USD)</h2>
+<section id="api-cost" aria-labelledby="api-cost-heading">
+<div class="title-row">
+    <h2 id="api-cost-heading">Estimated API cost (USD)</h2>
+    <nav class="tabs cost-ranges" aria-label="API cost time range">
+        {% for key, label in cost_periods.items() %}
+        <a href="/assignments/{{ assignment.id }}?cost_range={{ key }}{% if by_target %}&amp;view=targets{% endif %}#api-cost"{% if key == cost_period %} aria-current="page"{% endif %}>{{ label }}</a>
+        {% endfor %}
+    </nav>
+</div>
 {% if cost_summary is none %}
 <p class="empty">Not tracked</p>
 {% else %}
-<p>
+<p class="cost-total">
     {% if cost_summary.priced_requests == 0 and (cost_summary.unpriced_requests or cost_summary.pending_requests) %}
     <strong>Unavailable</strong>
     {% else %}
     <strong>{{ cost_summary.estimated_cost_usd | usd }}</strong>
     {% if cost_summary.unpriced_requests or cost_summary.pending_requests %}<span class="badge muted">Partial</span>{% endif %}
     {% endif %}
+    <span class="sub">{{ cost_periods[cost_period] }}</span>
 </p>
 <dl class="meta">
     <div><dt>Priced requests</dt><dd>{{ cost_summary.priced_requests }}</dd></div>
@@ -45,14 +54,76 @@
     <div><dt>Pending requests</dt><dd>{{ cost_summary.pending_requests }}</dd></div>
     {% if cost_summary.tracking_since %}<div><dt>Tracking since</dt><dd>{{ cost_summary.tracking_since | when }}</dd></div>{% endif %}
 </dl>
-<p class="sub">Cumulative estimates for recorded API calls across submissions and reruns. Unpriced and pending requests are excluded; earlier untracked usage is not included.</p>
+{% set chart = cost_summary.chart %}
+<p class="sub">{{ chart.start | when }} – {{ chart.end | when }}. Costs are grouped by request start time.</p>
+{% if cost_summary.tracking_since and chart.start < cost_summary.tracking_since %}
+<p class="sub">This range begins before cost tracking started. Earlier records may be incomplete.</p>
 {% endif %}
+{% if cost_summary.priced_requests or cost_summary.unpriced_requests or cost_summary.pending_requests %}
+{% set peak = chart.max_cost_usd | decimal %}
+{% set scale = (peak | float) or 1 %}
+{% set count = chart.buckets | length %}
+{% set step = 780 / count %}
+{% set label_every = 1 if count <= 8 else ((count + 6) / 7) | int %}
+<figure class="cost-chart">
+    <div class="cost-chart-scroll">
+        <svg viewBox="0 0 900 252" role="group" aria-labelledby="cost-chart-title cost-chart-description">
+            <title id="cost-chart-title">{{ cost_periods[cost_period] }}: estimated API cost by {{ chart.granularity }}</title>
+            <desc id="cost-chart-description">Each bar shows priced requests in UTC. Amber dots mark periods with unpriced or pending requests. Select a bar to read its amount and request counts below the chart.</desc>
+            {% for percent in ((100, 50, 0) if peak > 0 else (0,)) %}
+            {% set y = 208 - percent * 180 / 100 %}
+            <line x1="100" y1="{{ y }}" x2="880" y2="{{ y }}" class="cost-grid" aria-hidden="true" />
+            <text x="90" y="{{ y + 4 }}" text-anchor="end" class="cost-axis" aria-hidden="true">{{ (peak * percent / 100) | usd }}</text>
+            {% endfor %}
+            {% for bucket in chart.buckets %}
+            {% set x = 100 + loop.index0 * step %}
+            {% set height = (bucket.estimated_cost_usd | float) / scale * 180 %}
+            {% set detail %}
+                {{ bucket.start | when }} – {{ bucket.end | when }}:
+                {% if bucket.priced_requests %}
+                    {{ bucket.estimated_cost_usd | usd }}{% if bucket.unpriced_requests or bucket.pending_requests %} (partial){% endif %};
+                {% elif bucket.unpriced_requests or bucket.pending_requests %}
+                    Unavailable;
+                {% else %}
+                    No recorded requests;
+                {% endif %}
+                {{ bucket.priced_requests }} priced, {{ bucket.unpriced_requests }} unpriced, {{ bucket.pending_requests }} pending.
+                {% if cost_summary.tracking_since and bucket.start < cost_summary.tracking_since %}
+                    Cost tracking began {{ cost_summary.tracking_since | when }}. Earlier records may be incomplete.
+                {% endif %}
+            {% endset %}
+            {% set detail = detail.split() | join(' ') %}
+            <g class="cost-bin" tabindex="{{ 0 if loop.first else -1 }}" role="button" aria-label="{{ detail }}" aria-controls="cost-chart-detail">
+                <title>{{ detail }}</title>
+                <rect x="{{ x }}" y="20" width="{{ step }}" height="204" class="cost-hit-area" />
+                <rect x="{{ x + step * 0.18 }}" y="{{ 208 - height }}" width="{{ step * 0.64 }}" height="{{ height }}" rx="2" class="cost-bar" />
+                {% if bucket.unpriced_requests or bucket.pending_requests %}
+                <circle cx="{{ x + step / 2 }}" cy="216" r="3" class="cost-unknown" />
+                {% endif %}
+            </g>
+            {% if (loop.index0 % label_every == 0 and count - 1 - loop.index0 >= label_every) or loop.last %}
+            <text x="{{ x + step / 2 }}" y="240" text-anchor="middle" class="cost-axis" aria-hidden="true">{{ bucket.start.strftime('%H:%M' if chart.granularity == 'hour' else '%b %Y' if chart.granularity == 'month' else '%b %d') }}</text>
+            {% endif %}
+            {% endfor %}
+        </svg>
+    </div>
+    <p id="cost-chart-detail" class="cost-detail">Select a period for its amount and request counts.</p>
+    <figcaption class="sub">{{ {'hour': 'Hourly', 'day': 'Daily', 'week': 'Weekly', 'month': 'Monthly'}[chart.granularity] }} estimates · UTC. Hover or tap a bar for details. With the chart focused, use Left/Right, Home or End.{% if cost_summary.unpriced_requests or cost_summary.pending_requests %} <span class="cost-unknown-key">●</span> Unpriced or pending requests.{% endif %}</figcaption>
+</figure>
+<script src="/static/cost_chart.js" defer></script>
+{% if not cost_summary.priced_requests %}<p class="empty">No priced requests in this period. Unpriced and pending requests have no cost estimate yet.</p>{% endif %}
+{% else %}
+<p class="empty">No recorded requests in this period.</p>
+{% endif %}
+<p class="sub">Estimates include recorded API calls across submissions and reruns in the selected period. Unpriced and pending requests are excluded from the amount; earlier untracked usage is not included.</p>
+{% endif %}
+</section>
 
 <div class="title-row">
     <h2>Submissions</h2>
     <nav class="tabs" aria-label="View submissions">
-        <a href="/assignments/{{ assignment.id }}"{% if not by_target %} aria-current="page"{% endif %}>By student</a>
-        <a href="/assignments/{{ assignment.id }}?view=targets"{% if by_target %} aria-current="page"{% endif %}>By target</a>
+        <a href="/assignments/{{ assignment.id }}?cost_range={{ cost_period }}"{% if not by_target %} aria-current="page"{% endif %}>By student</a>
+        <a href="/assignments/{{ assignment.id }}?view=targets&amp;cost_range={{ cost_period }}"{% if by_target %} aria-current="page"{% endif %}>By target</a>
         <a href="/assignments/{{ assignment.id }}/results">Results</a>
     </nav>
 </div>
