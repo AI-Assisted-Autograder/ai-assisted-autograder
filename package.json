@@ -13,7 +13,8 @@
     "gradescope:save-auth": "tsx scripts/save-gradescope-auth.ts",
     "test:gradescope-login": "playwright test tests/e2e/gradescope-login.spec.ts",
     "test:gradescope-rerun": "playwright test tests/e2e/gradescope-rerun.spec.ts",
-    "nightly:trigger": "tsx integration/nightly-runner.ts"
+    "nightly:trigger": "tsx integration/nightly-runner.ts",
+    "test:integration:ts": "vitest run tests/integration/typescript"
   },
   "repository": {
     "type": "git",

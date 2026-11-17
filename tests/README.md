@@ -167,3 +167,21 @@ GitHub Actions automates testing on pushes and pull requests. Workflows are loca
 - [TypeScript Tests](.github/workflows/typescript-tests.yml): Sets up Node.js 22, installs dependencies, runs type checking, and executes TypeScript unit tests.
 - [PowerShell Tests](.github/workflows/powershell-tests.yml): Installs Pester 6.2.0 and runs PowerShell unit tests.
 - [E2E Tests](.github/workflows/e2e.yml): Uses Playwright and Chromium to test Gradescope and AI grading platform instructor authentication. Credentials are securely managed through GitHub Secrets.
+
+## 8. Integration Tests
+
+The integration suite lives in `tests/integration/` and verifies cross-component
+workflows, not merely code located in the production `integration/` directory.
+See [`tests/integration/README.md`](integration/README.md) for coverage and setup.
+
+From the repository root:
+
+```bash
+python -m pytest tests/integration/ai_grading_workflow -v
+export TEST_DATABASE_URL='postgresql+psycopg://autograder:autograder@localhost:5432/autograder_test'
+python -m pytest tests/integration/web_api -v
+npm run test:integration:ts
+```
+
+The PostgreSQL-backed API suite requires a dedicated database whose name
+contains `test`; it skips when `TEST_DATABASE_URL` is not configured.
