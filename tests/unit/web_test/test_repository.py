@@ -1363,13 +1363,23 @@ def test_delete_target_removes_it_and_its_rubrics(backend):
     backend.repo.create_target(aid, identifier="add", kind="METHOD", max_score=None)
 
 
-def test_delete_target_with_submissions_conflicts(backend):
-    aid, _ = started(backend, targets=(("add", 1),))
+@pytest.mark.parametrize("has_history", [False, True])
+def test_delete_inactive_target_with_submission_links(backend, has_history):
+    aid, sid = started(backend, targets=(("add", 1), ("divide", 2)))
+    backend.add_rubric(aid, "add", is_current=False)
     tid = backend.repo.get_assignment_config(aid).targets[0].id
 
-    with pytest.raises(ConflictError):
+    if has_history:
+        backend.repo.add_test_result(sid, "add", "FAIL", "Expected the sum.")
+        with pytest.raises(ConflictError, match="has grading history"):
+            backend.repo.delete_target(aid, tid)
+        assert backend.test_results(sid) == [("FAIL", "Expected the sum.")]
+    else:
         backend.repo.delete_target(aid, tid)
-    assert [t.identifier for t in backend.repo.get_assignment_config(aid).targets] == ["add"]
+
+    expected = ["add", "divide"] if has_history else ["divide"]
+    assert [t.identifier for t in backend.repo.get_assignment_config(aid).targets] == expected
+    assert [t.identifier for t in backend.repo.get_submission_detail(sid).targets] == expected
 
 
 def test_delete_target_must_belong_to_the_assignment(backend):

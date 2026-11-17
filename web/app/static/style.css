@@ -289,6 +289,19 @@ table.results td.cell { vertical-align: top; }
 table.results tfoot th { border-top: 1px solid var(--border); border-bottom: none; font-variant-numeric: tabular-nums; }
 
 /* Assignment context */
-li.context-file { display: flex; align-items: baseline; justify-content: space-between; gap: 0.6rem; }
-li.context-file details { min-width: 0; flex: 1; }
-li.context-file code { word-break: break-all; }
+.assignment-context { display: grid; grid-template-columns: minmax(0, 1fr); gap: 0.8rem; }
+@media (min-width: 720px) {
+    .assignment-context { grid-template-columns: minmax(0, 1.2fr) minmax(0, 1fr); }
+}
+.assignment-context form.form { max-width: none; }
+.context-notes { margin-top: 0.45rem; }
+.context-notes button { align-self: flex-start; }
+.context-files { max-height: 10rem; overflow: auto; }
+ul.context-files, p.context-files { margin: 0.4rem 0; }
+.context-file { display: flex; align-items: baseline; justify-content: space-between; gap: 0.6rem; }
+.context-file details { min-width: 0; flex: 1; overflow-wrap: anywhere; }
+.context-file summary { cursor: pointer; }
+.context-file details:not([open]) summary { white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+form.context-upload { display: grid; grid-template-columns: minmax(0, 1fr) auto; gap: 0.45rem; }
+.context-upload input { min-width: 0; }
+form.context-upload .hint { grid-column: 1 / -1; margin: 0; }

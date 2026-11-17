@@ -860,9 +860,24 @@ class InMemoryRepository(IGradingRepository):
         gt = self.grading_targets.get(target_id)
         if gt is None or gt.assignment_id != assignment_id:
             raise NotFoundError(f"Grading target {target_id} not found")
-        if any(st.grading_target_id == target_id for st in self.submission_targets.values()):
-            raise ConflictError(f"Target {gt.identifier!r} already has submissions, so it cannot be deleted")
-        self.rubrics = {rid: r for rid, r in self.rubrics.items() if r.grading_target_id != target_id}
+        links = {link.id: link for link in self.submission_targets.values() if link.grading_target_id == target_id}
+        rubrics = {rubric.id: rubric for rubric in self.rubrics.values() if rubric.grading_target_id == target_id}
+        has_processing_state = any(
+            not link.ai_needed or any(value is not None for value in (
+                link.completed_at, link.last_error, link.agreement_score, link.score_spread, link.selection_reason,
+            ))
+            for link in links.values()
+        )
+        if (has_processing_state or any(result.submission_target_id in links for result in self.test_results)
+                or any(feedback.submission_target_id in links or feedback.rubric_id in rubrics
+                       for feedback in self.ai_feedback)):
+            raise ConflictError(f"Target {gt.identifier!r} has grading history and cannot be deleted")
+        if links and any(rubric.is_current for rubric in rubrics.values()):
+            raise ConflictError(f"Target {gt.identifier!r} has a current rubric and submission links and cannot be deleted")
+        for link_id in links:
+            del self.submission_targets[link_id]
+        for rubric_id in rubrics:
+            del self.rubrics[rubric_id]
         del self.grading_targets[target_id]
 
     def set_context_notes(self, assignment_id: uuid.UUID, notes: str | None) -> None:

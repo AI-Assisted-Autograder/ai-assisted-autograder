@@ -114,6 +114,8 @@ def test_delete_target(client, repo):
     aid = repo.add_assignment("IMMEDIATE", name="Calc")
     tid = repo.add_grading_target(aid, "add", 1)
     repo.add_grading_target(aid, "divide", 2)
+    sid = repo.upsert_submission(SubmissionRef(aid, "sub-1", SUBMITTED, None))
+    repo.create_targets_default_needed(sid)
 
     assert f'action="/assignments/{aid}/targets/{tid}/delete"' in client.get(f"/assignments/{aid}").text
     response = client.post(f"/assignments/{aid}/targets/{tid}/delete", follow_redirects=False)
@@ -121,16 +123,17 @@ def test_delete_target(client, repo):
     assert response.status_code == 303
     assert response.headers["location"] == f"/assignments/{aid}#targets"
     assert [t.identifier for t in repo.get_assignment_config(aid).targets] == ["divide"]
+    assert [t.identifier for t in repo.get_submission_detail(sid).targets] == ["divide"]
 
 
-def test_delete_target_with_submissions_is_409(client, repo):
+def test_delete_target_with_grading_history_is_409(client, repo):
     aid, _ = graded_submission(repo)
     tid = repo.get_assignment_config(aid).targets[0].id
 
     response = client.post(f"/assignments/{aid}/targets/{tid}/delete")
 
     assert response.status_code == 409
-    assert "already has submissions" in response.text
+    assert "has grading history" in response.text
     assert len(repo.get_assignment_config(aid).targets) == 3
 
 

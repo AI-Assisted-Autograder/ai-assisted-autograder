@@ -911,12 +911,11 @@ class IGradingRepository(ABC):
 
     @abstractmethod
     def delete_target(self, assignment_id: uuid.UUID, target_id: uuid.UUID) -> None:
-        """Remove a target and its rubric versions.
+        """Remove a target, its rubric versions, and any placeholder submission links.
 
-        Only a target no submission has used yet: ConflictError once any
-        submission_target points at it, since its results and feedback
-        would go with it. NotFoundError if the target is not registered on
-        this assignment.
+        Raise ConflictError for recorded grading activity or for a target with
+        both a current rubric and submission links. Raise NotFoundError if the
+        target is not registered on this assignment.
         """
 
     @abstractmethod

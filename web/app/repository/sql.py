@@ -949,8 +949,29 @@ class SqlGradingRepository(IGradingRepository):
             gt = s.get(GradingTarget, target_id, with_for_update=True)
             if gt is None or gt.assignment_id != assignment_id:
                 raise NotFoundError(f"Grading target {target_id} not found")
-            if s.scalar(select(exists().where(SubmissionTarget.grading_target_id == target_id))):
-                raise ConflictError(f"Target {gt.identifier!r} already has submissions, so it cannot be deleted")
+            links = s.scalars(select(SubmissionTarget).where(
+                SubmissionTarget.grading_target_id == target_id,
+            ).order_by(SubmissionTarget.id).with_for_update()).all()
+            rubrics = s.execute(select(Rubric.id, Rubric.is_current).where(
+                Rubric.grading_target_id == target_id,
+            ).with_for_update()).all()
+            link_ids = [link.id for link in links]
+            rubric_ids = [rubric.id for rubric in rubrics]
+            test_results = exists().where(TestResult.submission_target_id.in_(link_ids))
+            feedback = exists().where(or_(AiFeedback.submission_target_id.in_(link_ids),
+                                          AiFeedback.rubric_id.in_(rubric_ids)))
+            has_processing_state = any(
+                not link.ai_needed or any(value is not None for value in (
+                    link.completed_at, link.last_error, link.agreement_score, link.score_spread, link.selection_reason,
+                ))
+                for link in links
+            )
+            if has_processing_state or s.scalar(select(or_(test_results, feedback))):
+                raise ConflictError(f"Target {gt.identifier!r} has grading history and cannot be deleted")
+            if links and any(rubric.is_current for rubric in rubrics):
+                raise ConflictError(f"Target {gt.identifier!r} has a current rubric and submission links and cannot be deleted")
+            if links:
+                s.execute(delete(SubmissionTarget).where(SubmissionTarget.id.in_(link_ids)))
             s.execute(delete(Rubric).where(Rubric.grading_target_id == target_id))
             s.delete(gt)
 
