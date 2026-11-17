@@ -29,9 +29,11 @@ def web_app():
     previous_cwd = Path.cwd()
     os.chdir(WEB_DIR)
 
+    from alembic import command
+    from alembic.config import Config
     from fastapi.testclient import TestClient
     from sqlalchemy import text
-    from app.models import Base, TriggerRun
+    from app.models import TriggerRun, TriggerRunSubmission
     from app.db import engine, SessionLocal
     from app.main import app
 
@@ -42,14 +44,28 @@ def web_app():
         with engine.connect() as connection:
             connection.execute(text("SELECT 1"))
     except Exception as error:
+        if os.environ.get("GITHUB_ACTIONS") == "true":
+            pytest.fail(f"Configured PostgreSQL test database is unavailable: {error}")
         pytest.skip(f"PostgreSQL test database is unavailable: {error}")
 
-    Base.metadata.create_all(engine)
+    # Apply the real application migrations. Base.metadata.create_all() does not
+    # create migration-only objects such as the partial unique index that
+    # enforces the one-RUNNING-nightly-run invariant.
+    alembic_config = Config(str(WEB_DIR / "alembic.ini"))
+    command.upgrade(alembic_config, "head")
+
+    # This is a dedicated test database. Clear leftovers from an interrupted
+    # local run so a stale RUNNING row cannot affect the next test execution.
+    with SessionLocal.begin() as session:
+        session.query(TriggerRunSubmission).delete()
+        session.query(TriggerRun).delete()
+
     with TestClient(app) as client:
         yield client, SessionLocal, TriggerRun
 
-    # Remove only audit rows created by this test module; do not drop the schema.
+    # Clean audit rows while preserving the migrated schema.
     with SessionLocal.begin() as session:
+        session.query(TriggerRunSubmission).delete()
         session.query(TriggerRun).delete()
     engine.dispose()
     os.chdir(previous_cwd)
