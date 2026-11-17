@@ -326,18 +326,4 @@
     Source selection must be valid when you save the configuration before this target can be graded.
 </p>
 
-<h2>LLM providers</h2>
-<p class="hint">Shared by every assignment for now.</p>
-{% if assignment.providers %}
-<ul class="plain">
-    {% for p in assignment.providers %}
-    <li>
-        {{ p.provider | title }} via <code>{{ p.engine }}</code>: <code>{{ p.model_name }}</code>
-        {% if p.is_primary %}<span class="badge done">Primary</span>{% endif %}
-    </li>
-    {% endfor %}
-</ul>
-{% else %}
-<p class="empty">No providers enabled.</p>
-{% endif %}
 {% endblock %}
