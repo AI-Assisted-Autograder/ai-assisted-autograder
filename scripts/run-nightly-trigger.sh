@@ -63,4 +63,20 @@ if ! docker image inspect mcr.microsoft.com/playwright:v1.63.0-noble >/dev/null 
   exit 1
 fi
 
-exec docker run --rm --network host --env-file "${CONFIG_DIR}/runner.env" --env "NIGHTLY_TRIGGER_SOURCE=${TRIGGER_SOURCE}" --env "NIGHTLY_WAIT_FOR_COMPLETION=${WAIT_FOR_COMPLETION}" -v "${RUNNER_DIR}:/work" -v "${CONFIG_DIR}:/run/secrets:ro" -w /work --name ai-assisted-autograder-nightly mcr.microsoft.com/playwright:v1.63.0-noble npm run nightly:trigger >> "${LOG_FILE}" 2>&1
+run_id="$(TZ=America/New_York date +%Y%m%dT%H%M%S%z)-$$"
+started_at="$(TZ=America/New_York date --iso-8601=seconds)"
+host_name="$(hostname)"
+run_user="$(id -un)"
+deployed_commit="unknown"
+if [[ -f "${RUNNER_DIR}/DEPLOYED_COMMIT" ]]; then
+  deployed_commit="$(tr -d '[:space:]' < "${RUNNER_DIR}/DEPLOYED_COMMIT")"
+fi
+
+echo "[RUN_START] run_id=${run_id} started_at=${started_at} host=${host_name} user=${run_user} pid=$$ source=${TRIGGER_SOURCE} wait_for_completion=${WAIT_FOR_COMPLETION} commit=${deployed_commit}" >> "${LOG_FILE}"
+set +e
+docker run --rm --network host --env-file "${CONFIG_DIR}/runner.env" --env "NIGHTLY_TRIGGER_SOURCE=${TRIGGER_SOURCE}" --env "NIGHTLY_WAIT_FOR_COMPLETION=${WAIT_FOR_COMPLETION}" -v "${RUNNER_DIR}:/work" -v "${CONFIG_DIR}:/run/secrets:ro" -w /work --name ai-assisted-autograder-nightly mcr.microsoft.com/playwright:v1.63.0-noble npm run nightly:trigger >> "${LOG_FILE}" 2>&1
+exit_code=$?
+set -e
+finished_at="$(TZ=America/New_York date --iso-8601=seconds)"
+echo "[RUN_END] run_id=${run_id} finished_at=${finished_at} exit_code=${exit_code}" >> "${LOG_FILE}"
+exit "${exit_code}"
