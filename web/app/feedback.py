@@ -138,6 +138,36 @@ def matches_path(path: str, patterns: tuple[str, ...]) -> bool:
     return any(FileResolver._matches(path, pattern) for pattern in patterns)
 
 
+def grading_item_label(item_id: str, index: int) -> str:
+    if re.fullmatch(r"[0-9a-fA-F]{8}(?:-[0-9a-fA-F]{4}){3}-[0-9a-fA-F]{12}", item_id):
+        return f"Criterion {index}"
+    return item_id
+
+
+def format_feedback_body(result: dict, evidence: list[Evidence]) -> str:
+    """Render the summary and student-facing details as plain text."""
+    sections = [result["feedback_text"]]
+    behavior = result.get("behavior")
+    if behavior == "ai_grading":
+        for index, item in enumerate(result.get("items", ()), 1):
+            label = grading_item_label(item["test_id"], index)
+            maximum = str(item["max_score"]).removesuffix(".0")
+            score = item["suggested_score"]
+            if score is None:
+                outcome = f"Pending regrade (max {maximum})"
+            else:
+                awarded = str(score).removesuffix(".0")
+                outcome = f"{item['verdict'].capitalize()} ({awarded}/{maximum})"
+            sections.append(f"{label} — {outcome}\n{item['feedback']}".rstrip())
+    elif behavior == "functional_test_feedback":
+        test_names = {observation.id: observation.test_id for observation in evidence}
+        for item in result.get("failure_feedback", ()):
+            name = test_names[item["evidence_id"]] or "Unnamed functional result"
+            sections.append(f"{name}\n{item['feedback']}")
+    # PostgreSQL text cannot store a literal NUL.
+    return "\n\n".join(sections).replace("\x00", r"\x00")
+
+
 def assignment_revision(assignment) -> str:
     """Bind collected inputs and replay IDs to the grading configuration."""
     content = {"assignment": assignment.model_dump(mode="json"),
@@ -287,7 +317,7 @@ def create_feedback_router(state_path: str | Path, *, assignment_loader,
         response = ProviderFeedback(
             provider=result.get("provider", assignment.provider),
             model_name=result["model_name"],
-            body=result["feedback_text"],
+            body=format_feedback_body(result, payload.evidence),
             prompt_version="v1",
             suggested_score=result.get("suggested_score"),
             input_tokens=usage.get("input_tokens"),
@@ -354,10 +384,7 @@ def create_feedback_router(state_path: str | Path, *, assignment_loader,
                 )},
             }
             targets[target_id]["analysis"]["grading_items"] = [
-                {"id": item.id, "points": item.points,
-                 "label": (f"Criterion {index}" if re.fullmatch(
-                     r"[0-9a-fA-F]{8}(?:-[0-9a-fA-F]{4}){3}-[0-9a-fA-F]{12}", item.id,
-                 ) else item.id)}
+                {"id": item.id, "points": item.points, "label": grading_item_label(item.id, index)}
                 for index, item in enumerate(target.analysis.grading_items, 1)
             ]
         return JSONResponse({"assignment_id": assignment.id,
