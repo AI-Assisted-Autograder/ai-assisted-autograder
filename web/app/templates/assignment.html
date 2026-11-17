@@ -44,9 +44,7 @@
     <strong>Unavailable</strong>
     {% else %}
     <strong>{{ cost_summary.estimated_cost_usd | usd }}</strong>
-    {% if cost_summary.unpriced_requests or cost_summary.pending_requests %}<span class="badge muted">Partial</span>{% endif %}
     {% endif %}
-    <span class="sub">{{ cost_periods[cost_period] }}</span>
 </p>
 <dl class="meta">
     <div><dt>Priced requests</dt><dd>{{ cost_summary.priced_requests }}</dd></div>
@@ -55,9 +53,6 @@
     {% if cost_summary.tracking_since %}<div><dt>Tracking since</dt><dd>{{ cost_summary.tracking_since | when }}</dd></div>{% endif %}
 </dl>
 {% set chart = cost_summary.chart %}
-{% if cost_summary.tracking_since and chart.start < cost_summary.tracking_since %}
-<p class="sub">This range begins before cost tracking started. Earlier records may be incomplete.</p>
-{% endif %}
 {% if cost_summary.priced_requests or cost_summary.unpriced_requests or cost_summary.pending_requests %}
 {% set axis_max = chart.max_cost_usd | cost_axis_max %}
 {% set scale = axis_max or 1 %}
@@ -88,7 +83,7 @@
                 {% endif %}
                 {{ bucket.priced_requests }} priced, {{ bucket.unpriced_requests }} unpriced, {{ bucket.pending_requests }} pending.
                 {% if cost_summary.tracking_since and bucket.start < cost_summary.tracking_since %}
-                    Cost tracking began {{ cost_summary.tracking_since | when }}. Earlier records may be incomplete.
+                    Cost tracking began {{ cost_summary.tracking_since | when }}.
                 {% endif %}
             {% endset %}
             {% set detail = detail.split() | join(' ') %}
@@ -107,7 +102,9 @@
         </svg>
     </div>
     <p id="cost-chart-detail" class="cost-detail">Select a period for its amount and request counts.</p>
-    <figcaption class="sub">{{ {'hour': 'Hourly', 'day': 'Daily', 'week': 'Weekly', 'month': 'Monthly'}[chart.granularity] }} estimates · UTC.{% if cost_summary.unpriced_requests or cost_summary.pending_requests %} <span class="cost-unknown-key">●</span> Unpriced or pending requests.{% endif %}</figcaption>
+    {% if cost_summary.unpriced_requests or cost_summary.pending_requests %}
+    <figcaption class="sub"><span class="cost-unknown-key">●</span> Unpriced or pending requests.</figcaption>
+    {% endif %}
 </figure>
 <script src="/static/cost_chart.js" defer></script>
 {% if not cost_summary.priced_requests %}<p class="empty">No priced requests in this period. Unpriced and pending requests have no cost estimate yet.</p>{% endif %}
