@@ -225,6 +225,62 @@ class JsonStore:
             self._persist(candidate)
             self._state = candidate
 
+    def assignment_token_status(self, assignment_id: str) -> dict[str, Any] | None:
+        """Summarize assignment access without returning credential material."""
+        with self._mutex:
+            self._ensure_open()
+            access = self._state.assignments.get(assignment_id)
+            if access is None:
+                return None
+            tokens = {digest: token for digest, token in self._state.tokens.items()
+                      if token.assignment_id == assignment_id}
+            records = sorted((digest, token.enabled, token.revoked, token.expires_at.isoformat())
+                             for digest, token in tokens.items())
+            version = hashlib.sha256(json.dumps([assignment_id, records]).encode()).hexdigest()
+            valid_tokens = [token for token in tokens.values() if token.enabled and not token.revoked]
+            unrevoked = [token for token in tokens.values() if not token.revoked]
+            # A legacy state may contain multiple credentials. Report when the last usable one expires.
+            summary_tokens = valid_tokens or unrevoked or tokens.values()
+            expires_at = max((token.expires_at.astimezone(timezone.utc) for token in summary_tokens), default=None)
+            if not access.enabled:
+                status = "disabled"
+            elif valid_tokens:
+                status = "active" if expires_at > utc_now() else "expired"
+            elif unrevoked:
+                status = "disabled"
+            else:
+                status = "revoked" if tokens else "missing"
+            return {"status": status, "expires_at": expires_at, "used_calls": access.used_calls,
+                    "max_calls": access.max_calls, "version": version, "can_replace": access.enabled}
+
+    def issue_assignment_token(self, assignment_id: str, raw_token: str, *, valid_days: int,
+                               max_calls: int | None, expected_version: str | None) -> None:
+        """Create access once or replace the credentials the instructor reviewed."""
+        if type(valid_days) is not int or not 1 <= valid_days <= 365:
+            raise StoreError("invalid_token_policy", 422)
+        digest = token_hash(raw_token)
+        with self._mutex:
+            current = self.assignment_token_status(assignment_id)
+            if current is not None and not current["can_replace"]:
+                raise StoreError("assignment_disabled", 409)
+            if expected_version != (current["version"] if current else None) or digest in self._state.tokens:
+                raise StoreError("token_conflict", 409)
+            token = TokenRecord(assignment_id=assignment_id, expires_at=utc_now() + timedelta(days=valid_days))
+            if current is None:
+                if type(max_calls) is not int or not 1 <= max_calls <= 100_000:
+                    raise StoreError("invalid_token_policy", 422)
+                self.add_assignment(assignment_id, AssignmentAccess(max_calls=max_calls), digest, token)
+                return
+            if max_calls is not None:
+                raise StoreError("invalid_token_policy", 422)
+            candidate = self._state.model_copy(deep=True)
+            for previous in candidate.tokens.values():
+                if previous.assignment_id == assignment_id:
+                    previous.revoked = True
+            candidate.tokens[digest] = token
+            self._persist(candidate)
+            self._state = candidate
+
     def get_request(self, assignment_id: str, request_id: str) -> RequestRecord | None:
         with self._mutex:
             self._ensure_open()

@@ -27,6 +27,107 @@
     <div><dt>{{ assignment.platform | title }} id</dt><dd><code>{{ assignment.platform_assignment_id }}</code></dd></div>
 </dl>
 
+<section id="gradescope-integration" aria-labelledby="integration-heading">
+    <h2 id="integration-heading">Gradescope integration</h2>
+    <div class="card">
+        {% if token_status %}
+        <dl class="meta">
+            <div><dt>Assignment token</dt><dd>{{ token_status.status | title }}</dd></div>
+            {% if token_status.expires_at %}<div><dt>Expires</dt><dd>{{ token_status.expires_at | when }}</dd></div>{% endif %}
+            <div><dt>Model calls used</dt><dd>{{ token_status.used_calls }} of {{ token_status.max_calls }}</dd></div>
+        </dl>
+        {% elif not token_setup_error %}
+        <p>No integration package has been issued for this assignment.</p>
+        {% endif %}
+        {% if token_setup_error %}<p class="hint">{{ token_setup_error }}</p>{% endif %}
+        <p data-token-error class="form-error" role="alert"{% if not token_error %} hidden{% endif %}>{{ token_error or '' }}</p>
+        {% if not token_setup_error and (not token_status or token_status.can_replace) %}
+        <details{% if not token_status or token_error %} open{% endif %}>
+            <summary>{{ 'Replace token and download a new package' if token_status else 'Issue an integration package' }}</summary>
+            <form class="form" method="post" action="/assignments/{{ assignment.id }}/token/{{ 'replace' if token_status else 'issue' }}">
+                <input type="hidden" name="csrf_token" value="{{ token_csrf }}">
+                {% set values = token_form or {} %}
+                <div class="row">
+                    <label>Token validity (days)
+                        <input type="number" name="valid_days" min="1" max="365" required value="{{ values.get('valid_days', '') }}">
+                    </label>
+                    {% if not token_status %}
+                    <label>Maximum model calls
+                        <input type="number" name="max_calls" min="1" max="100000" required value="{{ values.get('max_calls', '') }}">
+                    </label>
+                    {% endif %}
+                </div>
+                {% if token_status %}
+                <input type="hidden" name="expected_version" value="{{ token_status.version }}">
+                <label class="choice">
+                    <input type="checkbox" name="confirm_replace" value="yes" required>
+                    <span>I understand that replacement immediately invalidates the token in existing packages. I will upload the updated autograder to Gradescope.</span>
+                </label>
+                {% endif %}
+                <p class="hint">Save the ZIP when prompted. The token is available only in this download.</p>
+                <button type="submit">{{ 'Replace token and download ZIP' if token_status else 'Issue token and download ZIP' }}</button>
+                <noscript>Refresh this page after downloading to see the current token status.</noscript>
+            </form>
+        </details>
+        {% endif %}
+        <details data-install-steps>
+            <summary>Install the package in your autograder</summary>
+            <ol>
+                <li>Extract <code>gradescope_feedback.py</code>, <code>local_client.py</code>, <code>config.json</code> and <code>assignment.token</code> beside your existing <code>run_autograder</code>. Keep the package private.</li>
+                <li>Add <code>chmod 600 /autograder/source/assignment.token</code> to <code>setup.sh</code>.</li>
+                <li>In <code>run_autograder</code>, run <code>python3 /autograder/source/gradescope_feedback.py || echo "AI feedback unavailable." &gt;&amp;2</code> once after writing the final <code>/autograder/results/results.json</code>. Cover early exits that produce results and keep the functional grader’s exit status.</li>
+                <li>Zip the combined autograder with <code>run_autograder</code> at the archive root, upload it to this Gradescope assignment, and run a sample submission.</li>
+            </ol>
+        </details>
+    </div>
+</section>
+<script>
+(() => {
+    const section = document.getElementById('gradescope-integration');
+    section.addEventListener('submit', async event => {
+        event.preventDefault();
+        const form = event.target;
+        const button = form.querySelector('button[type="submit"]');
+        if (button.disabled) return;
+        const error = section.querySelector('[data-token-error]');
+        error.hidden = true;
+        button.disabled = true;
+        let downloaded = false;
+        try {
+            let response = await fetch(form.action, {method: 'POST', body: new FormData(form), mode: 'same-origin', cache: 'no-store'});
+            if (response.ok && response.headers.get('Content-Type')?.startsWith('application/zip')) {
+                const url = URL.createObjectURL(await response.blob());
+                const link = document.createElement('a');
+                link.href = url;
+                link.download = response.headers.get('Content-Disposition')?.match(/filename="([^"]+)"/)?.[1] || 'gradescope-ai.zip';
+                document.body.append(link);
+                link.click();
+                link.remove();
+                setTimeout(() => URL.revokeObjectURL(url), 60000);
+                downloaded = true;
+                response = await fetch('/assignments/{{ assignment.id }}', {mode: 'same-origin', cache: 'no-store'});
+            }
+            if (response.redirected) {
+                window.location.assign(response.url);
+                return;
+            }
+            const page = new DOMParser().parseFromString(await response.text(), 'text/html');
+            const next = page.getElementById(section.id);
+            if (!next) throw new Error();
+            if (downloaded) next.querySelector('[data-install-steps]').open = true;
+            section.replaceChildren(...next.children);
+        } catch {
+            error.textContent = downloaded
+                ? 'The download started. Refresh the page to see the current token status.'
+                : 'The download could not be completed. Refresh the page to check the token status before trying again.';
+            error.hidden = false;
+        } finally {
+            button.disabled = false;
+        }
+    });
+})();
+</script>
+
 <section id="api-cost" aria-labelledby="api-cost-heading">
 <div class="title-row">
     <h2 id="api-cost-heading">Estimated API cost (USD)</h2>

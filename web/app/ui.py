@@ -6,21 +6,29 @@ redirect on success (post/redirect/get); on a validation error the form
 is shown again with what was typed and the reason.
 """
 
+import io
+import json
+import re
+import secrets
 import uuid
+import zipfile
 from datetime import datetime
 from decimal import Decimal, InvalidOperation, ROUND_CEILING
-from typing import Annotated
+from pathlib import Path
+from typing import Annotated, Literal
 
-from fastapi import APIRouter, Depends, Form, Request
+from fastapi import APIRouter, Depends, Form, HTTPException, Request
 from fastapi.concurrency import run_in_threadpool
-from fastapi.responses import JSONResponse, RedirectResponse
+from fastapi.responses import JSONResponse, RedirectResponse, Response
 from fastapi.templating import Jinja2Templates
 from starlette.datastructures import UploadFile as StarletteUploadFile
 
+from ai_grading import local_client
 from app.assignment_context import MAX_FILES, MAX_TOTAL_CHARS, MAX_UPLOAD_BYTES, check_context, clean_filename, extract_text
 from app.auth import InstructorAccount, require_instructor
+from app.config import settings
 from app.db import SessionLocal
-from app.feedback_store import COST_PERIODS
+from app.feedback_store import COST_PERIODS, StoreError
 from app.models import GRADING_MODES, TARGET_KINDS
 from app.pitt_settings import PITT_MODELS, encrypt_pitt_key, resolve_form_key, validate_pitt_model
 from app.repository import (
@@ -323,6 +331,28 @@ def read_uploads(files: list[StarletteUploadFile]) -> list[tuple[str, str]]:
     return found
 
 
+def connector_origin(request: Request, active: bool) -> str:
+    if not active:
+        raise HTTPException(409, "This assignment is inactive.")
+    if getattr(request.app.state, "feedback_store", None) is None:
+        raise HTTPException(503, "Configure the Web feedback service to enable token downloads.")
+    try:
+        return local_client.validate_backend_url(settings.feedback_public_base_url or "")
+    except local_client.ClientError:
+        raise HTTPException(503, "Set FEEDBACK_PUBLIC_BASE_URL to a valid backend origin reachable from Gradescope.") from None
+
+
+def connector_archive(origin: str, raw_token: str) -> bytes:
+    scripts = Path(local_client.__file__).parent
+    output = io.BytesIO()
+    with zipfile.ZipFile(output, "w", compression=zipfile.ZIP_DEFLATED) as archive:
+        for name in ("gradescope_feedback.py", "local_client.py"):
+            archive.writestr(name, (scripts / name).read_bytes())
+        archive.writestr("config.json", json.dumps({"backend_url": origin}) + "\n")
+        archive.writestr("assignment.token", raw_token + "\n")
+    return output.getvalue()
+
+
 def assignment_page(
     request: Request,
     repo: IGradingRepository,
@@ -334,6 +364,8 @@ def assignment_page(
     delete_error: str | None = None,
     context_error: str | None = None,
     context_form: dict | None = None,
+    token_error: str | None = None,
+    token_form: dict | None = None,
 ):
     by_target = view == "targets"
     try:
@@ -348,12 +380,30 @@ def assignment_page(
     cost_period = request.query_params.get("cost_range", "7d")
     if cost_period not in COST_PERIODS:
         cost_period = "7d"
+    token_status = cost_summary = None
+    setup_error = None
+    try:
+        if store is not None:
+            token_status = store.assignment_token_status(str(assignment_id))
+            cost_summary = store.cost_summary(str(assignment_id), period=cost_period)
+        connector_origin(request, config.is_active)
+        if "token_csrf" not in request.session:
+            request.session["token_csrf"] = secrets.token_urlsafe(32)
+    except HTTPException as error:
+        setup_error = error.detail
+    except StoreError:
+        setup_error = "The feedback service is unavailable. Reload the page after service is restored."
     return templates.TemplateResponse(
         request,
         "assignment.html",
         {
             "assignment": config,
-            "cost_summary": store.cost_summary(str(assignment_id), period=cost_period) if store is not None else None,
+            "cost_summary": cost_summary,
+            "token_status": token_status,
+            "token_setup_error": setup_error,
+            "token_error": token_error,
+            "token_form": token_form or {},
+            "token_csrf": request.session.get("token_csrf", ""),
             "cost_period": cost_period,
             "cost_periods": COST_PERIODS,
             "by_target": by_target,
@@ -366,7 +416,7 @@ def assignment_page(
             "assignment_context_chars": len(config.context_notes or "") + sum(len(f.content) for f in config.context_files),
             "context_form": context_form or {},
         },
-        status_code=status_code,
+        status_code=status_code, headers={"Cache-Control": "no-store"},
     )
 
 
@@ -379,6 +429,64 @@ def assignment(
 ):
     """view=targets lists submissions by grading target instead of by student."""
     return assignment_page(request, repo, assignment_id, view=view)
+
+
+@router.post("/assignments/{assignment_id}/token/{action}")
+def download_assignment_connector(
+    request: Request,
+    assignment_id: uuid.UUID,
+    action: Literal["issue", "replace"],
+    valid_days: Annotated[str, Form()] = "",
+    max_calls: Annotated[str, Form()] = "",
+    expected_version: Annotated[str, Form()] = "",
+    confirm_replace: Annotated[str, Form()] = "",
+    csrf_token: Annotated[str, Form()] = "",
+    repo: IGradingRepository = Depends(get_repository),
+):
+    def form_failure(message: str, status: int):
+        return assignment_page(request, repo, assignment_id, token_error=message, status_code=status,
+                               token_form={"valid_days": valid_days, "max_calls": max_calls})
+
+    try:
+        assignment = repo.get_assignment_config(assignment_id)
+        origin = connector_origin(request, assignment.is_active)
+    except NotFoundError:
+        return not_found(request, "That assignment does not exist.")
+    except HTTPException as error:
+        return form_failure(error.detail, error.status_code)
+    session_token = request.session.get("token_csrf")
+    if not session_token or not secrets.compare_digest(session_token.encode(), csrf_token.encode()):
+        return form_failure("Your session changed. Review this form and submit it again.", 403)
+    if action == "replace" and (not expected_version or confirm_replace != "yes"):
+        return form_failure("Confirm replacement of the current token before downloading.", 400)
+    if action == "issue" and expected_version:
+        return form_failure("Review the current token status before submitting this form.", 409)
+    try:
+        days = int(valid_days)
+        limit = int(max_calls) if max_calls else None
+    except ValueError:
+        return form_failure("Enter whole numbers for the validity period and call limit.", 400)
+
+    raw_token = secrets.token_urlsafe(32)
+    try:
+        content = connector_archive(origin, raw_token)
+        request.app.state.feedback_store.issue_assignment_token(
+            str(assignment_id), raw_token, valid_days=days, max_calls=limit, expected_version=expected_version or None,
+        )
+    except OSError:
+        return form_failure("The connector scripts could not be packaged. Check the Web installation.", 503)
+    except StoreError as error:
+        message = {
+            "token_conflict": "The token has changed. Review the current status before replacing it.",
+            "assignment_disabled": "Token access is disabled for this assignment.",
+            "invalid_token_policy": "Use 1–365 days and an initial call limit of 1–100,000. Replacement keeps the existing limit.",
+        }.get(error.code, "The feedback service is unavailable. Reload the page before trying again.")
+        return form_failure(message, error.status_code)
+    file_id = re.sub(r"[^A-Za-z0-9_-]", "_", assignment.platform_assignment_id)[:100]
+    return Response(content, media_type="application/zip", headers={
+        "Content-Disposition": f'attachment; filename="gradescope-ai-{file_id}.zip"',
+        "Cache-Control": "no-store",
+    })
 
 
 RESULT_FILTERS = ("all", "has_deduction")

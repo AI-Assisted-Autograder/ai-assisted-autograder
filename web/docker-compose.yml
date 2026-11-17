@@ -12,6 +12,7 @@ services:
       DATABASE_URL: ${DATABASE_URL:-postgresql+psycopg://autograder:autograder@db:5432/autograder}
       INTEGRATION_API_TOKEN: ${INTEGRATION_API_TOKEN:-}
       FEEDBACK_STATE_PATH: ${FEEDBACK_STATE_PATH:-}
+      FEEDBACK_PUBLIC_BASE_URL: ${FEEDBACK_PUBLIC_BASE_URL:-}
       SESSION_SECRET: ${SESSION_SECRET:-}
       SESSION_COOKIE_SECURE: ${SESSION_COOKIE_SECURE:-false}
       GOOGLE_APPLICATION_CREDENTIALS: /run/google/application_default_credentials.json

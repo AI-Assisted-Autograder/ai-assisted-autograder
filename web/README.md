@@ -161,7 +161,8 @@ Create an assignment through `/assignments/new`, add targets, then choose
 **Configure target** to save the rubric and analysis settings. The same form edits
 source/context patterns, testplan, expected IDs, points, file limits and runtime
 evidence. Existing DB-injected targets use this form and the same configuration
-reader. Global provider settings and assignment tokens are managed separately.
+reader. Use **Gradescope integration** on the assignment page to issue or replace
+its token and download the connector ZIP.
 
 | Endpoint | Authentication | Purpose |
 | --- | --- | --- |
@@ -377,10 +378,12 @@ separate AI process.
 
 For later code updates, use `docker compose up -d --build web`. Preserve `.env`,
 `db_data` and `feedback_data`; do not use `down -v` or rerun initialization to update.
-Use one Web worker/container per state volume. Adding another assignment requires
-stopping Web and running `seed_feedback --add-assignment` with the existing state
-path, the new assignment UUID and new client output paths. Additions inherit the
-existing model policy and limits; omit those flags.
+Use one Web worker/container per state volume. For Web-issued packages, set
+`FEEDBACK_PUBLIC_BASE_URL` to the backend origin Gradescope can reach and
+recreate Web. Each ZIP includes that origin in `config.json`.
+For CLI provisioning, stop Web and run `seed_feedback --add-assignment` with
+the existing state path, the new assignment UUID and new client output paths.
+Additions inherit the existing model policy and limits.
 
 ### Change engine or model
 
@@ -435,13 +438,12 @@ WHERE is_primary = true;
 ```
 
 Use the matching vendor and verify that one row was updated. Read the internal
-configuration endpoint to confirm the selection. Token policy remains managed
-outside the instructor forms.
+configuration endpoint to confirm the selection.
 
 ### Current limits and separate-process use
 
 - Schema-2 state upgrades to schema 3 while retaining tokens, quotas and replay
-  results; schema-1 state is incompatible. Token rotation is not implemented.
+  results; schema-1 state is incompatible.
 - Pitt bypasses the upstream gateway cache. Backend replay remains in effect.
 - To run AI as a separate local process, set `ASSIGNMENT_API_URL` and
   `INTEGRATION_API_TOKEN`; see `python3 -m web.app.feedback --help` from the repository
