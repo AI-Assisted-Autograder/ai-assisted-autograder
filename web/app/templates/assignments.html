@@ -39,13 +39,6 @@
                 Unavailable
                 {% else %}
                 <span class="nowrap">{{ cost.estimated_cost_usd | usd }}</span>
-                {% if cost.unpriced_requests or cost.pending_requests %}<span class="badge muted">Partial</span>{% endif %}
-                {% endif %}
-                {% if cost is not none %}
-                {% if cost.unpriced_requests or cost.pending_requests %}
-                <div class="sub">{{ cost.unpriced_requests }} unpriced · {{ cost.pending_requests }} pending</div>
-                {% endif %}
-                {% if cost.tracking_since %}<div class="sub">Since {{ cost.tracking_since | when }}</div>{% endif %}
                 {% endif %}
             </td>
         </tr>
