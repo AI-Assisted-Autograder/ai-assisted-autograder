@@ -8,7 +8,7 @@ is shown again with what was typed and the reason.
 
 import uuid
 from datetime import datetime
-from decimal import Decimal, InvalidOperation
+from decimal import Decimal, InvalidOperation, ROUND_CEILING
 from typing import Annotated
 
 from fastapi import APIRouter, Depends, Form, Request
@@ -60,6 +60,13 @@ def usd(value: str | Decimal) -> str:
     return f"${Decimal(value):.6f}"
 
 
+def cost_axis_max(value: str) -> Decimal:
+    """Round the chart ceiling up to one significant digit."""
+    peak = Decimal(value)
+    step = Decimal(1).scaleb(peak.adjusted())
+    return peak.quantize(step, rounding=ROUND_CEILING)
+
+
 def submission_state(action: Action, grading_mode: str) -> tuple[str, str]:
     """A label and badge style for where a submission stands (AD-11)."""
     if action is Action.REEMIT:
@@ -101,6 +108,7 @@ templates.env.filters["when"] = when
 templates.env.filters["number"] = number
 templates.env.filters["decimal"] = Decimal
 templates.env.filters["usd"] = usd
+templates.env.filters["cost_axis_max"] = cost_axis_max
 templates.env.globals["submission_state"] = submission_state
 templates.env.globals["ai_result_state"] = ai_result_state
 templates.env.globals["TARGET_STATES"] = TARGET_STATES
