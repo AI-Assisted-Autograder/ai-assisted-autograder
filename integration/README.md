@@ -176,25 +176,6 @@ GET /internal/nightly/submissions?mode=NIGHTLY&retry_failed=true. The latter
 recovers failed nightly triggers that never reached AI processing. AI failure
 remains determined by the backend's reported outcome.
 
-### GitHub Actions schedule
-
-The repository includes `.github/workflows/nightly-rerun.yml`. It runs at 04:00
-and 05:00 America/New_York every day and triggers the `AI_FAILURES` cycle with
-headless Chromium. The workflow uses GitHub Actions Secrets, so credentials and
-the internal token are not stored in the repository.
-
-Configure these repository secrets before enabling the schedule:
-
-- `GRADING_API_URL`
-- `INTEGRATION_API_TOKEN`
-- `GRADESCOPE_COURSE_ID`
-- `GRADESCOPE_USERNAME`
-- `GRADESCOPE_PASSWORD`
-
-The workflow can also be started manually from the Actions tab. It records the
-runner output as a downloadable artifact. Only one scheduled run is allowed at
-a time; a second run waits instead of cancelling the first run.
-
 The database is the source of the work list, but it does not itself perform a
 Gradescope rerun. A submission row represents the work to process; the actual
 rerun still happens through the authenticated Gradescope platform adapter. For
