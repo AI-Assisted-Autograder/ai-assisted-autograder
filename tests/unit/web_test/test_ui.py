@@ -91,7 +91,8 @@ def test_assignment_page_shows_submissions_targets_and_rubric(client, repo):
     assert "Returns the sum." in text and "Be brief." in text
     # divide has no rubric.
     assert "No rubric yet" in text
-    assert "gemini-2.5-flash" in text
+    assert "LLM providers" not in text
+    assert "gemini-2.5-flash" not in text
 
 
 def test_assignment_page_collapses_long_rubric_text(client, repo):
