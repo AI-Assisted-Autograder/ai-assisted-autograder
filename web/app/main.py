@@ -144,7 +144,7 @@ def create_assignment(
                 course_id=course.id, platform=request.platform,
                 platform_assignment_id=request.platform_assignment_id,
                 name=request.name, language=request.language,
-                grading_mode=request.grading_mode, is_active=True,
+                grading_mode=request.grading_mode, ai_mode=request.ai_mode, is_active=True,
             )
             session.add(assignment)
             session.flush()
@@ -175,7 +175,7 @@ def create_assignment(
                                         **item.rubric.model_dump()),
                 )
             result = CreatedAssignmentConfig(
-                id=str(assignment.id), course_id=course.id, enabled=True,
+                id=str(assignment.id), course_id=course.id, enabled=True, grading_mode=request.grading_mode,
                 **model_config, targets=targets,
             )
             if len(result.model_dump_json().encode("utf-8")) > MAX_CONFIG_BYTES:

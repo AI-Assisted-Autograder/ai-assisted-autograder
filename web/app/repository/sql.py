@@ -63,6 +63,7 @@ from app.repository.base import (
     TestResultRecord,
     UnknownTargetError,
     assignment_sort_key,
+    check_ai_mode,
     check_assignment_fields,
     check_gradable,
     check_review,
@@ -404,6 +405,7 @@ class SqlGradingRepository(IGradingRepository):
                 tuple(self._context_files(s, a.id)),
                 "custom" if has_custom_key else "server",
                 key_version,
+                a.ai_mode,
             )
 
     def get_pitt_settings(self) -> PittSettings:
@@ -553,6 +555,7 @@ class SqlGradingRepository(IGradingRepository):
                     a.is_active,
                     targets,
                     submissions,
+                    a.ai_mode,
                 )
                 for a, targets, submissions in rows
             ]
@@ -871,11 +874,12 @@ class SqlGradingRepository(IGradingRepository):
         name: str | None,
         grading_mode: str,
         language: str,
+        ai_mode: str | None = None,
     ) -> uuid.UUID:
         course_name = required(course_name, "Course")
         term = clean(term)
         platform_assignment_id = required(platform_assignment_id, "Gradescope assignment id")
-        grading_mode, language = check_assignment_fields(grading_mode, language)
+        grading_mode, language = check_assignment_fields(grading_mode, language, ai_mode)
         with self._sessions.begin() as s:
             course_id = s.scalar(
                 select(Course.id)
@@ -895,6 +899,7 @@ class SqlGradingRepository(IGradingRepository):
                     platform_assignment_id=platform_assignment_id,
                     name=clean(name),
                     grading_mode=grading_mode,
+                    ai_mode=ai_mode,
                     language=language,
                 )
                 .on_conflict_do_nothing(index_elements=["platform", "platform_assignment_id"])
@@ -904,6 +909,16 @@ class SqlGradingRepository(IGradingRepository):
                 raise ConflictError(f"Gradescope assignment {platform_assignment_id!r} is already registered")
             return inserted
 
+    def set_ai_mode(self, assignment_id: uuid.UUID, ai_mode: str) -> None:
+        check_ai_mode(ai_mode)
+        with self._sessions.begin() as s:
+            assignment = self._locked_assignment(s, assignment_id)
+            if assignment.ai_mode != ai_mode and s.scalar(
+                select(exists().where(GradingTarget.assignment_id == assignment_id))
+            ):
+                raise ConflictError("The AI mode is locked while this assignment has targets")
+            assignment.ai_mode = ai_mode
+
     def create_target(
         self,
         assignment_id: uuid.UUID,
@@ -912,17 +927,19 @@ class SqlGradingRepository(IGradingRepository):
         kind: str,
         max_score: Decimal | None,
         analysis_config: dict | None = None,
+        rubric: RubricInput | None = None,
     ) -> uuid.UUID:
         identifier = check_target_fields(identifier, kind, max_score)
         with self._sessions.begin() as s:
             # Locked so two targets added at once cannot take the same display_order.
-            assignment = s.get(Assignment, assignment_id, with_for_update=True)
-            if assignment is None:
-                raise NotFoundError(f"Assignment {assignment_id} not found")
-            if analysis_config:
+            assignment = self._locked_assignment(s, assignment_id)
+            if analysis_config or rubric or assignment.ai_mode:
                 analysis_config, max_score = check_target_analysis(
-                    identifier, kind, assignment.language, analysis_config, max_score, draft=True,
+                    identifier, kind, assignment.language, analysis_config or {}, max_score,
+                    ai_mode=assignment.ai_mode, rubric=rubric, draft=rubric is None,
                 )
+            if rubric and analysis_config.get("behavior") == "functional_test_feedback":
+                self._check_feedback_target(s, assignment)
             last = s.scalar(
                 select(func.max(GradingTarget.display_order)).where(GradingTarget.assignment_id == assignment_id)
             )
@@ -941,6 +958,11 @@ class SqlGradingRepository(IGradingRepository):
             )
             if inserted is None:
                 raise ConflictError(f"Target {identifier!r} is already registered on this assignment")
+            if rubric:
+                s.add(Rubric(
+                    grading_target_id=inserted, version=1, is_current=True,
+                    criteria_text=rubric.criteria_text.strip(), feedback_guidance=clean(rubric.feedback_guidance),
+                ))
             return inserted
 
     def delete_target(self, assignment_id: uuid.UUID, target_id: uuid.UUID) -> None:
@@ -1008,11 +1030,22 @@ class SqlGradingRepository(IGradingRepository):
 
     @staticmethod
     def _locked_assignment(s: Session, assignment_id: uuid.UUID) -> Assignment:
-        # Locked so two uploads cannot both pass the limit check.
         a = s.get(Assignment, assignment_id, with_for_update=True)
         if a is None:
             raise NotFoundError(f"Assignment {assignment_id} not found")
         return a
+
+    @staticmethod
+    def _check_feedback_target(s: Session, assignment: Assignment, editing: uuid.UUID | None = None) -> None:
+        others = select(GradingTarget.id).where(GradingTarget.assignment_id == assignment.id)
+        if editing is not None:
+            others = others.where(GradingTarget.id != editing)
+        if assignment.ai_mode is None:
+            others = others.join(Rubric).where(
+                Rubric.is_current, GradingTarget.analysis_config["behavior"].astext == "functional_test_feedback",
+            )
+        if s.scalar(others.limit(1)) is not None:
+            raise ConflictError("An assignment supports only one active Functional-test feedback target")
 
     @staticmethod
     def _context_files(s: Session, assignment_id: uuid.UUID) -> list[ContextFile]:
@@ -1051,15 +1084,10 @@ class SqlGradingRepository(IGradingRepository):
             check_target_fields(target.identifier, target.kind, max_score)
             analysis_config, max_score = check_target_analysis(
                 target.identifier, target.kind, assignment.language,
-                analysis_config, max_score, rubric=rubric_input,
+                analysis_config, max_score, rubric=rubric_input, ai_mode=assignment.ai_mode,
             )
             if analysis_config.get("behavior") == "functional_test_feedback":
-                others = s.scalars(select(GradingTarget).join(Rubric).where(
-                    GradingTarget.assignment_id == assignment_id,
-                    GradingTarget.id != grading_target_id, Rubric.is_current,
-                ))
-                if any(other.analysis_config.get("behavior") == "functional_test_feedback" for other in others):
-                    raise ConflictError("An assignment supports only one active Functional-test feedback target")
+                self._check_feedback_target(s, assignment, editing=grading_target_id)
             target.analysis_config = analysis_config
             target.max_score = max_score
             current = s.scalar(

@@ -15,6 +15,19 @@
 {% endif %}
 {% endmacro %}
 
+{% macro source_files(target) %}
+    {% for pattern in target.analysis_config.get('source_globs') or [target.identifier] %}
+    <div><code>{{ pattern }}</code></div>
+    {% endfor %}
+{% endmacro %}
+
+{% macro delete_target_form(target, label) %}
+<form method="post" action="/assignments/{{ assignment.id }}/targets/{{ target.id }}/delete"
+    data-confirm="Delete {{ target.identifier }}, its rubric versions, and any placeholder submission links?" onsubmit="return confirm(this.dataset.confirm)">
+    <button type="submit" class="link danger">{{ label }}</button>
+</form>
+{% endmacro %}
+
 {% block content %}
 <p class="crumbs"><a href="/">Assignments</a> /</p>
 <h1>
@@ -22,10 +35,76 @@
     {% if not assignment.is_active %}<span class="badge muted">Inactive</span>{% endif %}
 </h1>
 <dl class="meta">
-    <div><dt>Mode</dt><dd><span class="badge mode">{{ assignment.grading_mode | title }}</span></dd></div>
+    <div><dt>AI mode</dt><dd>{{ assignment.ai_mode | title if assignment.ai_mode else ('Per target' if assignment.targets else 'Choose below') }}</dd></div>
+    <div><dt>Run timing</dt><dd><span class="badge mode">{{ assignment.grading_mode | title }}</span></dd></div>
     <div><dt>Language</dt><dd>{{ assignment.language | title }}</dd></div>
     <div><dt>{{ assignment.platform | title }} id</dt><dd><code>{{ assignment.platform_assignment_id }}</code></dd></div>
 </dl>
+
+{% if ai_mode_error %}<p class="form-error" role="alert">{{ ai_mode_error }}</p>{% endif %}
+{% if assignment.ai_mode or not assignment.targets %}
+<section id="targets" aria-labelledby="configuration-heading">
+    <div class="title-row">
+        <h2 id="configuration-heading">{{ 'Grading targets' if assignment.ai_mode == 'GRADING' else 'Feedback settings' if assignment.ai_mode == 'FEEDBACK' else 'AI configuration' }}</h2>
+        {% if assignment.ai_mode == 'GRADING' %}
+        <a class="button" href="/assignments/{{ assignment.id }}/targets/new">Add grading target</a>
+        {% elif assignment.ai_mode == 'FEEDBACK' %}
+        <a class="button" href="/assignments/{{ assignment.id }}/targets/new">{{ 'Edit feedback settings' if assignment.targets and assignment.targets[0].rubric else 'Configure feedback' }}</a>
+        {% endif %}
+    </div>
+    {% if delete_error %}<p class="form-error" role="alert">{{ delete_error }}</p>{% endif %}
+    {% if assignment.ai_mode == 'GRADING' and assignment.targets %}
+    <p>{{ assignment.targets | length }} {{ 'target' if assignment.targets | length == 1 else 'targets' }} · {{ grading_item_count }} {{ 'item' if grading_item_count == 1 else 'items' }} · {{ grading_points | number }} AI {{ 'point' if grading_points == 1 else 'points' }}</p>
+    <div class="table-wrap">
+        <table>
+            <thead><tr><th>Target</th><th>Student source files</th><th class="num">Items</th><th class="num">Points</th><th>Actions</th></tr></thead>
+            <tbody>
+                {% for t in assignment.targets %}
+                <tr>
+                    <td>{{ t.identifier }}{% if not t.rubric %} <span class="badge muted">Draft</span>{% endif %}</td>
+                    <td>{{ source_files(t) }}</td>
+                    <td class="num">{{ (t.analysis_config.get('grading_items') or []) | length }}</td>
+                    <td class="num">{{ t.max_score | number if t.max_score is not none else '—' }}</td>
+                    <td><div class="card-action">
+                        <a href="/assignments/{{ assignment.id }}/targets/{{ t.id }}/rubric">{{ 'Edit' if t.rubric else 'Configure' }}</a>
+                        {{ delete_target_form(t, 'Delete') }}
+                    </div></td>
+                </tr>
+                {% endfor %}
+            </tbody>
+        </table>
+    </div>
+    {% elif assignment.ai_mode == 'FEEDBACK' and assignment.targets %}
+    {% set target = assignment.targets[0] %}
+    <div class="card">
+        <strong>Student source files</strong>
+        {{ source_files(target) }}
+        {% if target.rubric and target.rubric.feedback_guidance %}
+        <h3>Feedback guidance</h3>{{ long_text(target.rubric.feedback_guidance) }}
+        {% endif %}
+        <div class="card-action">{{ delete_target_form(target, 'Delete feedback settings') }}</div>
+    </div>
+    {% elif assignment.ai_mode %}
+    <p class="empty">{{ 'No grading targets yet.' if assignment.ai_mode == 'GRADING' else 'Feedback settings have not been saved.' }}</p>
+    {% endif %}
+    {% if not assignment.targets %}
+    <details{% if not assignment.ai_mode %} open{% endif %}>
+        <summary>{{ 'Change AI mode' if assignment.ai_mode else 'Choose an AI mode' }}</summary>
+        <form class="form inline" method="post" action="/assignments/{{ assignment.id }}/ai-mode">
+            <label>AI mode
+                <select name="ai_mode" required>
+                    {% if not assignment.ai_mode %}<option value="">Choose a mode</option>{% endif %}
+                    {% for mode in AI_MODES %}
+                    <option value="{{ mode }}"{% if assignment.ai_mode == mode %} selected{% endif %}>{{ mode | title }}</option>
+                    {% endfor %}
+                </select>
+            </label>
+            <button type="submit">Save and continue</button>
+        </form>
+    </details>
+    {% endif %}
+</section>
+{% endif %}
 
 <section id="gradescope-integration" aria-labelledby="integration-heading">
     <h2 id="integration-heading">Gradescope integration</h2>
@@ -339,13 +418,13 @@
     </section>
 </div>
 
+{% if not assignment.ai_mode and assignment.targets %}
 <h2 id="targets">Grading targets</h2>
 <p class="hint">
     The instructor's test suite refers to targets by these identifiers, so
     they must match it exactly (AD-3).
 </p>
 {% if delete_error %}<p class="form-error" role="alert">{{ delete_error }}</p>{% endif %}
-{% if assignment.targets %}
 <div class="cards">
     {% for t in assignment.targets %}
     <section class="card">
@@ -379,17 +458,11 @@
         {% endif %}
         <div class="card-action">
             <a href="/assignments/{{ assignment.id }}/targets/{{ t.id }}/rubric">{{ "Edit configuration" if t.rubric else "Configure target" }}</a>
-            <form method="post" action="/assignments/{{ assignment.id }}/targets/{{ t.id }}/delete"
-                data-confirm="Delete target {{ t.identifier }}, its rubric versions, and any placeholder submission links?" onsubmit="return confirm(this.dataset.confirm)">
-                <button type="submit" class="link danger">Delete target</button>
-            </form>
+            {{ delete_target_form(t, 'Delete target') }}
         </div>
     </section>
     {% endfor %}
 </div>
-{% else %}
-<p class="empty">No targets registered.</p>
-{% endif %}
 
 <h3>Add a target</h3>
 {% if target_error %}<p class="form-error" role="alert">{{ target_error }}</p>{% endif %}
@@ -426,5 +499,6 @@
     Enter one submission-relative source pattern per line, or leave patterns blank to locate one file from the identifier and assignment language.
     Source selection must be valid when you save the configuration before this target can be graded.
 </p>
+{% endif %}
 
 {% endblock %}

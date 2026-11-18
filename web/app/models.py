@@ -60,6 +60,7 @@ def one_of(column: str, values: tuple[str, ...]) -> CheckConstraint:
 
 PLATFORMS = ("GRADESCOPE",)
 GRADING_MODES = ("IMMEDIATE", "NIGHTLY")
+AI_MODES = ("GRADING", "FEEDBACK")
 AI_STATUSES = ("SUCCEEDED", "FAILED")
 TARGET_KINDS = ("METHOD", "CLASS", "FILE")
 PROVIDERS = ("ANTHROPIC", "OPENAI", "GOOGLE")
@@ -104,6 +105,7 @@ class Assignment(Base):
         UniqueConstraint("platform", "platform_assignment_id"),
         one_of("platform", PLATFORMS),
         one_of("grading_mode", GRADING_MODES),
+        one_of("ai_mode", AI_MODES),
     )
 
     id: Mapped[uuid.UUID] = uuid_pk()
@@ -111,6 +113,7 @@ class Assignment(Base):
     platform: Mapped[str] = mapped_column(Text)
     platform_assignment_id: Mapped[str] = mapped_column(Text)
     grading_mode: Mapped[str] = mapped_column(Text)
+    ai_mode: Mapped[str | None] = mapped_column(Text)
     # Open-ended (JAVA, PYTHON, ...): no CHECK, because the valid set is
     # whatever the AI phase's per-language mapping supports (AD-12).
     language: Mapped[str] = mapped_column(Text)

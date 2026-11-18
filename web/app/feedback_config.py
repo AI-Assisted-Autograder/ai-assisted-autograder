@@ -9,7 +9,7 @@ import re
 from typing import Annotated, Any, Literal
 from uuid import UUID
 
-from pydantic import AfterValidator, BaseModel, ConfigDict, Field, TypeAdapter, field_validator, model_validator
+from pydantic import AfterValidator, BaseModel, ConfigDict, Field, TypeAdapter, ValidationInfo, field_validator, model_validator
 
 from ai_grading.FileResolver import FileResolver
 from ai_grading.PromptBuilder import PromptBuilder
@@ -21,6 +21,8 @@ from .assignment_context import MAX_TOTAL_CHARS as MAX_CONTEXT_CHARS
 
 Identifier = Annotated[str, Field(min_length=1, max_length=128, pattern=r"^[A-Za-z0-9_.:-]+$")]
 Engine = Literal["vertex", "pitt", "gemini_api"]
+AiMode = Literal["GRADING", "FEEDBACK"]
+AI_MODE_BEHAVIORS = {"GRADING": "ai_grading", "FEEDBACK": "functional_test_feedback"}
 ModelName = Annotated[str, Field(min_length=1, max_length=256, pattern=r"^[A-Za-z0-9@][A-Za-z0-9_./:@+-]*$")]
 ModelList = Annotated[list[ModelName], Field(min_length=1, max_length=64)]
 Digest = Annotated[str, Field(pattern=r"^[0-9a-f]{64}$")]
@@ -253,6 +255,13 @@ class TargetInput(TargetSettings):
         return self
 
 
+def analysis_for_ai_mode(ai_mode: str, analysis: dict) -> dict:
+    behavior = AI_MODE_BEHAVIORS[ai_mode]
+    if analysis.get("behavior") not in (None, behavior):
+        raise ValueError("Target behavior must match the assignment's AI mode")
+    return {**analysis, "behavior": behavior}
+
+
 class AssignmentCreateInput(StrictModel):
     course_id: UUID | None = Field(default=None, strict=False)
     course: CourseInput | None = None
@@ -261,7 +270,21 @@ class AssignmentCreateInput(StrictModel):
     name: str = Field(min_length=1, max_length=256, pattern=r"\S")
     language: str = Field(min_length=1, max_length=64, pattern=r"\S")
     grading_mode: Literal["IMMEDIATE", "NIGHTLY"] = "IMMEDIATE"
+    ai_mode: AiMode | None = None
     targets: list[TargetInput] = Field(min_length=1, max_length=64)
+
+    @field_validator("targets", mode="before")
+    @classmethod
+    def inherit_target_behavior(cls, targets: Any, info: ValidationInfo) -> Any:
+        ai_mode = info.data.get("ai_mode")
+        if ai_mode is None or not isinstance(targets, list):
+            return targets
+        normalized = []
+        for target in targets:
+            if isinstance(target, dict) and isinstance(analysis := target.get("analysis", {}), dict):
+                target = {**target, "analysis": analysis_for_ai_mode(ai_mode, analysis)}
+            normalized.append(target)
+        return normalized
 
     @model_validator(mode="after")
     def validate_configuration(self) -> "AssignmentCreateInput":
@@ -270,7 +293,14 @@ class AssignmentCreateInput(StrictModel):
         identifiers = [target.identifier for target in self.targets]
         if len(identifiers) != len(set(identifiers)):
             raise ValueError("Target identifiers must be unique within the assignment")
-        if sum(target.analysis.behavior == "functional_test_feedback" for target in self.targets) > 1:
+        behaviors = {target.analysis.behavior for target in self.targets}
+        if len(behaviors) != 1:
+            raise ValueError("All targets must use the same assignment AI mode")
+        if self.ai_mode is None:
+            self.ai_mode = "GRADING" if behaviors == {"ai_grading"} else "FEEDBACK"
+        elif behaviors != {AI_MODE_BEHAVIORS[self.ai_mode]}:
+            raise ValueError("Target behavior must match the assignment's AI mode")
+        if self.ai_mode == "FEEDBACK" and len(self.targets) > 1:
             raise ValueError("An assignment supports only one active Functional-test feedback target")
         return self
 

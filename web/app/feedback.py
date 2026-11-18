@@ -375,6 +375,9 @@ def create_feedback_router(state_path: str | Path, *, assignment_loader,
         targets = {}
         for target_id, target in assignment.targets.items():
             analysis = asdict(target.analysis)
+            # On Python < 3.13 Path.glob("dir/**") only returns directories.
+            for key in ("source_globs", "context_globs"):
+                analysis[key] = [p + "/*" if p.rsplit("/", 1)[-1] == "**" else p for p in analysis[key]]
             targets[target_id] = {
                 "identifier": target.identifier, "kind": target.kind,
                 "source_path": target.source_path, "max_score": target.max_score,

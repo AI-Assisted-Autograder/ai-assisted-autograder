@@ -157,12 +157,12 @@ export provider keys in the server process environment; loading Web settings fro
 
 ### Prepare the database configuration
 
-Create an assignment through `/assignments/new`, add targets, then choose
-**Configure target** to save the rubric and analysis settings. The same form edits
-source/context patterns, testplan, expected IDs, points, file limits and runtime
-evidence. Existing DB-injected targets use this form and the same configuration
-reader. Use **Gradescope integration** on the assignment page to issue or replace
-its token and download the connector ZIP.
+At `/assignments/new`, choose **Grading** or **Feedback** and save. For Grading,
+add a target for each source scope and give each item a requirement and points.
+For Feedback, choose the source files and optionally add guidance for explaining
+visible failed tests. You can add assignment context later. Use **Gradescope
+integration** on the assignment page to issue or replace its token and download
+the connector ZIP.
 
 | Endpoint | Authentication | Purpose |
 | --- | --- | --- |

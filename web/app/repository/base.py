@@ -18,8 +18,8 @@ from enum import Enum
 
 from pydantic import TypeAdapter
 
-from app.feedback_config import Analysis, RubricInput, TargetSettings, resolve_target_analysis
-from app.models import GRADING_MODES, TARGET_KINDS, TEST_STATUSES
+from app.feedback_config import Analysis, RubricInput, TargetSettings, analysis_for_ai_mode, resolve_target_analysis
+from app.models import AI_MODES, GRADING_MODES, TARGET_KINDS, TEST_STATUSES
 
 
 class Action(str, Enum):
@@ -172,6 +172,7 @@ class AssignmentConfig:
     context_files: tuple[ContextFile, ...] = ()
     pitt_key_source: str = "server"
     pitt_key_version: int = 0
+    ai_mode: str | None = None
 
 
 @dataclass(frozen=True)
@@ -234,6 +235,7 @@ class AssignmentSummary:
     is_active: bool
     target_count: int
     submission_count: int
+    ai_mode: str | None = None
 
 
 @dataclass(frozen=True)
@@ -626,9 +628,16 @@ def check_test_outcomes(outcomes: list["TargetTestOutcome"]) -> None:
             raise ValueError(f"status must be one of {', '.join(TEST_STATUSES)}, not {o.status!r}")
 
 
-def check_assignment_fields(grading_mode: str, language: str) -> tuple[str, str]:
+def check_ai_mode(ai_mode: str) -> None:
+    if ai_mode not in AI_MODES:
+        raise ValueError("Select Grading or Feedback for the assignment")
+
+
+def check_assignment_fields(grading_mode: str, language: str, ai_mode: str | None = None) -> tuple[str, str]:
     if grading_mode not in GRADING_MODES:
         raise ValueError(f"grading mode must be one of {', '.join(GRADING_MODES)}, not {grading_mode!r}")
+    if ai_mode is not None:
+        check_ai_mode(ai_mode)
     return grading_mode, required(language, "Language").upper()
 
 
@@ -642,7 +651,11 @@ def check_target_fields(identifier: str, kind: str, max_score: Decimal | None) -
 
 def check_target_analysis(identifier: str, kind: str, language: str, analysis: dict,
                           max_score: Decimal | None, *, draft: bool = False,
-                          rubric: RubricInput | None = None) -> tuple[dict, Decimal | None]:
+                          rubric: RubricInput | None = None, ai_mode: str | None = None) -> tuple[dict, Decimal | None]:
+    if ai_mode is not None:
+        if draft:
+            raise ValueError("Save the target and its rubric together")
+        analysis = analysis_for_ai_mode(ai_mode, analysis)
     value = TypeAdapter(Analysis).validate_python(analysis)
     if draft:
         incomplete = (value.behavior == "ai_grading" and not value.grading_items
@@ -882,6 +895,7 @@ class IGradingRepository(ABC):
         name: str | None,
         grading_mode: str,
         language: str,
+        ai_mode: str | None = None,
     ) -> uuid.UUID:
         """Create an assignment, in the course with this name and term.
 
@@ -889,6 +903,10 @@ class IGradingRepository(ABC):
         for a blank required field or an unknown grading mode, and
         ConflictError if the platform assignment id is already registered.
         """
+
+    @abstractmethod
+    def set_ai_mode(self, assignment_id: uuid.UUID, ai_mode: str) -> None:
+        """Choose the assignment's mode while it has no targets."""
 
     @abstractmethod
     def create_target(
@@ -899,11 +917,12 @@ class IGradingRepository(ABC):
         kind: str,
         max_score: Decimal | None,
         analysis_config: dict | None = None,
+        rubric: RubricInput | None = None,
     ) -> uuid.UUID:
         """Register a target, after the assignment's existing ones in display order.
 
-        Omitted or empty analysis_config leaves source selection for rubric
-        configuration; a nonempty analysis_config is validated immediately.
+        A supplied rubric is validated and saved in the same transaction.
+        Assignments with a selected AI mode require a configured target.
         Raises ConflictError if the identifier is already registered on the
         assignment (AD-3), and ValueError for a blank identifier, an
         unknown kind, or a negative max score.

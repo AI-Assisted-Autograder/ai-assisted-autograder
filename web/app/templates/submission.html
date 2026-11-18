@@ -20,7 +20,7 @@
     {% if submission.ai_authorized_at %}
     <div><dt>Authorized</dt><dd>{{ submission.ai_authorized_at | when }}</dd></div>
     {% endif %}
-    <div><dt>Mode</dt><dd><span class="badge mode">{{ submission.grading_mode | title }}</span></dd></div>
+    <div><dt>Run timing</dt><dd><span class="badge mode">{{ submission.grading_mode | title }}</span></dd></div>
 </dl>
 
 {% for t in submission.targets %}

@@ -12,7 +12,8 @@
     <thead>
         <tr>
             <th>Assignment</th>
-            <th>Mode</th>
+            <th>AI mode</th>
+            <th>Run timing</th>
             <th>Language</th>
             <th class="num">Targets</th>
             <th class="num">Submissions</th>
@@ -27,6 +28,7 @@
                 {% if not a.is_active %}<span class="badge muted">Inactive</span>{% endif %}
                 <div class="sub">{{ a.platform | title }} · {{ a.platform_assignment_id }}</div>
             </td>
+            <td>{{ a.ai_mode | title if a.ai_mode else '—' }}</td>
             <td><span class="badge mode">{{ a.grading_mode | title }}</span></td>
             <td>{{ a.language | title }}</td>
             <td class="num">{{ a.target_count }}</td>

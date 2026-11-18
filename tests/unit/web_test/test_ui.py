@@ -286,6 +286,7 @@ ASSIGNMENT_FORM = {
     "term": "Fall 2026",
     "platform_assignment_id": "12345",
     "name": "Project 1: Calculator",
+    "ai_mode": "GRADING",
     "grading_mode": "IMMEDIATE",
     "language": "PYTHON",
 }
@@ -298,12 +299,12 @@ def test_new_assignment_form_renders(client):
     assert 'value="NIGHTLY"' in response.text and 'value="JAVA"' in response.text
 
 
-def test_create_assignment_redirects_to_it(client, repo):
+def test_create_assignment_redirects_to_configuration(client, repo):
     response = client.post("/assignments", data=ASSIGNMENT_FORM, follow_redirects=False)
 
     assert response.status_code == 303
     (aid,) = repo.assignments
-    assert response.headers["location"] == f"/assignments/{aid}"
+    assert response.headers["location"] == f"/assignments/{aid}/targets/new"
     assert client.get(response.headers["location"]).status_code == 200
 
 
@@ -503,15 +504,14 @@ def test_assignment_page_links_to_results(client, repo):
 
 def test_create_assignment_with_context_notes_and_files(client, repo):
     response = client.post("/assignments", data={
-        "course_name": "CS 0401", "platform_assignment_id": "777", "grading_mode": "IMMEDIATE",
-        "language": "PYTHON", "context_notes": "Students have not learned exceptions yet.",
+        **ASSIGNMENT_FORM, "platform_assignment_id": "777", "context_notes": "Students have not learned exceptions yet.",
     }, files=[
         ("context_files", ("spec.md", b"Implement add.", "text/markdown")),
         ("context_files", ("starter.py", b"def add(a, b): ...", "text/x-python")),
     ], follow_redirects=False)
 
     assert response.status_code == 303
-    aid = uuid.UUID(response.headers["location"].rsplit("/", 1)[1])
+    (aid,) = repo.assignments
     config = repo.get_assignment_config(aid)
     assert config.context_notes == "Students have not learned exceptions yet."
     assert [f.filename for f in config.context_files] == ["spec.md", "starter.py"]
@@ -523,18 +523,17 @@ def test_create_assignment_with_context_notes_and_files(client, repo):
 def test_create_assignment_with_no_files_chosen(client, repo):
     # A browser sends an empty, nameless part for an untouched file input.
     response = client.post("/assignments", data={
-        "course_name": "CS 0401", "platform_assignment_id": "778", "grading_mode": "IMMEDIATE", "language": "PYTHON",
+        **ASSIGNMENT_FORM, "platform_assignment_id": "778",
     }, files=[("context_files", ("", b"", "application/octet-stream"))], follow_redirects=False)
 
     assert response.status_code == 303
-    aid = uuid.UUID(response.headers["location"].rsplit("/", 1)[1])
+    (aid,) = repo.assignments
     assert repo.get_assignment_config(aid).context_files == ()
 
 
 def test_create_assignment_with_unreadable_file_creates_nothing(client, repo):
     response = client.post("/assignments", data={
-        "course_name": "CS 0401", "platform_assignment_id": "779", "grading_mode": "IMMEDIATE",
-        "language": "PYTHON", "context_notes": "keep me",
+        **ASSIGNMENT_FORM, "platform_assignment_id": "779", "context_notes": "keep me",
     }, files=[("context_files", ("report.docx", b"PK\x03\x04\xff\xfe", "application/octet-stream"))])
 
     assert response.status_code == 400

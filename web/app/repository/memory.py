@@ -48,6 +48,7 @@ from app.repository.base import (
     TestResultRecord,
     UnknownTargetError,
     assignment_sort_key,
+    check_ai_mode,
     check_assignment_fields,
     check_gradable,
     check_review,
@@ -88,6 +89,7 @@ class _Assignment:
     is_active: bool = True
     course_id: uuid.UUID | None = None
     context_notes: str | None = None
+    ai_mode: str | None = None
 
 
 @dataclass
@@ -469,6 +471,7 @@ class InMemoryRepository(IGradingRepository):
             tuple(self._context_files(a.id)),
             "custom" if self._pitt_credential.encrypted_key is not None else "server",
             self._pitt_credential.key_version,
+            a.ai_mode,
         )
 
     def get_pitt_settings(self) -> PittSettings:
@@ -562,6 +565,7 @@ class InMemoryRepository(IGradingRepository):
                 a.is_active,
                 len(self._registered(a.id)),
                 sum(1 for sub in self.submissions.values() if sub.assignment_id == a.id),
+                a.ai_mode,
             )
             for a in self.assignments.values()
         ]
@@ -815,11 +819,12 @@ class InMemoryRepository(IGradingRepository):
         name: str | None,
         grading_mode: str,
         language: str,
+        ai_mode: str | None = None,
     ) -> uuid.UUID:
         course_name = required(course_name, "Course")
         term = clean(term)
         platform_assignment_id = required(platform_assignment_id, "Gradescope assignment id")
-        grading_mode, language = check_assignment_fields(grading_mode, language)
+        grading_mode, language = check_assignment_fields(grading_mode, language, ai_mode)
         if any(a.platform_assignment_id == platform_assignment_id for a in self.assignments.values()):
             raise ConflictError(f"Gradescope assignment {platform_assignment_id!r} is already registered")
         course = next((c for c in self.courses.values() if (c.name, c.term) == (course_name, term)), None)
@@ -828,10 +833,19 @@ class InMemoryRepository(IGradingRepository):
             self.courses[course.id] = course
         a = _Assignment(
             uuid.uuid4(), grading_mode, "GRADESCOPE", platform_assignment_id, language, clean(name),
-            course_id=course.id,
+            course_id=course.id, ai_mode=ai_mode,
         )
         self.assignments[a.id] = a
         return a.id
+
+    def set_ai_mode(self, assignment_id: uuid.UUID, ai_mode: str) -> None:
+        check_ai_mode(ai_mode)
+        assignment = self.assignments.get(assignment_id)
+        if assignment is None:
+            raise NotFoundError(f"Assignment {assignment_id} not found")
+        if assignment.ai_mode != ai_mode and self._registered(assignment_id):
+            raise ConflictError("The AI mode is locked while this assignment has targets")
+        assignment.ai_mode = ai_mode
 
     def create_target(
         self,
@@ -841,20 +855,29 @@ class InMemoryRepository(IGradingRepository):
         kind: str,
         max_score: Decimal | None,
         analysis_config: dict | None = None,
+        rubric: RubricInput | None = None,
     ) -> uuid.UUID:
         identifier = check_target_fields(identifier, kind, max_score)
-        if assignment_id not in self.assignments:
+        assignment = self.assignments.get(assignment_id)
+        if assignment is None:
             raise NotFoundError(f"Assignment {assignment_id} not found")
-        if analysis_config:
+        if analysis_config or rubric or assignment.ai_mode:
             analysis_config, max_score = check_target_analysis(
-                identifier, kind, self.assignments[assignment_id].language, analysis_config, max_score, draft=True,
+                identifier, kind, assignment.language, analysis_config or {}, max_score,
+                ai_mode=assignment.ai_mode, rubric=rubric, draft=rubric is None,
             )
+        if rubric and analysis_config.get("behavior") == "functional_test_feedback":
+            self._check_feedback_target(assignment)
         registered = self._registered(assignment_id)
         if any(gt.identifier == identifier for gt in registered):
             raise ConflictError(f"Target {identifier!r} is already registered on this assignment")
         last = max((gt.display_order or 0 for gt in registered), default=0)
-        return self.add_grading_target(assignment_id, identifier, last + 1, kind=kind, max_score=max_score,
-                                       analysis_config=analysis_config)
+        target_id = self.add_grading_target(assignment_id, identifier, last + 1, kind=kind, max_score=max_score,
+                                            analysis_config=analysis_config)
+        if rubric:
+            self.add_rubric(target_id, criteria_text=rubric.criteria_text.strip(),
+                            feedback_guidance=clean(rubric.feedback_guidance))
+        return target_id
 
     def delete_target(self, assignment_id: uuid.UUID, target_id: uuid.UUID) -> None:
         gt = self.grading_targets.get(target_id)
@@ -909,6 +932,15 @@ class InMemoryRepository(IGradingRepository):
     def _context_files(self, assignment_id: uuid.UUID) -> list[ContextFile]:
         return [f for f in self.context_files if self._context_owner.get(f.id) == assignment_id]
 
+    def _check_feedback_target(self, assignment: _Assignment, editing: uuid.UUID | None = None) -> None:
+        for other in self._registered(assignment.id):
+            if other.id == editing:
+                continue
+            if assignment.ai_mode == "FEEDBACK" or (
+                other.analysis_config.get("behavior") == "functional_test_feedback" and self._current_rubric(other.id)
+            ):
+                raise ConflictError("An assignment supports only one active Functional-test feedback target")
+
     def upsert_rubric(
         self,
         grading_target_id: uuid.UUID,
@@ -924,18 +956,16 @@ class InMemoryRepository(IGradingRepository):
         if grading_target_id not in self.grading_targets:
             raise NotFoundError(f"Grading target {grading_target_id} not found")
         target = self.grading_targets[grading_target_id]
+        assignment = self.assignments[target.assignment_id]
         if analysis_config is None:
             analysis_config, max_score = target.analysis_config, target.max_score
         check_target_fields(target.identifier, target.kind, max_score)
         analysis_config, max_score = check_target_analysis(
-            target.identifier, target.kind, self.assignments[target.assignment_id].language,
-            analysis_config, max_score, rubric=rubric_input,
+            target.identifier, target.kind, assignment.language,
+            analysis_config, max_score, rubric=rubric_input, ai_mode=assignment.ai_mode,
         )
-        if analysis_config.get("behavior") == "functional_test_feedback" and any(
-            other.id != target.id and other.analysis_config.get("behavior") == "functional_test_feedback"
-            and self._current_rubric(other.id) is not None for other in self._registered(target.assignment_id)
-        ):
-            raise ConflictError("An assignment supports only one active Functional-test feedback target")
+        if analysis_config.get("behavior") == "functional_test_feedback":
+            self._check_feedback_target(assignment, editing=target.id)
         target.analysis_config = analysis_config
         target.max_score = max_score
         current = self._current_rubric(grading_target_id)
