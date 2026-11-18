@@ -41,6 +41,86 @@
     <div><dt>{{ assignment.platform | title }} id</dt><dd><code>{{ assignment.platform_assignment_id }}</code></dd></div>
 </dl>
 
+<div class="title-row">
+    <h2>Submissions</h2>
+    <nav class="tabs" aria-label="View submissions">
+        <a href="/assignments/{{ assignment.id }}?cost_range={{ cost_period }}"{% if not by_target %} aria-current="page"{% endif %}>By student</a>
+        <a href="/assignments/{{ assignment.id }}?view=targets&amp;cost_range={{ cost_period }}"{% if by_target %} aria-current="page"{% endif %}>By target</a>
+        <a href="/assignments/{{ assignment.id }}/results">Results</a>
+    </nav>
+</div>
+{% if by_target %}
+<p class="hint">Each student's active attempt, counted under a target once the autograder has recorded a test result for it.</p>
+{% if target_summaries %}
+<div class="table-wrap">
+<table>
+    <thead>
+        <tr>
+            <th>Target</th>
+            <th class="num">Students</th>
+            <th>AI feedback</th>
+        </tr>
+    </thead>
+    <tbody>
+        {% for t in target_summaries %}
+        <tr>
+            <td>
+                <a href="/assignments/{{ assignment.id }}/targets/{{ t.id }}"><code class="target">{{ t.identifier }}</code></a>
+                <span class="badge muted">{{ t.kind | title }}</span>
+            </td>
+            <td class="num">{{ t.submission_count }}</td>
+            <td><div class="counts">
+                {% if t.done %}<span class="count done">{{ t.done }} feedback</span>{% endif %}
+                {% if t.failed %}<span class="count failed">{{ t.failed }} failed</span>{% endif %}
+                {% if t.waiting %}<span class="count waiting">{{ t.waiting }} waiting</span>{% endif %}
+                {% if t.opted_out %}<span class="count muted">{{ t.opted_out }} opted out</span>{% endif %}
+            </div></td>
+        </tr>
+        {% endfor %}
+    </tbody>
+</table>
+</div>
+{% else %}
+<p class="empty">No targets registered.</p>
+{% endif %}
+{% elif submissions %}
+<div class="table-wrap">
+<table>
+    <thead>
+        <tr>
+            <th>Student</th>
+            <th>Submitted</th>
+            <th>Status</th>
+            <th>AI result</th>
+        </tr>
+    </thead>
+    <tbody>
+        {% for s in submissions %}
+        {% set label, style = submission_state(s.action, assignment.grading_mode) %}
+        <tr{% if s.is_active_attempt is sameas false %} class="inactive"{% endif %}>
+            <td>
+                <a href="/submissions/{{ s.id }}">{{ s.student_identifier or "(unknown student)" }}</a>
+                {% if s.is_active_attempt is sameas false %}<span class="badge muted">Superseded</span>{% endif %}
+                <div class="sub">{{ s.platform_submission_id }}</div>
+            </td>
+            <td class="nowrap">{{ s.submitted_at | when }}</td>
+            <td><span class="badge {{ style }}">{{ label }}</span></td>
+            {% set ai_label, ai_style = ai_result_state(s.ai_status, assignment.targets, assignment.grading_mode, s.action) %}
+            <td>
+                <span class="badge {{ ai_style }}">{{ ai_label }}</span>
+                {% if assignment.grading_mode == "NIGHTLY" and s.action.value != "REEMIT" and s.ai_status == "FAILED" %}
+                <div class="sub">Previous AI attempt failed</div>
+                {% endif %}
+            </td>
+        </tr>
+        {% endfor %}
+    </tbody>
+</table>
+</div>
+{% else %}
+<p class="empty">No submissions yet.</p>
+{% endif %}
+
 {% if ai_mode_error %}<p class="form-error" role="alert">{{ ai_mode_error }}</p>{% endif %}
 {% if assignment.ai_mode or not assignment.targets %}
 <section id="targets" aria-labelledby="configuration-heading">
@@ -104,6 +184,84 @@
     </details>
     {% endif %}
 </section>
+{% else %}
+<h2 id="targets">Grading targets</h2>
+<p class="hint">
+    The instructor's test suite refers to targets by these identifiers, so
+    they must match it exactly (AD-3).
+</p>
+{% if delete_error %}<p class="form-error" role="alert">{{ delete_error }}</p>{% endif %}
+<div class="cards">
+    {% for t in assignment.targets %}
+    <section class="card">
+        <header>
+            <code class="target">{{ t.identifier }}</code>
+            <span class="badge muted">{{ t.kind | title }}</span>
+            {% if t.analysis_config.get('behavior') %}<span class="badge muted">{{ 'AI grading' if t.analysis_config.behavior == 'ai_grading' else 'Functional-test feedback' }}</span>{% endif %}
+            {% if t.max_score is not none %}<span class="score">{{ t.max_score | number }} {{ "pt" if t.max_score == 1 else "pts" }}</span>{% endif %}
+        </header>
+        {% if t.rubric %}
+        <h3>Common background <span class="sub">version {{ t.rubric.version }}</span></h3>
+        {{ long_text(t.rubric.criteria_text or "(no criteria)") }}
+        {% if t.analysis_config.get('shared_grading_rules') %}
+        <h3>Shared grading rubric</h3>
+        {{ long_text(t.analysis_config.shared_grading_rules) }}
+        {% endif %}
+        {% if t.analysis_config.get('grading_items') %}
+        <h3>Grading items</h3>
+        <ol>
+            {% for item in t.analysis_config.grading_items %}
+            <li><code>{{ item.id }}</code> — {{ item.points }} points{{ long_text(item.requirement) }}</li>
+            {% endfor %}
+        </ol>
+        {% endif %}
+        {% if t.rubric.feedback_guidance %}
+        <h3>Feedback guidance</h3>
+        {{ long_text(t.rubric.feedback_guidance) }}
+        {% endif %}
+        {% else %}
+        <p class="empty">No rubric yet. This target cannot be graded until it has one.</p>
+        {% endif %}
+        <div class="card-action">
+            <a href="/assignments/{{ assignment.id }}/targets/{{ t.id }}/rubric">{{ "Edit configuration" if t.rubric else "Configure target" }}</a>
+            {{ delete_target_form(t, 'Delete target') }}
+        </div>
+    </section>
+    {% endfor %}
+</div>
+
+<h3>Add a target</h3>
+{% if target_error %}<p class="form-error" role="alert">{{ target_error }}</p>{% endif %}
+<form class="card form inline" method="post" action="/assignments/{{ assignment.id }}/targets">
+    <label class="grow">
+        Identifier
+        <input name="identifier" value="{{ target_form.identifier or '' }}" required
+            placeholder="{{ 'edu.pitt.cs.Statistics#median' if assignment.language == 'JAVA' else 'calculator.py:add' if assignment.language == 'PYTHON' else 'src/main.ts' if assignment.language == 'TYPESCRIPT' else 'src/main.js' }}">
+    </label>
+    <label>
+        Kind
+        <select name="kind">
+            {% for kind in TARGET_KINDS %}
+            <option value="{{ kind }}" {% if target_form.kind == kind %}selected{% endif %}>{{ kind | title }}</option>
+            {% endfor %}
+        </select>
+    </label>
+    <label>
+        Behavior
+        <select name="behavior" required>
+            <option value="ai_grading" {% if target_form.behavior == 'ai_grading' %}selected{% endif %}>AI grading</option>
+            <option value="functional_test_feedback" {% if target_form.behavior == 'functional_test_feedback' %}selected{% endif %}>Functional-test feedback</option>
+        </select>
+    </label>
+    <label class="grow">
+        Primary source patterns (optional)
+        <textarea name="source_globs" rows="2" placeholder="src/**/*.java">{{ target_form.source_globs or '' }}</textarea>
+    </label>
+    <button type="submit">Continue to configuration</button>
+</form>
+<p class="hint">
+    Enter one source path or pattern per line, or leave this blank to locate the file from the target identifier.
+</p>
 {% endif %}
 
 <section id="gradescope-integration" aria-labelledby="integration-heading">
@@ -220,86 +378,6 @@
 {% endif %}
 </section>
 
-<div class="title-row">
-    <h2>Submissions</h2>
-    <nav class="tabs" aria-label="View submissions">
-        <a href="/assignments/{{ assignment.id }}?cost_range={{ cost_period }}"{% if not by_target %} aria-current="page"{% endif %}>By student</a>
-        <a href="/assignments/{{ assignment.id }}?view=targets&amp;cost_range={{ cost_period }}"{% if by_target %} aria-current="page"{% endif %}>By target</a>
-        <a href="/assignments/{{ assignment.id }}/results">Results</a>
-    </nav>
-</div>
-{% if by_target %}
-<p class="hint">Each student's active attempt, counted under a target once the autograder has recorded a test result for it.</p>
-{% if target_summaries %}
-<div class="table-wrap">
-<table>
-    <thead>
-        <tr>
-            <th>Target</th>
-            <th class="num">Students</th>
-            <th>AI feedback</th>
-        </tr>
-    </thead>
-    <tbody>
-        {% for t in target_summaries %}
-        <tr>
-            <td>
-                <a href="/assignments/{{ assignment.id }}/targets/{{ t.id }}"><code class="target">{{ t.identifier }}</code></a>
-                <span class="badge muted">{{ t.kind | title }}</span>
-            </td>
-            <td class="num">{{ t.submission_count }}</td>
-            <td><div class="counts">
-                {% if t.done %}<span class="count done">{{ t.done }} feedback</span>{% endif %}
-                {% if t.failed %}<span class="count failed">{{ t.failed }} failed</span>{% endif %}
-                {% if t.waiting %}<span class="count waiting">{{ t.waiting }} waiting</span>{% endif %}
-                {% if t.opted_out %}<span class="count muted">{{ t.opted_out }} opted out</span>{% endif %}
-            </div></td>
-        </tr>
-        {% endfor %}
-    </tbody>
-</table>
-</div>
-{% else %}
-<p class="empty">No targets registered.</p>
-{% endif %}
-{% elif submissions %}
-<div class="table-wrap">
-<table>
-    <thead>
-        <tr>
-            <th>Student</th>
-            <th>Submitted</th>
-            <th>Status</th>
-            <th>AI result</th>
-        </tr>
-    </thead>
-    <tbody>
-        {% for s in submissions %}
-        {% set label, style = submission_state(s.action, assignment.grading_mode) %}
-        <tr{% if s.is_active_attempt is sameas false %} class="inactive"{% endif %}>
-            <td>
-                <a href="/submissions/{{ s.id }}">{{ s.student_identifier or "(unknown student)" }}</a>
-                {% if s.is_active_attempt is sameas false %}<span class="badge muted">Superseded</span>{% endif %}
-                <div class="sub">{{ s.platform_submission_id }}</div>
-            </td>
-            <td class="nowrap">{{ s.submitted_at | when }}</td>
-            <td><span class="badge {{ style }}">{{ label }}</span></td>
-            {% set ai_label, ai_style = ai_result_state(s.ai_status, assignment.targets, assignment.grading_mode, s.action) %}
-            <td>
-                <span class="badge {{ ai_style }}">{{ ai_label }}</span>
-                {% if assignment.grading_mode == "NIGHTLY" and s.action.value != "REEMIT" and s.ai_status == "FAILED" %}
-                <div class="sub">Previous AI attempt failed</div>
-                {% endif %}
-            </td>
-        </tr>
-        {% endfor %}
-    </tbody>
-</table>
-</div>
-{% else %}
-<p class="empty">No submissions yet.</p>
-{% endif %}
-
 <h2 id="context">Assignment context</h2>
 <p class="hint">
     Added to every target's prompt as background. Changes apply to feedback generated from now on.
@@ -343,85 +421,5 @@
         </form>
     </section>
 </div>
-
-{% if not assignment.ai_mode and assignment.targets %}
-<h2 id="targets">Grading targets</h2>
-<p class="hint">
-    The instructor's test suite refers to targets by these identifiers, so
-    they must match it exactly (AD-3).
-</p>
-{% if delete_error %}<p class="form-error" role="alert">{{ delete_error }}</p>{% endif %}
-<div class="cards">
-    {% for t in assignment.targets %}
-    <section class="card">
-        <header>
-            <code class="target">{{ t.identifier }}</code>
-            <span class="badge muted">{{ t.kind | title }}</span>
-            {% if t.analysis_config.get('behavior') %}<span class="badge muted">{{ 'AI grading' if t.analysis_config.behavior == 'ai_grading' else 'Functional-test feedback' }}</span>{% endif %}
-            {% if t.max_score is not none %}<span class="score">{{ t.max_score | number }} {{ "pt" if t.max_score == 1 else "pts" }}</span>{% endif %}
-        </header>
-        {% if t.rubric %}
-        <h3>Common background <span class="sub">version {{ t.rubric.version }}</span></h3>
-        {{ long_text(t.rubric.criteria_text or "(no criteria)") }}
-        {% if t.analysis_config.get('shared_grading_rules') %}
-        <h3>Shared grading rubric</h3>
-        {{ long_text(t.analysis_config.shared_grading_rules) }}
-        {% endif %}
-        {% if t.analysis_config.get('grading_items') %}
-        <h3>Grading items</h3>
-        <ol>
-            {% for item in t.analysis_config.grading_items %}
-            <li><code>{{ item.id }}</code> — {{ item.points }} points{{ long_text(item.requirement) }}</li>
-            {% endfor %}
-        </ol>
-        {% endif %}
-        {% if t.rubric.feedback_guidance %}
-        <h3>Feedback guidance</h3>
-        {{ long_text(t.rubric.feedback_guidance) }}
-        {% endif %}
-        {% else %}
-        <p class="empty">No rubric yet. This target cannot be graded until it has one.</p>
-        {% endif %}
-        <div class="card-action">
-            <a href="/assignments/{{ assignment.id }}/targets/{{ t.id }}/rubric">{{ "Edit configuration" if t.rubric else "Configure target" }}</a>
-            {{ delete_target_form(t, 'Delete target') }}
-        </div>
-    </section>
-    {% endfor %}
-</div>
-
-<h3>Add a target</h3>
-{% if target_error %}<p class="form-error" role="alert">{{ target_error }}</p>{% endif %}
-<form class="card form inline" method="post" action="/assignments/{{ assignment.id }}/targets">
-    <label class="grow">
-        Identifier
-        <input name="identifier" value="{{ target_form.identifier or '' }}" required
-            placeholder="{{ 'edu.pitt.cs.Statistics#median' if assignment.language == 'JAVA' else 'calculator.py:add' if assignment.language == 'PYTHON' else 'src/main.ts' if assignment.language == 'TYPESCRIPT' else 'src/main.js' }}">
-    </label>
-    <label>
-        Kind
-        <select name="kind">
-            {% for kind in TARGET_KINDS %}
-            <option value="{{ kind }}" {% if target_form.kind == kind %}selected{% endif %}>{{ kind | title }}</option>
-            {% endfor %}
-        </select>
-    </label>
-    <label>
-        Behavior
-        <select name="behavior" required>
-            <option value="ai_grading" {% if target_form.behavior == 'ai_grading' %}selected{% endif %}>AI grading</option>
-            <option value="functional_test_feedback" {% if target_form.behavior == 'functional_test_feedback' %}selected{% endif %}>Functional-test feedback</option>
-        </select>
-    </label>
-    <label class="grow">
-        Primary source patterns (optional)
-        <textarea name="source_globs" rows="2" placeholder="src/**/*.java">{{ target_form.source_globs or '' }}</textarea>
-    </label>
-    <button type="submit">Continue to configuration</button>
-</form>
-<p class="hint">
-    Enter one source path or pattern per line, or leave this blank to locate the file from the target identifier.
-</p>
-{% endif %}
 
 {% endblock %}
