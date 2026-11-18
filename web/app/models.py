@@ -109,6 +109,9 @@ class Assignment(Base):
     )
 
     id: Mapped[uuid.UUID] = uuid_pk()
+    assignment_token: Mapped[uuid.UUID] = mapped_column(
+        Uuid, unique=True, server_default=func.gen_random_uuid(), deferred=True
+    )
     course_id: Mapped[uuid.UUID] = mapped_column(ForeignKey("course.id"), index=True)
     platform: Mapped[str] = mapped_column(Text)
     platform_assignment_id: Mapped[str] = mapped_column(Text)

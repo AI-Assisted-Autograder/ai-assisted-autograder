@@ -109,10 +109,17 @@ class JsonStore:
                 raise StoreError("worker_already_running") from None
             raw = self.path.read_bytes()
             data = json.loads(raw)
-            changed = data.get("schema_version") == 2
-            if changed:
-                data["schema_version"] = 3
+            version = data.get("schema_version")
+            changed = version in (2, 3)
+            if version == 2:
                 data["config"]["allowed_models"] = {"vertex": data["config"]["allowed_models"]}
+            if changed:
+                # Keep installed packages working; credentials already expired stay disabled.
+                now = utc_now()
+                for token in data["tokens"].values():
+                    if datetime.fromisoformat(token.pop("expires_at")) <= now:
+                        token["enabled"] = False
+                data["schema_version"] = 4
                 raw = json.dumps(data)
             self._state = State.model_validate_json(raw)
             if self._state.cost_tracking_started_at is None:
@@ -194,90 +201,45 @@ class JsonStore:
             if not isinstance(raw_token, str) or not 16 <= len(raw_token) <= 256:
                 raise StoreError("unauthorized", 401)
             token = self._state.tokens.get(token_hash(raw_token))
-            if (token is None or not token.enabled or token.revoked
-                    or token.expires_at <= utc_now()):
+            if token is None or not token.enabled or token.revoked:
                 raise StoreError("unauthorized", 401)
             assignment = self._state.assignments.get(token.assignment_id)
             if assignment is None or not assignment.enabled:
                 raise StoreError("assignment_forbidden", 403)
             return token.assignment_id
 
-    def get_assignment(self, assignment_id: str) -> AssignmentAccess:
-        with self._mutex:
-            self._ensure_open()
-            assignment = self._state.assignments.get(assignment_id)
-            if assignment is None or not assignment.enabled:
-                raise StoreError("assignment_forbidden", 403)
-            return assignment.model_copy(deep=True)
-
-    def add_assignment(self, assignment_id: str, access: AssignmentAccess,
-                       digest: str, token: TokenRecord) -> None:
-        """Append access records while holding the same lock as the Web worker."""
-        with self._mutex:
-            self._ensure_open()
-            if assignment_id in self._state.assignments or digest in self._state.tokens:
-                raise ValueError("assignment or token already exists")
-            if token.assignment_id != assignment_id:
-                raise ValueError("token assignment must match")
-            candidate = self._state.model_copy(deep=True)
-            candidate.assignments[assignment_id] = access.model_copy(deep=True)
-            candidate.tokens[digest] = token.model_copy(deep=True)
-            self._persist(candidate)
-            self._state = candidate
-
-    def assignment_token_status(self, assignment_id: str) -> dict[str, Any] | None:
-        """Summarize assignment access without returning credential material."""
+    def find_assignment_access(self, assignment_id: str) -> AssignmentAccess | None:
         with self._mutex:
             self._ensure_open()
             access = self._state.assignments.get(assignment_id)
-            if access is None:
-                return None
-            tokens = {digest: token for digest, token in self._state.tokens.items()
-                      if token.assignment_id == assignment_id}
-            records = sorted((digest, token.enabled, token.revoked, token.expires_at.isoformat())
-                             for digest, token in tokens.items())
-            version = hashlib.sha256(json.dumps([assignment_id, records]).encode()).hexdigest()
-            valid_tokens = [token for token in tokens.values() if token.enabled and not token.revoked]
-            unrevoked = [token for token in tokens.values() if not token.revoked]
-            # A legacy state may contain multiple credentials. Report when the last usable one expires.
-            summary_tokens = valid_tokens or unrevoked or tokens.values()
-            expires_at = max((token.expires_at.astimezone(timezone.utc) for token in summary_tokens), default=None)
-            if not access.enabled:
-                status = "disabled"
-            elif valid_tokens:
-                status = "active" if expires_at > utc_now() else "expired"
-            elif unrevoked:
-                status = "disabled"
-            else:
-                status = "revoked" if tokens else "missing"
-            return {"status": status, "expires_at": expires_at, "used_calls": access.used_calls,
-                    "max_calls": access.max_calls, "version": version, "can_replace": access.enabled}
+            return access.model_copy(deep=True) if access is not None else None
 
-    def issue_assignment_token(self, assignment_id: str, raw_token: str, *, valid_days: int,
-                               max_calls: int | None, expected_version: str | None) -> None:
-        """Create access once or replace the credentials the instructor reviewed."""
-        if type(valid_days) is not int or not 1 <= valid_days <= 365:
-            raise StoreError("invalid_token_policy", 422)
-        digest = token_hash(raw_token)
+    def get_assignment(self, assignment_id: str) -> AssignmentAccess:
+        access = self.find_assignment_access(assignment_id)
+        if access is None or not access.enabled:
+            raise StoreError("assignment_forbidden", 403)
+        return access
+
+    def ensure_assignment_token(self, assignment_id: str, raw_token: str, *, max_calls: int | None = None) -> None:
+        """Register the assignment's fixed database token, sharing any existing quota and history."""
         with self._mutex:
-            current = self.assignment_token_status(assignment_id)
-            if current is not None and not current["can_replace"]:
+            self._ensure_open()
+            access = self._state.assignments.get(assignment_id)
+            if access is not None and not access.enabled:
                 raise StoreError("assignment_disabled", 409)
-            if expected_version != (current["version"] if current else None) or digest in self._state.tokens:
-                raise StoreError("token_conflict", 409)
-            token = TokenRecord(assignment_id=assignment_id, expires_at=utc_now() + timedelta(days=valid_days))
-            if current is None:
-                if type(max_calls) is not int or not 1 <= max_calls <= 100_000:
-                    raise StoreError("invalid_token_policy", 422)
-                self.add_assignment(assignment_id, AssignmentAccess(max_calls=max_calls), digest, token)
+            digest = token_hash(raw_token)
+            token = self._state.tokens.get(digest)
+            if token is not None:
+                if token.assignment_id != assignment_id or token.revoked or not token.enabled:
+                    raise StoreError("token_conflict", 409)
                 return
-            if max_calls is not None:
-                raise StoreError("invalid_token_policy", 422)
             candidate = self._state.model_copy(deep=True)
-            for previous in candidate.tokens.values():
-                if previous.assignment_id == assignment_id:
-                    previous.revoked = True
-            candidate.tokens[digest] = token
+            if access is None:
+                if max_calls is not None and (type(max_calls) is not int or not 0 <= max_calls <= 100_000):
+                    raise StoreError("invalid_token_policy", 422)
+                candidate.assignments[assignment_id] = (AssignmentAccess() if max_calls is None
+                                                        else AssignmentAccess(max_calls=max_calls))
+            candidate.tokens[digest] = TokenRecord(assignment_id=assignment_id)
             self._persist(candidate)
             self._state = candidate
 

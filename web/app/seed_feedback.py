@@ -1,4 +1,4 @@
-"""Issue a private token and initialize runtime state for an existing DB assignment.
+"""Install an existing assignment's fixed token and initialize runtime state.
 
 No overwrite/reset mode exists. Stop Web before adding an assignment to existing
 state. This tool never prints a token or loads provider credentials.
@@ -6,10 +6,7 @@ state. This tool never prints a token or loads provider credentials.
 
 import argparse
 import json
-import math
-from datetime import timedelta
 from pathlib import Path
-import secrets
 from uuid import UUID
 
 from ai_grading.local_client import validate_backend_url
@@ -17,7 +14,7 @@ from ai_grading.local_client import validate_backend_url
 from .feedback_config import (
     AssignmentAccess, BackendConfig, State, TokenRecord,
 )
-from .feedback_store import JsonStore, StoreError, atomic_write, token_hash, utc_now
+from .feedback_store import JsonStore, StoreError, atomic_write, token_hash
 
 
 DEFAULT_LOCATION = "global"
@@ -31,7 +28,6 @@ def initialize(
     *,
     assignment_id: str,
     max_calls: int = 5,
-    expires_in_hours: float = 24.0,
     backend_url: str = DEFAULT_BACKEND_URL,
     project: str | None = None,
     location: str = DEFAULT_LOCATION,
@@ -44,11 +40,13 @@ def initialize(
     max_body_bytes: int | None = None,
     timeout_seconds: float | None = None,
 ) -> None:
-    """Issue private client files and initialize or append assignment access."""
-    assignment_id = str(UUID(assignment_id))
+    """Export the database token and initialize or append assignment access."""
+    from app.db import SessionLocal
+    from app.repository import SqlGradingRepository
+
+    assignment_uuid = UUID(assignment_id)
+    assignment_id = str(assignment_uuid)
     backend_url = validate_backend_url(backend_url)
-    if not math.isfinite(expires_in_hours) or not 0 < expires_in_hours <= 24 * 365:
-        raise ValueError("expiration must be between zero and one year")
     paths = tuple(Path(path).expanduser().absolute()
                   for path in (state_path, token_path, client_config_path))
     outputs = paths[1:] if add_assignment else paths
@@ -61,10 +59,7 @@ def initialize(
     }.items() if value is not None}
     if add_assignment and (engine_models or allowed_models or policy):
         raise ValueError("adding an assignment cannot replace backend policy")
-    raw_token = secrets.token_urlsafe(32)
-    access = AssignmentAccess(max_calls=max_calls)
-    token = TokenRecord(assignment_id=assignment_id,
-                        expires_at=utc_now() + timedelta(hours=expires_in_hours))
+    raw_token = SqlGradingRepository(SessionLocal).get_assignment_token(assignment_uuid)
     models = {key: list(value) for key, value in (engine_models or {}).items()}
     if allowed_models:
         models.setdefault("vertex", []).extend(allowed_models)
@@ -75,9 +70,12 @@ def initialize(
         (raw_token + "\n").encode("utf-8"),
         (json.dumps({"backend_url": backend_url.rstrip("/")}, indent=2) + "\n").encode("utf-8"),
     )
-    store = None
     if add_assignment:
         store = JsonStore(paths[0])
+        try:
+            store.ensure_assignment_token(assignment_id, raw_token, max_calls=max_calls)
+        finally:
+            store.close()
         payloads = client_payloads
     else:
         state = State(
@@ -85,8 +83,8 @@ def initialize(
                                  location=location if vertex else None,
                                  service_account=service_account if vertex else None,
                                  allowed_models=models, **policy),
-            assignments={assignment_id: access},
-            tokens={token_hash(raw_token): token},
+            assignments={assignment_id: AssignmentAccess(max_calls=max_calls)},
+            tokens={token_hash(raw_token): TokenRecord(assignment_id=assignment_id)},
         )
         payloads = (state.model_dump_json(indent=2).encode("utf-8") + b"\n", *client_payloads)
     created: list[Path] = []
@@ -94,20 +92,11 @@ def initialize(
         for path, payload in zip(outputs, payloads):
             atomic_write(path, payload, overwrite=False)
             created.append(path)
-        if store is not None:
-            store.add_assignment(assignment_id, access, token_hash(raw_token), token)
-    except Exception as exc:
-        if store is not None and isinstance(exc, StoreError):
-            # State replacement may have committed before its directory fsync failed.
-            # Retain the only copy of the new raw token until the state is checked.
-            raise
+    except Exception:
         # Only roll back files created by this invocation, never preexisting files.
         for path in created:
             path.unlink(missing_ok=True)
         raise
-    finally:
-        if store is not None:
-            store.close()
 
 
 def main() -> int:
@@ -118,9 +107,10 @@ def main() -> int:
     parser.add_argument("--assignment-id", required=True, type=UUID,
                         help="Existing database assignment UUID; does not create database rows")
     parser.add_argument("--add-assignment", action="store_true",
-                        help="Append to existing state; stop Web first and use new client file paths")
+                        help="Use existing state; stop Web first and choose new client file paths")
     parser.add_argument("--max-calls", type=int, default=5)
-    parser.add_argument("--expires-in-hours", type=float, default=24.0)
+    # Older provisioning commands supplied this option for rotating credentials.
+    parser.add_argument("--expires-in-hours", type=float, help=argparse.SUPPRESS)
     parser.add_argument("--backend-url", default=DEFAULT_BACKEND_URL)
     parser.add_argument("--project", help="Vertex project ID; required when enabling Vertex")
     parser.add_argument("--location", default=DEFAULT_LOCATION)
@@ -143,7 +133,7 @@ def main() -> int:
     try:
         initialize(args.state, args.token_file, args.client_config,
                    assignment_id=str(args.assignment_id),
-                   max_calls=args.max_calls, expires_in_hours=args.expires_in_hours,
+                   max_calls=args.max_calls,
                    backend_url=args.backend_url, project=args.project, location=args.location,
                    service_account=args.service_account, allowed_models=args.allowed_models,
                    engine_models=engine_models, add_assignment=args.add_assignment,
@@ -153,12 +143,11 @@ def main() -> int:
         parser.exit(2, "Initialization refused: an output already exists or paths overlap.\n")
     except StoreError as error:
         message = ("Stop Web before adding an assignment." if error.code == "worker_already_running"
-                   else "Existing state is unavailable; check its path and schema. "
-                        "Any new client files were retained; confirm assignment access before retrying.")
+                   else f"Assignment access could not be prepared: {error.code}.")
         parser.exit(2, message + "\n")
     except Exception:
         parser.exit(2, "Initialization failed: check paths and non-sensitive settings.\n")
-    action = "Added" if args.add_assignment else "Initialized"
+    action = "Prepared" if args.add_assignment else "Initialized"
     print(f"{action} runtime access for assignment {args.assignment_id}; private token written to the token file.")
     print("No token or Google credentials are included in this output.")
     return 0

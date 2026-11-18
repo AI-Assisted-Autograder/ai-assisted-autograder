@@ -784,6 +784,10 @@ class IGradingRepository(ABC):
         """Targets in display order with their current rubric, and providers."""
 
     @abstractmethod
+    def get_assignment_token(self, assignment_id: uuid.UUID) -> str:
+        """Read the private credential used to package this assignment's connector."""
+
+    @abstractmethod
     def get_pitt_settings(self) -> PittSettings:
         """Read the shared model and credential status without secret material."""
 

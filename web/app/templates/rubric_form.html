@@ -6,77 +6,34 @@
 {% block title %}{{ title }}{% endblock %}
 
 {% block content %}
-<style>#target-configuration [hidden] { display: none; }</style>
+<style>
+#target-configuration [hidden],
+#grading-items .grading-item:only-child .actions,
+#grading-items .grading-item:first-child [data-move="up"],
+#grading-items .grading-item:last-child [data-move="down"] { display: none; }
+.grading-item .row > label:last-child { flex: 0 1 6rem; }
+</style>
 <p class="crumbs"><a href="/">Assignments</a> / <a href="/assignments/{{ assignment.id }}">{{ assignment.name or assignment.platform_assignment_id }}</a> /</p>
 <h1>{{ title }}</h1>
-{% if legacy and target.rubric %}
-<p class="hint">Common background version {{ target.rubric.version }}. Changes to background or feedback guidance create a new version.</p>
-{% elif assignment.ai_mode == 'FEEDBACK' %}
-<p>Feedback is added to visible failed tests in their original Gradescope results. Scores stay the same. With no eligible failures, the model is skipped.</p>
-{% endif %}
 {% if error %}<p class="form-error" role="alert">{{ error }}</p>{% endif %}
 
 {% macro grading_item(item) %}
 <fieldset class="card grading-item">
     <input type="hidden" name="item_id" value="{{ item.id or '' }}">
-    <label>Scoring requirement
-        <textarea name="item_requirement" rows="3" maxlength="16000" required>{{ item.requirement or '' }}</textarea>
-    </label>
-    <label>Points
-        <input type="number" name="item_points" min="0.01" step="0.01" required value="{{ item.points if item.points is defined else '' }}">
-    </label>
+    <div class="row">
+        <label>Scoring requirement
+            <textarea name="item_requirement" rows="2" maxlength="16000" required>{{ item.requirement or '' }}</textarea>
+        </label>
+        <label>Points
+            <input type="number" name="item_points" min="0.01" step="0.01" required value="{{ item.points if item.points is defined else '' }}">
+        </label>
+    </div>
     <div class="actions">
         <button type="button" class="link" data-move="up">Move up</button>
         <button type="button" class="link" data-move="down">Move down</button>
         <button type="button" class="link danger" data-remove-item>Remove item</button>
     </div>
 </fieldset>
-{% endmacro %}
-
-{% macro evidence_fields(source) %}
-<fieldset class="card evidence-source">
-    <label>Report format
-        <select name="evidence_format" required>
-            {% if source.format and source.format != 'gradescope' %}
-            <option value="" disabled selected>{{ source.format }} is unsupported; remove or replace this source</option>
-            {% endif %}
-            <option value="gradescope">Gradescope results</option>
-        </select>
-    </label>
-    <label>Report path<input name="evidence_path" value="{{ source.path or '' }}" placeholder="results/results.json"></label>
-    <label>Evidence label<input name="evidence_label" value="{{ source.label or '' }}"></label>
-    <label>Included test patterns (one regular expression per line)
-        <textarea name="evidence_include" rows="2">{{ source.include or '' }}</textarea>
-    </label>
-    <button type="button" class="link danger" data-remove-source>Remove evidence source</button>
-</fieldset>
-{% endmacro %}
-
-{% macro grading_section() %}
-<fieldset {% if legacy %}data-behavior="ai_grading" {% if form.behavior != 'ai_grading' %}hidden disabled{% endif %}{% endif %}>
-    <label>Shared grading rules (optional)
-        <textarea name="shared_grading_rules" rows="3" maxlength="16000">{{ form.shared_grading_rules }}</textarea>
-    </label>
-    <p class="hint">Applies to every item in this target.</p>
-    {% if form.legacy_test_plan %}
-    <details><summary>Previous testplan</summary><pre>{{ form.legacy_test_plan }}</pre></details>
-    {% endif %}
-    <fieldset>
-        <legend>Grading items</legend>
-        <div id="grading-items">
-            {% for item in form.grading_items or [{}] %}{{ grading_item(item) }}{% endfor %}
-        </div>
-        <template id="grading-item-template">{{ grading_item({}) }}</template>
-        <button type="button" class="link" id="add-item">Add grading item</button>
-        <p>Target subtotal: <output id="grading-total">0</output> points</p>
-    </fieldset>
-</fieldset>
-{% endmacro %}
-
-{% macro guidance() %}
-<label>Feedback guidance (optional)
-    <textarea name="feedback_guidance" rows="3" maxlength="8000">{{ form.feedback_guidance }}</textarea>
-</label>
 {% endmacro %}
 
 <form id="target-configuration" class="card form" method="post">
@@ -94,109 +51,56 @@
     </label>
     {% endif %}
     <label>Student source files
-        <textarea name="source_globs" rows="3" placeholder="src/**/*.py">{{ form.source_globs }}</textarea>
+        <textarea name="source_globs" rows="3" placeholder="src/**/*">{{ form.source_globs }}</textarea>
     </label>
-    <p class="hint">Enter one file path or pattern per line, relative to the student's submission.</p>
-    {% if grading %}
-    <label class="choice"><input type="checkbox" id="use-evidence" name="use_evidence" value="1" {% if form.use_evidence %}checked{% endif %}>Use visible test results</label>
-    <fieldset id="test-selection" {% if not form.use_evidence %}hidden disabled{% endif %}>
-        <label>Test selection
-            <select id="evidence-selection" name="evidence_selection">
-                {% for value, text in [('all', 'All visible tests'), ('named', 'Specific test names'), ('custom', 'Custom reports or patterns')] %}
-                <option value="{{ value }}" {% if form.evidence_selection == value %}selected{% endif %}>{{ text }}</option>
-                {% endfor %}
-            </select>
-        </label>
-        <label id="test-names" {% if form.evidence_selection != 'named' %}hidden{% endif %}>Exact Gradescope test names (one per line)
-            <textarea name="test_names" rows="3">{{ form.test_names }}</textarea>
-        </label>
+    <p class="hint">Enter one file path or pattern per line, relative to the student's submission.
+        {% if target and not target.analysis_config.get('source_globs') %}Leave blank to keep the source selection for <code>{{ target.identifier }}</code>.{% endif %}
+    </p>
+
+    {% if grading or legacy %}
+    {% if legacy %}<fieldset data-behavior="ai_grading" {% if form.behavior != 'ai_grading' %}hidden disabled{% endif %}>{% endif %}
+    <label>Test evidence
+        <select id="evidence-selection" name="evidence_selection">
+            <option value="none" {% if form.evidence_selection == 'none' %}selected{% endif %}>Source only</option>
+            <option value="all" {% if form.evidence_selection == 'all' %}selected{% endif %}>All visible tests</option>
+            <option value="named" {% if form.evidence_selection == 'named' %}selected{% endif %}>Specific visible tests</option>
+            {% if form.has_custom_evidence %}
+            <option value="custom" {% if form.evidence_selection == 'custom' %}selected{% endif %}>Keep existing test selection</option>
+            {% endif %}
+        </select>
+    </label>
+    <label id="test-names" {% if form.evidence_selection != 'named' %}hidden{% endif %}>Gradescope test names (one per line)
+        <textarea name="test_names" rows="3">{{ form.test_names }}</textarea>
+    </label>
+    {% if legacy and form.legacy_test_plan %}
+    <details><summary>Previous testplan</summary><pre>{{ form.legacy_test_plan }}</pre></details>
+    {% endif %}
+    <fieldset>
+        <legend>Grading items</legend>
+        <details {% if form.shared_grading_rules %}open{% endif %}>
+            <summary>Shared grading rules (optional)</summary>
+            <textarea name="shared_grading_rules" aria-label="Shared grading rules" rows="3" maxlength="16000">{{ form.shared_grading_rules }}</textarea>
+        </details>
+        <div id="grading-items">
+            {% for item in form.grading_items or [{}] %}{{ grading_item(item) }}{% endfor %}
+        </div>
+        <template id="grading-item-template">{{ grading_item({}) }}</template>
+        <button type="button" class="link" id="add-item">Add grading item</button>
+        <p>Target subtotal: <output id="grading-total">0</output> points</p>
     </fieldset>
+    {% if legacy %}</fieldset>{% endif %}
     {% endif %}
 
-    {% if grading or legacy %}{{ grading_section() }}{% else %}{{ guidance() }}{% endif %}
-
-    {% if legacy %}
-    <fieldset data-behavior="functional_test_feedback" {% if form.behavior != 'functional_test_feedback' %}hidden disabled{% endif %}>
-        <label>Final functional result source
-            <select id="functional-result-source" name="functional_result_source" data-selected="{{ form.functional_result_source or '' }}" required>
-                {% for source in form.evidence_sources if source.format == 'gradescope' and source.path == 'results/results.json' %}
-                <option value="{{ source.label }}" {% if form.functional_result_source == source.label %}selected{% endif %}>{{ source.label }}</option>
-                {% endfor %}
-            </select>
-        </label>
-        <p class="hint">Choose the final Gradescope report covering all visible failed tests.</p>
-    </fieldset>
-    {% endif %}
-
-    {% if grading or legacy or target %}
-    <details id="advanced" {% if legacy or (grading and form.use_evidence and form.evidence_selection == 'custom') %}open{% endif %}>
-        <summary>Advanced options</summary>
-        <fieldset>
-            {% if grading and not target and assignment.language | upper in ['JAVA', 'PYTHON'] %}
-            <label>Locate source by
-                <select name="kind">
-                    {% for value, text in [('FILE', 'File paths or patterns'), ('CLASS', 'Class name'), ('METHOD', 'Method name')] %}
-                    <option value="{{ value }}" {% if form.kind == value %}selected{% endif %}>{{ text }}</option>
-                    {% endfor %}
-                </select>
-            </label>
-            <p class="hint">To locate a class or method's file by its identifier, use that identifier as the target name and leave the file paths blank.</p>
-            {% elif target and target.kind != 'FILE' %}
-            <p class="hint">Source locator: {{ target.kind | lower }} identifier <code>{{ target.identifier }}</code>.</p>
-            {% endif %}
-            <label>Additional context files
-                <textarea name="context_globs" rows="2">{{ form.context_globs }}</textarea>
-            </label>
-            <label>Maximum primary files
-                <input name="max_source_files" type="number" min="1" max="64" value="{{ form.max_source_files if form.max_source_files is not none else '' }}">
-            </label>
-            {% if grading or legacy %}
-            <fieldset {% if legacy %}data-behavior="ai_grading" {% if form.behavior != 'ai_grading' %}hidden disabled{% endif %}{% endif %}>
-                <label>Set all item points
-                    <input id="uniform-points" type="number" min="0.01" step="0.01">
-                </label>
-                <button type="button" class="link" id="apply-points">Apply to all items</button>
-            </fieldset>
-            <label>Evaluation focus
-                <select name="analysis_mode">
-                    {% for value, text in [('code_feedback', 'Code requirements'), ('testplan', 'Testplan adherence'), ('test_quality', 'Test quality')] %}
-                    <option value="{{ value }}" {% if form.analysis_mode == value %}selected{% endif %}>{{ text }}</option>
-                    {% endfor %}
-                </select>
-            </label>
-            {{ guidance() }}
-            {% endif %}
-            {% if legacy or form.custom_background %}
-            <label>Target background
-                <textarea name="criteria_text" rows="3" maxlength="16000">{{ form.criteria_text }}</textarea>
-            </label>
-            {% endif %}
-            {% if legacy or form.test_plan %}
-            <label>Public context for this target
-                <textarea name="test_plan" rows="3" maxlength="64000">{{ form.test_plan }}</textarea>
-            </label>
-            {% endif %}
-            {% if grading or legacy %}
-            <fieldset id="custom-evidence" {% if grading and not (form.use_evidence and form.evidence_selection == 'custom') %}hidden disabled{% endif %}>
-                <legend>Runtime evidence sources</legend>
-                <div id="evidence-sources">
-                    {% for source in form.evidence_sources or [{}] %}{{ evidence_fields(source) }}{% endfor %}
-                </div>
-                <template id="evidence-source-template">{{ evidence_fields({}) }}</template>
-                <button type="button" class="link" id="add-source">Add evidence source</button>
-            </fieldset>
-            {% endif %}
-            <label>Temperature (optional)
-                <input type="number" name="temperature" min="0" max="2" step="any" value="{{ form.temperature }}">
-            </label>
-            {% if target %}
-            <label class="choice"><input type="checkbox" name="new_ai_attempt" value="1" {% if form.new_ai_attempt == '1' %}checked{% endif %}>
-                Start a new AI attempt for all targets on the next Gradescope run
-            </label>
-            {% endif %}
-        </fieldset>
+    {% if not grading %}
+    {% if legacy %}<fieldset data-behavior="functional_test_feedback" {% if form.behavior != 'functional_test_feedback' %}hidden disabled{% endif %}>{% endif %}
+    <p class="hint">Feedback explains visible failed tests in their original Gradescope results. Scores stay the same.</p>
+    <details {% if form.feedback_guidance %}open{% endif %}>
+        <summary>Feedback guidance (optional)</summary>
+        <textarea name="feedback_guidance" aria-label="Feedback guidance" rows="3" maxlength="8000">{{ form.feedback_guidance }}</textarea>
     </details>
+    {% if legacy %}</fieldset>{% endif %}
     {% endif %}
+
     <div class="actions">
         <button type="submit">Save {{ 'grading target' if grading else 'feedback settings' if not legacy else 'configuration' }}</button>
         <a href="/assignments/{{ assignment.id }}#targets">Back to assignment</a>
@@ -215,18 +119,11 @@
             show(section, section.dataset.behavior === behavior.value);
         }));
     }
-    const useEvidence = document.getElementById('use-evidence');
-    if (useEvidence) {
-        const selection = document.getElementById('evidence-selection');
-        function updateSelection() {
-            show(document.getElementById('test-selection'), useEvidence.checked);
+    const selection = document.getElementById('evidence-selection');
+    if (selection) {
+        selection.addEventListener('change', () => {
             document.getElementById('test-names').hidden = selection.value !== 'named';
-            const custom = useEvidence.checked && selection.value === 'custom';
-            show(document.getElementById('custom-evidence'), custom);
-            if (custom) document.getElementById('advanced').open = true;
-        }
-        useEvidence.addEventListener('change', updateSelection);
-        selection.addEventListener('change', updateSelection);
+        });
     }
     const items = document.getElementById('grading-items');
     if (items) {
@@ -251,40 +148,7 @@
             items.append(document.getElementById('grading-item-template').content.cloneNode(true));
             updateTotal();
         });
-        document.getElementById('apply-points').addEventListener('click', () => {
-            const points = document.getElementById('uniform-points');
-            if (!points.value || !points.reportValidity()) return;
-            items.querySelectorAll('[name="item_points"]').forEach(input => { input.value = points.value; });
-            updateTotal();
-        });
         updateTotal();
-    }
-    const sources = document.getElementById('evidence-sources');
-    if (sources) {
-        const resultSource = document.getElementById('functional-result-source');
-        function updateSources() {
-            if (!resultSource) return;
-            const selected = resultSource.value || resultSource.dataset.selected;
-            resultSource.replaceChildren(new Option('Choose the final Gradescope report', ''));
-            sources.querySelectorAll('.evidence-source').forEach(source => {
-                const format = source.querySelector('[name="evidence_format"]').value;
-                const path = source.querySelector('[name="evidence_path"]').value;
-                const label = source.querySelector('[name="evidence_label"]').value;
-                if (format === 'gradescope' && path === 'results/results.json' && label) {
-                    resultSource.add(new Option(label, label, false, label === selected));
-                }
-            });
-        }
-        sources.addEventListener('input', updateSources);
-        sources.addEventListener('click', event => {
-            const button = event.target.closest('[data-remove-source]');
-            if (button) { button.closest('.evidence-source').remove(); updateSources(); }
-        });
-        document.getElementById('add-source').addEventListener('click', () => {
-            sources.append(document.getElementById('evidence-source-template').content.cloneNode(true));
-            updateSources();
-        });
-        updateSources();
     }
 })();
 </script>

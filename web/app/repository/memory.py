@@ -90,6 +90,7 @@ class _Assignment:
     course_id: uuid.UUID | None = None
     context_notes: str | None = None
     ai_mode: str | None = None
+    assignment_token: uuid.UUID = field(default_factory=uuid.uuid4, repr=False)
 
 
 @dataclass
@@ -443,6 +444,12 @@ class InMemoryRepository(IGradingRepository):
             return False
         sub.ai_graded_submitted_at = sub.submitted_at
         return True
+
+    def get_assignment_token(self, assignment_id: uuid.UUID) -> str:
+        assignment = self.assignments.get(assignment_id)
+        if assignment is None:
+            raise NotFoundError(f"Assignment {assignment_id} not found")
+        return str(assignment.assignment_token)
 
     def get_assignment_config(self, assignment_id: uuid.UUID) -> AssignmentConfig:
         a = self.assignments.get(assignment_id)

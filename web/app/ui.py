@@ -15,7 +15,7 @@ import zipfile
 from datetime import datetime
 from decimal import Decimal, InvalidOperation, ROUND_CEILING
 from pathlib import Path
-from typing import Annotated, Literal
+from typing import Annotated
 
 from fastapi import APIRouter, Depends, Form, HTTPException, Request
 from fastapi.concurrency import run_in_threadpool
@@ -28,7 +28,7 @@ from app.assignment_context import MAX_FILES, MAX_TOTAL_CHARS, MAX_UPLOAD_BYTES,
 from app.auth import InstructorAccount, require_instructor
 from app.config import settings
 from app.db import SessionLocal
-from app.feedback_config import AI_MODE_BEHAVIORS, RubricInput
+from app.feedback_config import AI_MODE_BEHAVIORS, AssignmentAccess, RubricInput
 from app.feedback_store import COST_PERIODS, StoreError
 from app.models import AI_MODES, GRADING_MODES, TARGET_KINDS
 from app.pitt_settings import PITT_MODELS, encrypt_pitt_key, resolve_form_key, validate_pitt_model
@@ -368,8 +368,7 @@ def assignment_page(
     delete_error: str | None = None,
     context_error: str | None = None,
     context_form: dict | None = None,
-    token_error: str | None = None,
-    token_form: dict | None = None,
+    connector_error: str | None = None,
     ai_mode_error: str | None = None,
 ):
     by_target = view == "targets"
@@ -385,19 +384,22 @@ def assignment_page(
     cost_period = request.query_params.get("cost_range", "7d")
     if cost_period not in COST_PERIODS:
         cost_period = "7d"
-    token_status = cost_summary = None
-    setup_error = None
+    cost_summary = access = None
+    connector_ready = False
     try:
         if store is not None:
-            token_status = store.assignment_token_status(str(assignment_id))
             cost_summary = store.cost_summary(str(assignment_id), period=cost_period)
+            access = store.find_assignment_access(str(assignment_id))
         connector_origin(request, config.is_active)
+        connector_ready = access is None or access.enabled
+        if not connector_ready:
+            connector_error = "Connector access is disabled for this assignment."
         if "token_csrf" not in request.session:
             request.session["token_csrf"] = secrets.token_urlsafe(32)
     except HTTPException as error:
-        setup_error = error.detail
+        connector_error = error.detail
     except StoreError:
-        setup_error = "The feedback service is unavailable. Reload the page after service is restored."
+        connector_error = "The feedback service is unavailable."
     return templates.TemplateResponse(
         request,
         "assignment.html",
@@ -407,10 +409,10 @@ def assignment_page(
             "grading_points": sum((t.max_score for t in config.targets if t.max_score is not None), Decimal(0)),
             "ai_mode_error": ai_mode_error,
             "cost_summary": cost_summary,
-            "token_status": token_status,
-            "token_setup_error": setup_error,
-            "token_error": token_error,
-            "token_form": token_form or {},
+            "connector_error": connector_error,
+            "connector_ready": connector_ready,
+            "connector_access": access,
+            "default_max_calls": AssignmentAccess().max_calls,
             "token_csrf": request.session.get("token_csrf", ""),
             "cost_period": cost_period,
             "cost_periods": COST_PERIODS,
@@ -456,57 +458,32 @@ def set_ai_mode(
     return see_other(f"/assignments/{assignment_id}/targets/new")
 
 
-@router.post("/assignments/{assignment_id}/token/{action}")
+@router.post("/assignments/{assignment_id}/connector.zip")
 def download_assignment_connector(
     request: Request,
     assignment_id: uuid.UUID,
-    action: Literal["issue", "replace"],
-    valid_days: Annotated[str, Form()] = "",
-    max_calls: Annotated[str, Form()] = "",
-    expected_version: Annotated[str, Form()] = "",
-    confirm_replace: Annotated[str, Form()] = "",
+    max_calls: Annotated[int | None, Form(ge=1, le=100_000)] = None,
     csrf_token: Annotated[str, Form()] = "",
     repo: IGradingRepository = Depends(get_repository),
 ):
-    def form_failure(message: str, status: int):
-        return assignment_page(request, repo, assignment_id, token_error=message, status_code=status,
-                               token_form={"valid_days": valid_days, "max_calls": max_calls})
-
     try:
         assignment = repo.get_assignment_config(assignment_id)
         origin = connector_origin(request, assignment.is_active)
+        expected = request.session.get("token_csrf")
+        if not expected or not secrets.compare_digest(expected.encode(), csrf_token.encode()):
+            raise HTTPException(403, "Your session changed. Download the connector again.")
+        token = repo.get_assignment_token(assignment_id)
+        content = connector_archive(origin, token)
+        request.app.state.feedback_store.ensure_assignment_token(str(assignment_id), token, max_calls=max_calls)
     except NotFoundError:
         return not_found(request, "That assignment does not exist.")
     except HTTPException as error:
-        return form_failure(error.detail, error.status_code)
-    session_token = request.session.get("token_csrf")
-    if not session_token or not secrets.compare_digest(session_token.encode(), csrf_token.encode()):
-        return form_failure("Your session changed. Review this form and submit it again.", 403)
-    if action == "replace" and (not expected_version or confirm_replace != "yes"):
-        return form_failure("Confirm replacement of the current token before downloading.", 400)
-    if action == "issue" and expected_version:
-        return form_failure("Review the current token status before submitting this form.", 409)
-    try:
-        days = int(valid_days)
-        limit = int(max_calls) if max_calls else None
-    except ValueError:
-        return form_failure("Enter whole numbers for the validity period and call limit.", 400)
-
-    raw_token = secrets.token_urlsafe(32)
-    try:
-        content = connector_archive(origin, raw_token)
-        request.app.state.feedback_store.issue_assignment_token(
-            str(assignment_id), raw_token, valid_days=days, max_calls=limit, expected_version=expected_version or None,
-        )
-    except OSError:
-        return form_failure("The connector scripts could not be packaged. Check the Web installation.", 503)
-    except StoreError as error:
-        message = {
-            "token_conflict": "The token has changed. Review the current status before replacing it.",
-            "assignment_disabled": "Token access is disabled for this assignment.",
-            "invalid_token_policy": "Use 1–365 days and an initial call limit of 1–100,000. Replacement keeps the existing limit.",
-        }.get(error.code, "The feedback service is unavailable. Reload the page before trying again.")
-        return form_failure(message, error.status_code)
+        return assignment_page(request, repo, assignment_id, status_code=error.status_code,
+                               connector_error=error.detail)
+    except (StoreError, OSError) as error:
+        status = error.status_code if isinstance(error, StoreError) else 503
+        return assignment_page(request, repo, assignment_id, status_code=status,
+                               connector_error="Connector download is unavailable for this assignment.")
     file_id = re.sub(r"[^A-Za-z0-9_-]", "_", assignment.platform_assignment_id)[:100]
     return Response(content, media_type="application/zip", headers={
         "Content-Disposition": f'attachment; filename="gradescope-ai-{file_id}.zip"',
@@ -658,9 +635,9 @@ TARGET_BACKGROUND = {
 
 
 def evidence_selection(sources):
-    """Present exact-name filters as names; keep other expressions in the custom editor."""
+    """Show exact test names when the existing report filters can be edited as names."""
     if not sources:
-        return "all", ""
+        return "none", ""
     if len(sources) != 1 or sources[0]["format"] != "gradescope" or sources[0]["path"] != FINAL_RESULTS:
         return "custom", ""
     names = []
@@ -680,16 +657,10 @@ def rubric_form(ai_mode, target):
     behavior = AI_MODE_BEHAVIORS.get(ai_mode) or analysis.get("behavior")
     if not behavior:
         behavior = "ai_grading" if target.max_score is not None else "functional_test_feedback"
-    criteria = (rubric and rubric.criteria_text) or ""
     return {
         "identifier": target.identifier if target else "",
-        "kind": target.kind if target else "FILE",
         "behavior": behavior,
-        "criteria_text": criteria,
-        "custom_background": bool(criteria and criteria != TARGET_BACKGROUND[behavior]),
         "feedback_guidance": (rubric and rubric.feedback_guidance) or "",
-        "analysis_mode": analysis.get("mode", "code_feedback"),
-        "functional_result_source": analysis.get("functional_result_source"),
         "shared_grading_rules": analysis.get("shared_grading_rules", ""),
         "grading_items": analysis.get("grading_items") or [
             {"id": identifier, "requirement": "", "points": analysis.get("points_per_test")}
@@ -697,35 +668,29 @@ def rubric_form(ai_mode, target):
         ],
         "legacy_test_plan": analysis.get("test_plan", "") if not analysis.get("behavior") else "",
         "source_globs": "\n".join(analysis.get("source_globs", [])),
-        "context_globs": "\n".join(analysis.get("context_globs", [])),
-        "test_plan": analysis.get("test_plan", ""),
-        "max_source_files": analysis.get("max_source_files"),
-        "temperature": "" if analysis.get("temperature") is None else str(analysis["temperature"]),
-        "evidence_sources": [{**source, "include": "\n".join(source.get("include", []))} for source in sources],
-        "use_evidence": bool(sources),
         "evidence_selection": selection,
+        "has_custom_evidence": selection == "custom",
         "test_names": names,
     }
 
 
-def target_evidence(form, ai_mode, previous):
-    if ai_mode == "GRADING" and not form["use_evidence"]:
-        return []
-    if not ai_mode or (ai_mode == "GRADING" and form["evidence_selection"] == "custom"):
-        sources = [{**source, "include": [line for line in source["include"].splitlines() if line.strip()]}
-                   for source in form["evidence_sources"]]
-        if ai_mode and not sources:
-            raise ValueError("Add at least one custom evidence source")
-        return sources
+def target_evidence(form, behavior, sources):
     include = []
-    if ai_mode == "GRADING" and form["evidence_selection"] == "named":
-        include = [f"^{re.escape(name)}$" for name in form["test_names"].splitlines() if name.strip()]
-        if not include:
-            raise ValueError("Enter at least one visible test name")
+    if behavior == "ai_grading":
+        selection = form["evidence_selection"]
+        if selection == "none":
+            return []
+        if selection == "custom" and form["has_custom_evidence"]:
+            return sources
+        if selection == "named":
+            include = [f"^{re.escape(name)}$" for name in form["test_names"].splitlines() if name.strip()]
+            if not include:
+                raise ValueError("Enter at least one visible test name")
+        elif selection != "all":
+            raise ValueError("Choose a test evidence option")
     label = DEFAULT_EVIDENCE_LABEL
-    old_sources = previous.get("evidence_sources", [])
-    if len(old_sources) == 1 and old_sources[0]["path"] == FINAL_RESULTS:
-        label = old_sources[0]["label"]
+    if len(sources) == 1 and sources[0]["format"] == "gradescope" and sources[0]["path"] == FINAL_RESULTS:
+        label = sources[0]["label"]
     return [{"format": "gradescope", "path": FINAL_RESULTS, "label": label, "include": include}]
 
 
@@ -735,24 +700,17 @@ def target_analysis(form, ai_mode, target):
         raise ValueError("Choose AI grading or Functional-test feedback")
     previous = target.analysis_config if target else {}
     source_globs = [line for line in form["source_globs"].splitlines() if line.strip()]
-    kind = target.kind if target else form["kind"]
-    if ai_mode and kind == "FILE" and not source_globs and (not target or previous.get("source_globs")):
+    if ai_mode and not source_globs and (not target or (target.kind == "FILE" and previous.get("source_globs"))):
         raise ValueError("Enter the student source files for this configuration")
 
-    analysis = {
-        "behavior": behavior,
-        "mode": form["analysis_mode"],
-        "source_globs": source_globs,
-        "context_globs": [line for line in form["context_globs"].splitlines() if line.strip()],
-        "test_plan": form["test_plan"],
-        "attempt_id": (str(uuid.uuid4()) if form.get("new_ai_attempt") == "1"
-                       else previous.get("attempt_id")),
-        "max_source_files": int(form["max_source_files"]) if form["max_source_files"] else None,
-        "evidence_sources": target_evidence(form, ai_mode, previous),
-    }
-    temperature = parse_score(form["temperature"], "temperature")
-    analysis["temperature"] = float(temperature) if temperature is not None else None
+    # Keep the target's stored collection and model settings when editing its visible fields.
+    analysis = dict(previous, behavior=behavior, source_globs=source_globs,
+                    evidence_sources=target_evidence(form, behavior, previous.get("evidence_sources", ())))
+    # Explicit behaviors use grading items instead of legacy per-test scoring.
+    analysis.pop("expected_tests", None)
+    analysis.pop("points_per_test", None)
     if behavior == "ai_grading":
+        analysis.pop("functional_result_source", None)
         if not form["grading_items"]:
             raise ValueError("Add at least one grading item")
         analysis["shared_grading_rules"] = form["shared_grading_rules"]
@@ -763,9 +721,10 @@ def target_analysis(form, ai_mode, target):
                 raise ValueError("Item points must be positive with at most two decimal places")
             analysis["grading_items"].append({**item, "points": float(points)})
     else:
-        analysis["functional_result_source"] = (analysis["evidence_sources"][0]["label"] if ai_mode
-                                                else form["functional_result_source"])
-    return analysis, form["criteria_text"].strip() or TARGET_BACKGROUND[behavior]
+        analysis.pop("grading_items", None)
+        analysis.pop("shared_grading_rules", None)
+        analysis["functional_result_source"] = analysis["evidence_sources"][0]["label"]
+    return analysis
 
 
 @router.get("/assignments/{assignment_id}/targets/new")
@@ -795,10 +754,13 @@ async def configure_target(
     error, status = None, 200
     if request.method == "POST":
         data = await request.form()
-        form.update(data)
-        if config.ai_mode == "FEEDBACK" and target is None:
-            form["kind"] = "FILE"
-        form["use_evidence"] = data.get("use_evidence") == "1"
+        for field in ("identifier", "behavior", "source_globs", "shared_grading_rules", "evidence_selection",
+                      "test_names", "feedback_guidance"):
+            if field in data:
+                form[field] = data[field]
+        # Earlier forms omitted the selection when the evidence checkbox was off.
+        if "ai_mode" in data and "evidence_selection" not in data:
+            form["evidence_selection"] = "none"
         try:
             if config.ai_mode and data.get("ai_mode", config.ai_mode) != config.ai_mode:
                 raise ConflictError("The assignment AI mode changed. Reopen its configuration before saving.")
@@ -807,27 +769,26 @@ async def configure_target(
                 for item_id, requirement, points in zip(data.getlist("item_id"), data.getlist("item_requirement"),
                                                        data.getlist("item_points"), strict=True)
             ]
-            form["evidence_sources"] = [
-                {"format": fmt, "path": path, "label": label, "include": include}
-                for fmt, path, label, include in zip(data.getlist("evidence_format"), data.getlist("evidence_path"),
-                                                    data.getlist("evidence_label"), data.getlist("evidence_include"),
-                                                    strict=True) if path.strip() or label.strip() or include.strip()
-            ]
             options = {}
-            criteria = form["criteria_text"]
+            rubric = target.rubric if target else None
+            guidance = form["feedback_guidance"]
             if target is None or "ai_mode" in data or "behavior" in data:
-                # An editor opened before migration submits the original report fields.
-                old_editor = target and "behavior" in data and "ai_mode" not in data
-                analysis, criteria = target_analysis(form, None if old_editor else config.ai_mode, target)
+                analysis = target_analysis(form, config.ai_mode, target)
                 options = {"analysis_config": analysis, "max_score": None}
+                criteria = rubric.criteria_text if rubric else TARGET_BACKGROUND[analysis["behavior"]]
+                if analysis["behavior"] == "ai_grading":
+                    guidance = (rubric and rubric.feedback_guidance) or ""
+            else:
+                # Older rubric-only callers update the rubric without replacing target configuration.
+                criteria = data.get("criteria_text", rubric.criteria_text if rubric else "")
             if target:
                 await run_in_threadpool(repo.upsert_rubric, target.id, criteria_text=criteria,
-                                        feedback_guidance=form["feedback_guidance"], **options)
+                                        feedback_guidance=guidance, **options)
             else:
                 identifier = "Functional test feedback" if config.ai_mode == "FEEDBACK" else form["identifier"]
                 await run_in_threadpool(repo.create_target, assignment_id, identifier=identifier,
-                                        kind=form["kind"],
-                                        rubric=RubricInput(criteria_text=criteria, feedback_guidance=form["feedback_guidance"]),
+                                        kind="FILE",
+                                        rubric=RubricInput(criteria_text=criteria, feedback_guidance=guidance),
                                         **options)
             return see_other(f"/assignments/{assignment_id}#targets")
         except NotFoundError:

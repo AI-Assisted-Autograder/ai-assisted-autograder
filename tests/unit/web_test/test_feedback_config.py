@@ -1,6 +1,6 @@
 
 import pytest
-from datetime import datetime, timedelta, timezone
+from datetime import datetime, timezone
 from pydantic import ValidationError
 
 from web.app.feedback_config import (
@@ -233,21 +233,10 @@ def test_assignment_access_rejects_negative_used_calls():
         AssignmentAccess(used_calls=-1)
 
 
-def test_token_requires_timezone_aware_expiration():
-    with pytest.raises(ValidationError, match="timezone"):
-        TokenRecord(
-            assignment_id="assignment-1",
-            expires_at=datetime(2030, 1, 1),
-        )
-
-
-def test_token_accepts_timezone_aware_expiration():
-    token = TokenRecord(
-        assignment_id="assignment-1",
-        expires_at=datetime.now(timezone.utc) + timedelta(days=1),
-    )
-
-    assert token.expires_at.tzinfo is not None
+def test_token_is_active_without_an_expiration():
+    token = TokenRecord(assignment_id="assignment-1")
+    assert token.enabled and not token.revoked
+    assert "expires_at" not in token.model_dump()
 
 
 # ---------------------------------------------------------------------------
@@ -329,11 +318,7 @@ def test_state_rejects_token_for_unknown_assignment():
             config=make_backend_config(),
             assignments={},
             tokens={
-                "a" * 64: TokenRecord(
-                    assignment_id="missing-assignment",
-                    expires_at=datetime.now(timezone.utc)
-                    + timedelta(days=1),
-                )
+                "a" * 64: TokenRecord(assignment_id="missing-assignment")
             },
         )
 
@@ -401,11 +386,7 @@ def test_state_accepts_consistent_records():
             )
         },
         tokens={
-            "b" * 64: TokenRecord(
-                assignment_id="assignment-1",
-                expires_at=datetime.now(timezone.utc)
-                + timedelta(days=1),
-            )
+            "b" * 64: TokenRecord(assignment_id="assignment-1")
         },
         requests={
             "assignment-1": {
@@ -414,7 +395,7 @@ def test_state_accepts_consistent_records():
         },
     )
 
-    assert state.schema_version == 3
+    assert state.schema_version == 4
     assert state.assignments["assignment-1"].used_calls == 1
 
 

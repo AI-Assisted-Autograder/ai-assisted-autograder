@@ -357,6 +357,13 @@ class SqlGradingRepository(IGradingRepository):
             )
             return completed_at is not None
 
+    def get_assignment_token(self, assignment_id: uuid.UUID) -> str:
+        with self._sessions() as session:
+            token = session.scalar(select(Assignment.assignment_token).where(Assignment.id == assignment_id))
+            if token is None:
+                raise NotFoundError(f"Assignment {assignment_id} not found")
+            return str(token)
+
     def get_assignment_config(self, assignment_id: uuid.UUID) -> AssignmentConfig:
         with self._sessions.begin() as s:
             # Targets, rubrics and the selected provider must describe one DB snapshot.

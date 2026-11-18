@@ -73,9 +73,9 @@
         </datalist>
     </label>
 
-    <fieldset>
-        <legend>Assignment context for the AI (optional)</legend>
-        <p class="hint">Added to every target's prompt, so feedback reflects the assignment as students saw it. You can change it later on the assignment page.</p>
+    <details {% if form.context_notes or error %}open{% endif %}>
+        <summary>Assignment context (optional)</summary>
+        <p class="hint">Add notes or materials for all targets now or later.</p>
         <label>
             Notes
             <textarea name="context_notes" rows="4" placeholder="What the assignment asks for, what students were taught, conventions to expect...">{{ form.context_notes or '' }}</textarea>
@@ -90,7 +90,7 @@
             Scanned PDFs without a text layer cannot be read.
             {% if error %}<strong>If you chose files, choose them again.</strong>{% endif %}
         </p>
-    </fieldset>
+    </details>
 
     <div class="actions">
         <button type="submit">Save and continue</button>

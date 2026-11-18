@@ -317,16 +317,8 @@ class AssignmentAccess(StrictModel):
 
 class TokenRecord(StrictModel):
     assignment_id: Identifier
-    expires_at: datetime
     enabled: bool = True
     revoked: bool = False
-
-    @field_validator("expires_at")
-    @classmethod
-    def require_timezone(cls, value: datetime) -> datetime:
-        if value.tzinfo is None or value.utcoffset() is None:
-            raise ValueError("expiration must include a timezone")
-        return value
 
 
 class RequestRecord(StrictModel):
@@ -367,7 +359,7 @@ class RequestRecord(StrictModel):
 
 
 class State(StrictModel):
-    schema_version: Literal[3] = 3
+    schema_version: Literal[4] = 4
     config: BackendConfig
     assignments: dict[Identifier, AssignmentAccess]
     tokens: dict[Digest, TokenRecord]

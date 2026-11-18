@@ -365,7 +365,7 @@ def test_add_target_unknown_assignment(client):
     assert response.status_code == 404
 
 
-def test_rubric_form_prefills_current_rubric(client, repo):
+def test_rubric_form_prefills_feedback_guidance(client, repo):
     aid = repo.add_assignment("IMMEDIATE", name="Calc")
     tid = repo.add_grading_target(aid, "add", 1)
     repo.add_rubric(tid, version=2, criteria_text="Returns the sum.", feedback_guidance="Be brief.")
@@ -373,9 +373,8 @@ def test_rubric_form_prefills_current_rubric(client, repo):
     response = client.get(f"/assignments/{aid}/targets/{tid}/rubric")
 
     assert response.status_code == 200
-    assert "Returns the sum.</textarea>" in response.text
+    assert 'name="criteria_text"' not in response.text
     assert "Be brief.</textarea>" in response.text
-    assert "Common background version 2" in response.text
 
 
 def test_save_rubric_creates_a_version(client, repo):
@@ -385,7 +384,6 @@ def test_save_rubric_creates_a_version(client, repo):
     response = client.post(
         f"/assignments/{aid}/targets/{tid}/rubric",
         data={
-            "criteria_text": "Calculator assignment.", "feedback_guidance": "",
             "behavior": "ai_grading", "source_globs": "calculator.py",
             "item_id": "sum", "item_requirement": "Returns the sum.", "item_points": "5",
         },
@@ -395,7 +393,7 @@ def test_save_rubric_creates_a_version(client, repo):
     assert response.status_code == 303
     target = repo.get_assignment_config(aid).targets[0]
     rubric = target.rubric
-    assert (rubric.version, rubric.criteria_text, rubric.feedback_guidance) == (1, "Calculator assignment.", None)
+    assert (rubric.version, rubric.feedback_guidance) == (1, None)
     assert target.max_score == Decimal("5")
     assert target.analysis_config["grading_items"] == (
         {"id": "sum", "requirement": "Returns the sum.", "points": 5.0},

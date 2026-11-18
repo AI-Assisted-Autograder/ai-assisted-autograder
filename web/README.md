@@ -160,9 +160,9 @@ export provider keys in the server process environment; loading Web settings fro
 At `/assignments/new`, choose **Grading** or **Feedback** and save. For Grading,
 add a target for each source scope and give each item a requirement and points.
 For Feedback, choose the source files and optionally add guidance for explaining
-visible failed tests. You can add assignment context later. Use **Gradescope
-integration** on the assignment page to issue or replace its token and download
-the connector ZIP.
+visible failed tests. You can add assignment context later. **Gradescope
+integration** downloads the connector ZIP with the fixed token generated when
+the assignment was created. Repeat downloads use the same token.
 
 | Endpoint | Authentication | Purpose |
 | --- | --- | --- |
@@ -359,7 +359,7 @@ separate AI process.
      --allow-model pitt:@YOUR_PROJECT/YOUR_MODEL \
      --max-code-chars 64000 --max-body-bytes 262144 \
      --max-output-tokens 16384 --timeout-seconds 240 \
-     --max-calls 10 --expires-in-hours 168
+     --max-calls 10
    ```
 
    Repeat `--allow-model ENGINE:MODEL` for each permitted pair. Use
@@ -442,12 +442,13 @@ configuration endpoint to confirm the selection.
 
 ### Current limits and separate-process use
 
-- Schema-2 state upgrades to schema 3 while retaining tokens, quotas and replay
-  results; schema-1 state is incompatible.
+- State files on schema 2 or 3 upgrade to schema 4. Existing active tokens keep
+  working without expiry, along with their quotas and replay history.
 - Pitt bypasses the upstream gateway cache. Backend replay remains in effect.
 - To run AI as a separate local process, set `ASSIGNMENT_API_URL` and
   `INTEGRATION_API_TOKEN`; see `python3 -m web.app.feedback --help` from the repository
-  root. Keep its state separate from the combined Web service. Export provider
+  root. Initialize its private state where the assignment database is accessible,
+  then transfer it to the separate process. Export provider
   credentials in the process environment; standalone Python does not load
   `web/.env`. API readers accept HTTPS or loopback HTTP origins only. The separate
   process supports the server-key setting; a saved Web key requires the combined
