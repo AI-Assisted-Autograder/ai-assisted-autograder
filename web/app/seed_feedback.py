@@ -11,6 +11,7 @@ from uuid import UUID
 
 from ai_grading.local_client import validate_backend_url
 
+from .feedback_assignment import connector_config
 from .feedback_config import (
     AssignmentAccess, BackendConfig, State, TokenRecord,
 )
@@ -28,7 +29,7 @@ def initialize(
     *,
     assignment_id: str,
     max_calls: int = 5,
-    backend_url: str = DEFAULT_BACKEND_URL,
+    backend_url: str | None = None,
     project: str | None = None,
     location: str = DEFAULT_LOCATION,
     service_account: str | None = None,
@@ -46,7 +47,6 @@ def initialize(
 
     assignment_uuid = UUID(assignment_id)
     assignment_id = str(assignment_uuid)
-    backend_url = validate_backend_url(backend_url)
     paths = tuple(Path(path).expanduser().absolute()
                   for path in (state_path, token_path, client_config_path))
     outputs = paths[1:] if add_assignment else paths
@@ -59,7 +59,13 @@ def initialize(
     }.items() if value is not None}
     if add_assignment and (engine_models or allowed_models or policy):
         raise ValueError("adding an assignment cannot replace backend policy")
-    raw_token = SqlGradingRepository(SessionLocal).get_assignment_token(assignment_uuid)
+    repository = SqlGradingRepository(SessionLocal)
+    assignment = repository.get_assignment_config(assignment_uuid)
+    if backend_url is None:
+        # The single-run endpoint needs the combined Web service's grading repository.
+        backend_url = "http://127.0.0.1:8000" if assignment.ai_mode == "GRADING" else DEFAULT_BACKEND_URL
+    client_config = connector_config(validate_backend_url(backend_url), assignment)
+    raw_token = repository.get_assignment_token(assignment_uuid)
     models = {key: list(value) for key, value in (engine_models or {}).items()}
     if allowed_models:
         models.setdefault("vertex", []).extend(allowed_models)
@@ -68,7 +74,7 @@ def initialize(
     vertex = "vertex" in models
     client_payloads = (
         (raw_token + "\n").encode("utf-8"),
-        (json.dumps({"backend_url": backend_url.rstrip("/")}, indent=2) + "\n").encode("utf-8"),
+        (json.dumps(client_config, indent=2) + "\n").encode("utf-8"),
     )
     if add_assignment:
         store = JsonStore(paths[0])
@@ -111,7 +117,7 @@ def main() -> int:
     parser.add_argument("--max-calls", type=int, default=5)
     # Older provisioning commands supplied this option for rotating credentials.
     parser.add_argument("--expires-in-hours", type=float, help=argparse.SUPPRESS)
-    parser.add_argument("--backend-url", default=DEFAULT_BACKEND_URL)
+    parser.add_argument("--backend-url", help="Backend origin reachable from the autograder; Grading uses the combined Web service")
     parser.add_argument("--project", help="Vertex project ID; required when enabling Vertex")
     parser.add_argument("--location", default=DEFAULT_LOCATION)
     parser.add_argument("--service-account", help="Impersonated service account; required when enabling Vertex")

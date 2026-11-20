@@ -136,10 +136,11 @@ uvicorn app.main:app --reload
 ## AI feedback API (database configuration)
 
 The Web Docker service reads assignment, target, rubric and the primary engine/model
-configuration from PostgreSQL. During a Gradescope autograder run, the hook sends
-submission metadata with each feedback request. The API then stores provider
-feedback and target completion in PostgreSQL; a final `ai-complete` call records
-the connector's aggregate outcome and sets the completion guard on success. JSON
+configuration from PostgreSQL. Grading runs submit functional results, student
+files and run metadata in a single request. Web records the functional results,
+selects each target's inputs, saves its feedback and records the overall outcome
+before returning the merged results. Feedback runs send submission metadata
+with each target request and report their outcome through `ai-complete`. JSON
 retains backend policy, assignment token hashes, call quota and replay responses.
 The backend supports three engines:
 
@@ -168,6 +169,7 @@ the assignment was created. Repeat downloads use the same token.
 | --- | --- | --- |
 | `POST /internal/assignments` | `X-Internal-Token` | Create an assignment, targets and current rubrics atomically |
 | `GET /internal/assignments/{id}/config` | `X-Internal-Token` | Read current AI configuration |
+| `POST /v1/grading/run` | Assignment Bearer token | Process one Grading run and return complete Gradescope `results` and private `ai_evidence` |
 | `POST /v1/feedback` | Assignment Bearer token | Generate and persist feedback for one submission target |
 | `POST /v1/submissions/{platform_submission_id}/ai-complete` | Assignment Bearer token | Record the whole execution's required `ai_status`: `SUCCEEDED` or `FAILED` |
 | `POST /v1/submissions/{platform_submission_id}/test-results` | Assignment Bearer token | Record one run's Gradescope test rows for the results dashboard; see below |
@@ -180,7 +182,19 @@ existing `course_id` or a new `course`; duplicate platform assignment IDs return
 requests. These are DB UUIDs, not Gradescope assignment numbers or filenames.
 Targets without a current rubric are excluded from AI execution.
 
-Before any AI call, the hook sends every row of `results.json` once to
+The Grading hook sends `run_id`, submission metadata, the original `results`,
+and a map of submission-relative file paths to UTF-8 text. Unreadable, non-UTF-8
+or oversized files carry a null value so only targets selecting them report a
+collection error. Additional configured Gradescope reports travel under `reports`.
+Uploads are limited to 32 MiB. If collection fails before transmission, the
+hook sends one POST with the available functional test rows and submission
+metadata. Web returns the configured pending items without spending quota.
+Web reserves space for the functional results and every configured grading row.
+Before each model call it ensures the full target response can be returned
+within the 256 MiB response limit. The usual
+per-target file, evidence and prompt limits apply after selection.
+
+For Feedback and legacy packages, the hook sends the functional rows before AI processing to
 `test-results` (`submission`, `run_id`, top-level `visibility`, and `tests`
 with each row's `name`, `status`, `score`, `max_score`, `output`, `visibility`).
 `app/run_results.py` maps rows to targets with each target's stored rules:
@@ -192,8 +206,9 @@ is opted out. Rows are stored per `run_id` (migration 0011), so repeating a run
 adds nothing and a rerun adds one fresh row per target. A failure here is
 logged and never stops the AI step.
 
-The connector reports `submission` metadata and `ai_status` to `ai-complete`
-after writing `results.json`. Any AI-processing failure in the execution makes
+The Feedback connector reports `submission` metadata and `ai_status` to `ai-complete`
+after writing `results.json`. The Grading endpoint records the same aggregate outcome
+after merging results. Any AI-processing failure in the execution makes
 the submission `FAILED`; a successful target cannot erase another target's
 failure. A fully successful rerun updates the same submission to `SUCCEEDED`,
 removing it from the failure list. Normal no-call cases succeed; failed student
@@ -290,14 +305,15 @@ Migration `0003` adds the provider engine; `0004` adds target analysis configura
 Migration `0007` adds submission AI outcomes and backfills existing target failures.
 The migration chain uses `0005` for instructors and `0006` for rerun audit statuses;
 verify deployed history before upgrading an installation previously labeled `0005`.
-The Web image applies migrations at startup. Packages contain only the backend
-URL in `config.json` and an assignment token, not a duplicated assignment JSON.
+The Web image applies migrations at startup. Both modes download the same scripts
+with an assignment token and a `config.json` containing the backend URL and mode.
+Grading packages also name any additional Gradescope report paths to upload.
 
 ### Request lifecycle
 
 The shared connector generates a fresh run UUID for each submission execution,
 including individual reruns and Regrade All. It combines this UUID with the
-submission ID when available, target inputs and the fetched configuration revision
+submission ID when available, target inputs and the assignment configuration revision
 to derive request IDs. Polling within a run reuses its request ID; an explicit
 `--run-id` supports intentional replay of the same submission and inputs.
 Rubric, analysis, model or prompt-version changes produce new request IDs on the
@@ -307,7 +323,7 @@ polling or replaying, subject to current assignment and target access.
 Legacy requests without a revision keep their original replay behavior; use a new
 request ID after changing their grading configuration.
 
-The standard-library client sends `Prefer: respond-async` and repeats the same
+The per-target client sends `Prefer: respond-async` and repeats the same
 POST after HTTP 202 until completion. Polling and completed-result replay consume
 no additional calls. Provider failures/timeouts retain their reserved calls.
 Default budgets are 240 seconds for generation, 270 seconds per client request
@@ -316,9 +332,13 @@ configuration and valid assignment access, including during replay.
 
 ### Deploy the combined Web and AI backend
 
-The team must provide public HTTPS to Web port 8000. The client uses short
-asynchronous polling requests; synchronous API callers need a proxy timeout longer
-than the configured generation timeout. Instructor pages require sign-in. The
+The team must provide public HTTPS to Web port 8000. Before switching a Grading
+package, verify the HTTPS route supports a single synchronous response across the
+whole hook budget (up to 300 seconds, including local work). After five seconds,
+Web streams a newline every five seconds and finishes with the JSON result.
+The proxy must flush the chunked `application/x-ndjson` response as it arrives. Configure the
+Gradescope assignment timeout to cover functional grading and the hook together.
+Feedback uses short asynchronous polling requests. Instructor pages require sign-in. The
 combined service reads SQL directly; `ASSIGNMENT_API_URL` is only needed for a
 separate AI process.
 
@@ -371,7 +391,7 @@ separate AI process.
    calls and independent trials. Copy the private client files into the matching
    package; keep provider credentials and generated upload archives out of Git.
 5. Set `FEEDBACK_STATE_PATH=/var/lib/ai-feedback/state.json` in `.env`, then run
-   `docker compose up -d --no-deps web`. Both assignment-token routes should appear
+   `docker compose up -d --no-deps web`. The assignment-token routes should appear
    in `/docs`. `/health` checks the DB, not provider access; verify an authenticated
    request with the [HTTP client](../ai_grading/README.md#use-the-backend),
    then the complete Gradescope flow.
@@ -383,7 +403,9 @@ Use one Web worker/container per state volume. For Web-issued packages, set
 recreate Web. Each ZIP includes that origin in `config.json`.
 For CLI provisioning, stop Web and run `seed_feedback --add-assignment` with
 the existing state path, the new assignment UUID and new client output paths.
-Additions inherit the existing model policy and limits.
+Additions inherit the existing model policy and limits. Set `--backend-url`
+to the public HTTPS origin for Gradescope. For local Grading the default is the
+combined Web service on loopback port 8000.
 
 ### Change engine or model
 

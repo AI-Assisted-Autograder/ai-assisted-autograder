@@ -30,7 +30,7 @@ The system has three main application components and a shared database.
 ### How the Components Work Together
 
 1. Instructors configure assignments, grading targets and rubrics through the Web forms.
-2. The autograder container fetches its assignment configuration from the backend, then sends source code and runtime evidence for AI feedback.
+2. In Grading mode the shared connector sends the functional results, submitted files and run metadata in one POST. Web selects each target's inputs and returns the complete Gradescope results. In Feedback mode the connector fetches the assignment configuration and requests explanations for eligible failed tests.
 3. The backend authenticates the assignment token, checks NIGHTLY authorization, enforces quota and calls the configured provider using DB-owned grading instructions.
 4. The container displays feedback and configured AI scores in Gradescope, preserving functional-test scores when AI is unavailable.
 

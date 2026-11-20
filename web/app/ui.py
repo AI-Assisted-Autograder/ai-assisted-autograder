@@ -28,6 +28,7 @@ from app.assignment_context import MAX_FILES, MAX_TOTAL_CHARS, MAX_UPLOAD_BYTES,
 from app.auth import InstructorAccount, require_instructor
 from app.config import settings
 from app.db import SessionLocal
+from app.feedback_assignment import connector_config
 from app.feedback_config import AI_MODE_BEHAVIORS, AssignmentAccess, RubricInput
 from app.feedback_store import COST_PERIODS, StoreError
 from app.models import AI_MODES, GRADING_MODES, TARGET_KINDS
@@ -346,13 +347,13 @@ def connector_origin(request: Request, active: bool) -> str:
         raise HTTPException(503, "Set FEEDBACK_PUBLIC_BASE_URL to a valid backend origin reachable from Gradescope.") from None
 
 
-def connector_archive(origin: str, raw_token: str) -> bytes:
+def connector_archive(config: dict, raw_token: str) -> bytes:
     scripts = Path(local_client.__file__).parent
     output = io.BytesIO()
     with zipfile.ZipFile(output, "w", compression=zipfile.ZIP_DEFLATED) as archive:
         for name in ("gradescope_feedback.py", "local_client.py"):
             archive.writestr(name, (scripts / name).read_bytes())
-        archive.writestr("config.json", json.dumps({"backend_url": origin}) + "\n")
+        archive.writestr("config.json", json.dumps(config) + "\n")
         archive.writestr("assignment.token", raw_token + "\n")
     return output.getvalue()
 
@@ -473,7 +474,7 @@ def download_assignment_connector(
         if not expected or not secrets.compare_digest(expected.encode(), csrf_token.encode()):
             raise HTTPException(403, "Your session changed. Download the connector again.")
         token = repo.get_assignment_token(assignment_id)
-        content = connector_archive(origin, token)
+        content = connector_archive(connector_config(origin, assignment), token)
         request.app.state.feedback_store.ensure_assignment_token(str(assignment_id), token, max_calls=max_calls)
     except NotFoundError:
         return not_found(request, "That assignment does not exist.")

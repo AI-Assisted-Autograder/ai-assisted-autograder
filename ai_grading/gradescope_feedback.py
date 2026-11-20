@@ -1,28 +1,43 @@
 """Collect configured evidence and append backend feedback to Gradescope results.
 
-This module and local_client.py use only the standard library. Assignment-specific
-file and report selection is read from the backend at the start of each run.
+The shared Gradescope hook uses only the standard library. Grading sends the
+submission once; Feedback collects the configured evidence in the container.
 """
 
 import argparse
+from contextlib import contextmanager
 from copy import deepcopy
 from datetime import datetime
 from decimal import Decimal
+from fnmatch import fnmatchcase
+from functools import lru_cache
 import hashlib
 import html
 import json
 import math
+import os
 from pathlib import Path, PurePosixPath
 import re
+import stat
 import sys
+import tempfile
 import textwrap
 import time
 import uuid
 
-from local_client import (
-    ClientError, ConfigChangedError, MAX_FILES_BYTES, complete_submission, get_assignment_config,
-    report_test_results, request_feedback, stable_request_id,
-)
+if __package__:
+    from . import local_client
+else:
+    import local_client
+
+ClientError = local_client.ClientError
+ConfigChangedError = local_client.ConfigChangedError
+MAX_FILES_BYTES = local_client.MAX_FILES_BYTES
+complete_submission = local_client.complete_submission
+get_assignment_config = local_client.get_assignment_config
+report_test_results = local_client.report_test_results
+request_feedback = local_client.request_feedback
+stable_request_id = local_client.stable_request_id
 
 
 MAX_ARTIFACT_BYTES = 2 * 1024 * 1024
@@ -57,18 +72,177 @@ def visible_rows(results):
             yield index, row
 
 
-def read_artifact(root, relative, limit=MAX_ARTIFACT_BYTES):
+@contextmanager
+def open_beneath(root, relative, flags):
+    """Follow in-tree links, then open the resolved components without following replacements."""
+    parts = (root / relative).resolve(strict=True).relative_to(root).parts
+    directory_flags = os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW
+    fd = os.open(root, directory_flags)
+    try:
+        for index, name in enumerate(parts):
+            mode = flags | os.O_NOFOLLOW if index == len(parts) - 1 else directory_flags
+            child = os.open(name, mode, dir_fd=fd)
+            os.close(fd)
+            fd = child
+        yield fd
+    finally:
+        os.close(fd)
+
+
+def read_artifact(root, relative, limit=MAX_ARTIFACT_BYTES, *, protected=None):
     path = PurePosixPath(relative)
     if path.is_absolute() or '..' in path.parts or '\\' in relative:
         raise ClientError("Artifact paths must stay inside the configured root.")
-    candidate = root / relative
-    candidate.resolve().relative_to(root.resolve())
-    if not candidate.is_file() or candidate.stat().st_size > limit:
-        raise ClientError("An expected artifact is missing or exceeds its size limit.")
-    return candidate.read_text(encoding="utf-8")
+    if protected is None:
+        candidate = root / relative
+        candidate.resolve().relative_to(root.resolve())
+        if not candidate.is_file() or candidate.stat().st_size > limit:
+            raise ClientError("An expected artifact is missing or exceeds its size limit.")
+        return candidate.read_text(encoding="utf-8")
+    base = root.absolute().parent.resolve() / root.absolute().name
+    with open_beneath(base, relative, os.O_RDONLY | os.O_NONBLOCK) as fd:
+        info = os.fstat(fd)
+        if (not stat.S_ISREG(info.st_mode) or info.st_size > limit
+                or (info.st_dev, info.st_ino) in protected):
+            raise ClientError("An expected artifact is missing or exceeds its size limit.")
+        with os.fdopen(fd, 'rb', closefd=False) as source:
+            raw = source.read(limit + 1)
+        if len(raw) > limit:
+            raise ClientError("An expected artifact exceeds its size limit.")
+        return raw.decode('utf-8').replace('\r\n', '\n').replace('\r', '\n')
+
+
+def private_artifact_ids(root):
+    identities = set()
+    for name in ('source/assignment.token', 'source/config.json', 'submission_metadata.json', 'results/ai_evidence.json'):
+        try:
+            info = (root / name).stat()
+        except FileNotFoundError:
+            continue
+        identities.add((info.st_dev, info.st_ino))
+    return identities
+
+
+def inventory_submission(submission, deadline=None):
+    """Upload only regular submitted files, preserving unreadable matches as null."""
+    if submission.is_symlink():
+        raise ClientError('The submission root must be a directory in the autograder.')
+    if not submission.is_dir():
+        return {}, []
+    base = submission.parent.resolve(strict=True) / submission.name
+    protected = private_artifact_ids(submission.parent)
+    files, symlink_dirs = {}, []
+    size = entries = 0
+    pending = [(base, frozenset({base}))]
+
+    def children(directory):
+        try:
+            with open_beneath(base, directory.relative_to(base), os.O_RDONLY | os.O_DIRECTORY) as fd:
+                with os.scandir(fd) as entries:
+                    yield from entries
+        except (FileNotFoundError, NotADirectoryError, PermissionError, RuntimeError, ValueError):
+            return
+
+    while pending:
+        directory, ancestors = pending.pop()
+        for entry in children(directory):
+            entries += 1
+            if deadline is not None and time.monotonic() >= deadline - 5:
+                raise ClientError('The total AI time budget was exhausted.')
+            if entries > local_client.MAX_GRADING_ENTRIES:
+                raise ClientError('The submission contains too many entries to upload.')
+            path = directory / entry.name
+            relative = path.relative_to(base).as_posix()
+            try:
+                name_size = len(relative.encode('utf-8'))
+            except UnicodeEncodeError:
+                continue  # The wire format requires UTF-8 paths.
+            try:
+                if entry.is_dir():
+                    resolved = path.resolve(strict=True)
+                    if base in resolved.parents and resolved not in ancestors:
+                        pending.append((path, ancestors | {resolved}))
+                        if entry.is_symlink():
+                            symlink_dirs.append(relative)
+                            size += name_size
+                    continue
+                if not entry.is_file():
+                    continue
+                content = read_artifact(base, relative, MAX_FILES_BYTES, protected=protected)
+            except (ClientError, OSError, RuntimeError, ValueError):
+                content = None
+            files[relative] = content
+            size += name_size + (len(content.encode('utf-8')) if content is not None else 4)
+            if size > local_client.MAX_GRADING_BODY_BYTES:
+                raise ClientError('The submission exceeds the Grading upload limit.')
+    return files, symlink_dirs
+
+
+def grading_reports(root, paths):
+    """Read only explicitly named Gradescope reports needed outside the final results."""
+    reports = {}
+    protected = private_artifact_ids(root)
+    size = 0
+    for relative in paths:
+        try:
+            if relative == RESULTS_SOURCE:
+                continue
+            text = read_artifact(root, relative, protected=protected)
+            report = json.loads(text)
+            if (not isinstance(report, dict) or not any(key in report for key in ('tests', 'score', 'output'))
+                    or not isinstance(report.get('tests', []), list)
+                    or any(not isinstance(row, dict) for row in report.get('tests', []))):
+                continue
+        except (ClientError, OSError, RuntimeError, ValueError):
+            continue  # Missing/invalid reports fail only targets which select them.
+        size += len(text.encode('utf-8'))
+        if size > local_client.MAX_GRADING_BODY_BYTES:
+            raise ClientError('The configured evidence exceeds the Grading upload limit.')
+        reports[relative] = report
+    return reports
 
 
 def collect_files(submission, analysis):
+    def matches(pattern):
+        return (path.relative_to(submission) for path in submission.glob(pattern) if path.is_file())
+
+    return select_files(analysis, matches, lambda path: read_artifact(submission, path, MAX_FILES_BYTES))
+
+
+def collect_uploaded_files(files, analysis, symlink_dirs=(), *, glob_star_in_segment=False):
+    """Apply the container's ordered, segment-wise glob rules to uploaded paths."""
+    paths = [PurePosixPath(name) for name in files]
+    links = {PurePosixPath(name) for name in symlink_dirs}
+
+    def matches(pattern):
+        parts = PurePosixPath(pattern).parts
+        if parts[-1] == '**':
+            parts = (*parts, '*')  # The configuration manifest expands a trailing globstar.
+        if not glob_star_in_segment and any('**' in part and part != '**' for part in parts):
+            raise ClientError('Invalid recursive source pattern.')
+
+        @lru_cache(maxsize=None)
+        def match(path, count):
+            if count == 0:
+                return not path.parts
+            segment = parts[count - 1]
+            if segment == '**':
+                return (match(path, count - 1)
+                        or bool(path.parts) and path not in links and match(path.parent, count))
+            return bool(path.parts) and fnmatchcase(path.name, segment) and match(path.parent, count - 1)
+
+        return (path for path in paths if match(path, len(parts)))
+
+    def content(path):
+        text = files[path]
+        if text is None:
+            raise ClientError("An expected artifact is missing or exceeds its size limit.")
+        return text
+
+    return select_files(analysis, matches, content)
+
+
+def select_files(analysis, matches, read_text):
     primary = []
     context = []
     for patterns, destination in ((analysis['source_globs'], primary),
@@ -76,7 +250,7 @@ def collect_files(submission, analysis):
         for pattern in patterns:
             if PurePosixPath(pattern).is_absolute() or '..' in PurePosixPath(pattern).parts:
                 raise ClientError("Source patterns must be submission-relative.")
-            destination.extend(sorted(path for path in submission.glob(pattern) if path.is_file()))
+            destination.extend(sorted(matches(pattern)))
     primary = list(dict.fromkeys(primary))
     if not primary:
         raise ClientError("No submitted primary source matches this feedback target.")
@@ -86,9 +260,9 @@ def collect_files(submission, analysis):
     files = []
     seen = set()
     for path in primary + context:
-        relative = path.relative_to(submission).as_posix()
+        relative = path.as_posix()
         if relative not in seen:
-            content = read_artifact(submission, relative, MAX_FILES_BYTES)
+            content = read_text(relative)
             files.append({'path': relative, 'content': content})
             seen.add(relative)
     if sum(len(item['content'].encode('utf-8')) for item in files) > MAX_FILES_BYTES:
@@ -140,7 +314,7 @@ def result_evidence(results, source, *, failed_only=False, blocked=()):
     return evidence, mapping
 
 
-def collect_evidence(root, analysis, results=None, blocked=()):
+def collect_evidence(root, analysis, results=None, blocked=(), *, reports=None):
     """Only reports with row-level visibility can enter a student-facing prompt."""
     evidence = []
     for source in analysis.get('evidence_sources', []):
@@ -150,6 +324,8 @@ def collect_evidence(root, analysis, results=None, blocked=()):
         try:
             if source['path'] == RESULTS_SOURCE and results is not None:
                 report, excluded = results, blocked
+            elif reports is not None:
+                report, _, excluded, _ = clean_results(reports[source['path']])
             else:
                 report, _, excluded, _ = clean_results(json.loads(read_artifact(root, source['path'])))
             rows, _ = result_evidence(report, source, blocked=excluded)
@@ -196,7 +372,10 @@ def restore_owned_output(container, metadata, key):
     if fingerprint(container.get('output', '')) != record.get('rendered_hash'):
         return False
     if record.get('had_output'):
-        container['output'] = record['original_output']
+        if 'original_length' in record:
+            container['output'] = container['output'][:record['original_length']]
+        else:
+            container['output'] = record['original_output']
     else:
         container.pop('output', None)
     del metadata[key]
@@ -341,9 +520,19 @@ def finalize_grading(results, revision, *, unknown=False):
         if 'ai_grading_notice' not in metadata:
             original = results.get('output', '')
             rendered = appended_output(original, message, results.get('output_format', 'simple_format'), 'AI grading status')
-            metadata['ai_grading_notice'] = {'had_output': 'output' in results, 'original_output': original,
+            metadata['ai_grading_notice'] = {'had_output': 'output' in results, 'original_length': len(original),
                                             'rendered_hash': fingerprint(rendered)}
             results['output'] = rendered
+
+
+def restore_pending_rows(results, previous_ai, failure):
+    for old in previous_ai:
+        if number(old.get('max_score')) and old['max_score'] > 0:
+            row = deepcopy(old)
+            row['score'] = 0
+            row['output'] = 'Pending regrade. The displayed zero is provisional. ' + failure
+            row['extra_data'].update(grading_status='pending_regrade', actual_score=None)
+            results['tests'].append(row)
 
 
 def read_submission_context(root):
@@ -406,6 +595,110 @@ def print_cost_summary(run_id, requests):
         print('Cost is incomplete. The Web assignment total can include usage reported after this run ends.')
 
 
+def save_results(root, raw_results, results, records):
+    results_path = root / RESULTS_SOURCE
+    evidence_path = results_path.with_name('ai_evidence.json')
+    with tempfile.TemporaryDirectory(dir=results_path.parent) as directory:
+        staged = Path(directory)
+        for destination, data, mode in (
+            (evidence_path, records, 0o600),
+            (results_path, results, results_path.stat().st_mode & 0o777),
+        ):
+            temporary = staged / destination.name
+            with temporary.open('w', encoding='utf-8') as stream:
+                json.dump(data, stream, ensure_ascii=False, indent=2, allow_nan=False)
+                stream.write('\n')
+            temporary.chmod(mode)
+        if results_path.read_bytes() != raw_results:
+            raise ClientError('Functional results changed during AI processing; no AI result was applied.')
+        os.replace(staged / results_path.name, results_path)
+        os.replace(staged / evidence_path.name, evidence_path)
+
+
+def print_private_records(records):
+    for record in records:
+        target = record.get('target_id', 'assignment')
+        if record.get('request_id'):
+            print(f"Instructor AI request [{target}]: {record['request_id']}")
+        if record.get('error'):
+            print(f"Instructor AI diagnostic [{target}]: {record['error']}")
+        if record.get('status') in {'deferred', 'inactive'}:
+            print(f"Instructor AI status [{target}]: {record['reason']}")
+        for item in (*record.get('items', []), *record.get('failure_feedback', [])):
+            identifier = item.get('test_id', item.get('evidence_id', ''))
+            print(f"Instructor AI evidence [{target} / {identifier}]: {item['evidence']}")
+
+
+def run_grading(root, config, token_file, submission, run_context, deadline):
+    raw_results = (root / RESULTS_SOURCE).read_bytes()
+    original = json.loads(raw_results)
+    hidden_stdout = original.get('stdout_visibility', 'hidden') == 'hidden'
+    if hidden_stdout:
+        print(f"Instructor AI run: {json.dumps(run_context)}")
+    response = None
+    try:
+        token = local_client.read_assignment_token(token_file)
+        identity = {**run_context, 'submission': submission}
+        collection_error = None
+        try:
+            files, symlink_dirs = inventory_submission(root / 'submission', deadline)
+            payload = {**identity, 'results': original, 'files': files,
+                       'reports': grading_reports(root, config.get('grading_report_paths', []))}
+            if symlink_dirs:
+                payload['symlink_dirs'] = symlink_dirs
+            if sys.version_info >= (3, 13):
+                payload['glob_star_in_segment'] = True
+            data = local_client.encode_grading_upload(payload, token, deadline)
+        except (ClientError, OSError, ValueError, TypeError) as exc:
+            # Nothing has been sent. Report the usual dashboard rows and obtain the
+            # configured pending items while keeping the full functional output local.
+            collection_error = str(exc) if isinstance(exc, ClientError) else 'Could not prepare the Grading submission.'
+            base, previous_ai, _, diagnostics = clean_results(original)
+            fallback = {**identity, 'files': {}, 'collection_error': True}
+            if submission and token in (submission.get('student_identifier') or ''):
+                fallback['submission'] = {**submission, 'student_identifier': None}
+            try:
+                report = local_client.grading_test_payload(run_context['run_id'], submission or {}, base)
+                functional = {'tests': report['tests'], 'visibility': report['visibility']}
+                data = local_client.encode_grading_upload({**fallback, 'results': functional}, token, deadline)
+            except ClientError:
+                # Preserve the outcome even when the dashboard rows cannot be safely sent.
+                diagnostics.append({'error': 'Functional test rows could not be uploaded.'})
+                data = local_client.encode_grading_upload({**fallback, 'results': {}}, token, deadline)
+        response = local_client.request_grading_run(backend_url=config['backend_url'], token=token,
+                                                    data=data, deadline=deadline)
+        results, records = response['results'], response['ai_evidence']
+        if collection_error:
+            summary = results.get('extra_data', {}).get('ai_grading')
+            if summary:
+                revision = summary['revision']
+                if revision is None:
+                    restore_pending_rows(base, previous_ai, collection_error)
+                else:
+                    base['tests'].extend(row for row in results['tests'] if row.get('extra_data', {}).get('ai_feedback'))
+                finalize_grading(base, revision, unknown=revision is None)
+            results = base
+            records.extend([*diagnostics, {'error': collection_error}])
+    except (ClientError, OSError, ValueError, TypeError) as exc:
+        failure = str(exc) if isinstance(exc, ClientError) else 'Could not prepare the Grading submission.'
+        results, previous_ai, _, records = clean_results(original)
+        restore_pending_rows(results, previous_ai, failure)
+        finalize_grading(results, None, unknown=True)
+        records.append({'error': failure})
+    for record in records:
+        record.update(run_context)
+    save_results(root, raw_results, results, records)
+    if hidden_stdout:
+        print_private_records(records)
+        if response is None:
+            print('Instructor AI usage and cost are unavailable for this run.')
+        else:
+            requests = {record['request_id']: {'accounting': record.get('accounting')}
+                        for record in records if record.get('request_id')
+                        and ('accounting' in record or 'model_name' in record)}
+            print_cost_summary(run_context['run_id'], requests)
+
+
 def add_feedback(root=Path('/autograder'), *, run_id=None):
     root = Path(root)
     if run_id is None:
@@ -434,6 +727,12 @@ def add_feedback(root=Path('/autograder'), *, run_id=None):
     accounting_requests = {}
     try:
         config = json.loads((root / 'source/config.json').read_text(encoding='utf-8'))
+        if config.get('ai_mode') == 'GRADING':
+            # The Web records functional results and completion inside this one request.
+            ai_status = None
+            if submission_context:
+                run_context['submission_id'] = submission_context['platform_submission_id']
+            return run_grading(root, config, token_file, submission_context, run_context, report_deadline)
         results_path = root / RESULTS_SOURCE
         raw_results = results_path.read_bytes()
         original = json.loads(raw_results)
@@ -567,46 +866,22 @@ def add_feedback(root=Path('/autograder'), *, run_id=None):
                     elif target.get('max_score') is not None:
                         unknown_grading = True
             else:
-                for old in previous_ai:
-                    if number(old.get('max_score')) and old['max_score'] > 0:
-                        row = deepcopy(old)
-                        row['score'] = 0
-                        row['output'] = 'Pending regrade. The displayed zero is provisional. ' + failure
-                        row['extra_data'].update(grading_status='pending_regrade', actual_score=None)
-                        results['tests'].append(row)
+                restore_pending_rows(results, previous_ai, failure)
             break
         recorded_ids = {record.get('request_id') for record in records}
         records.extend({**record, 'accounting_only': True}
                        for request_id, record in accounting_requests.items() if request_id not in recorded_ids)
         for record in records:
             record.update(run_context)
-        evidence_path = root / 'results/ai_evidence.json'
-        evidence_path.write_text(json.dumps(records, ensure_ascii=False, indent=2, allow_nan=False) + '\n', encoding='utf-8')
-        evidence_path.chmod(0o600)
         finalize_grading(results, manifest['revision'] if manifest is not None else None,
                          unknown=unknown_grading)
-        # Never apply an explanation or score to a different functional-result snapshot.
-        if results_path.read_bytes() != raw_results:
-            raise ClientError('Functional results changed during AI processing; no AI result was applied.')
-        temporary = results_path.with_suffix('.tmp')
-        temporary.write_text(json.dumps(results, ensure_ascii=False, indent=2, allow_nan=False) + '\n', encoding='utf-8')
-        temporary.replace(results_path)
+        save_results(root, raw_results, results, records)
         # A valid insufficient-evidence verdict is still a successful AI request.
         ai_status = 'FAILED' if ai_failed else None if deferred_response else 'SUCCEEDED'
         completion_reason = ('not_needed' if ai_status == 'SUCCEEDED' and not ai_needed
                              and not accounting_requests else 'processed')
         if results.get('stdout_visibility', 'hidden') == 'hidden':
-            for record in records:
-                target = record.get('target_id', 'assignment')
-                if record.get('request_id'):
-                    print(f"Instructor AI request [{target}]: {record['request_id']}")
-                if record.get('error'):
-                    print(f"Instructor AI diagnostic [{target}]: {record['error']}")
-                if record.get('status') in {'deferred', 'inactive'}:
-                    print(f"Instructor AI status [{target}]: {record['reason']}")
-                for item in (*record.get('items', []), *record.get('failure_feedback', [])):
-                    identifier = item.get('test_id', item.get('evidence_id', ''))
-                    print(f"Instructor AI evidence [{target} / {identifier}]: {item['evidence']}")
+            print_private_records(records)
     finally:
         if hidden_stdout:
             print_cost_summary(run_id, accounting_requests)

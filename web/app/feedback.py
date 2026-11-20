@@ -2,31 +2,34 @@
 
 import asyncio
 from concurrent.futures import ThreadPoolExecutor
-from contextlib import asynccontextmanager
-from dataclasses import asdict
+from contextlib import AsyncExitStack, asynccontextmanager
+from dataclasses import asdict, dataclass
 from datetime import datetime
 import hashlib
 import json
 import logging
 import os
-from pathlib import Path
+from pathlib import Path, PurePosixPath
 import re
 from types import SimpleNamespace
 import threading
 import time
 from typing import Literal
 from uuid import UUID
+from weakref import WeakValueDictionary
 
 from fastapi import APIRouter, FastAPI, Request
-from fastapi.responses import JSONResponse
+from fastapi.responses import JSONResponse, StreamingResponse
 from pydantic import BaseModel, ConfigDict, Field, model_validator
 
+from ai_grading import gradescope_feedback as gradescope, local_client
 from ai_grading.models import (
     CodeFile, Evidence, FeedbackRequest, GradingTarget, ResolvedSource, Rubric, TargetKind,
 )
 from ai_grading.FileResolver import FileResolver
 from ai_grading.PromptBuilder import PromptBuilder
 from ai_grading.ILLMProvider.ILLMProvider import ProviderError
+from .feedback_assignment import feedback_assignment_config, read_active_assignment
 from .feedback_store import JsonStore, StoreError
 from .feedback_config import validate_relative_path
 from .repository.base import FeedbackResult, ProviderFeedback, SubmissionRef
@@ -48,6 +51,7 @@ MESSAGES = {
     "interrupted": "This request was interrupted; its reserved call remains consumed.",
     "model_error": "The model did not return usable feedback; the reserved call remains consumed.",
     "upstream_timeout": "The model timed out; the reserved call remains consumed.",
+    "grading_response_timeout": "The Grading result was not ready within the hook time budget.",
     "backend_auth_unavailable": "Backend model authentication is unavailable.",
     "backend_error": "Backend could not safely finish this request.",
     "ai_not_authorized": "This submission has not received nightly AI authorization.",
@@ -95,7 +99,53 @@ class FeedbackInput(BaseModel):
         return self
 
 
+class GradingRunInput(BaseModel):
+    model_config = ConfigDict(extra="forbid", strict=True, allow_inf_nan=False)
+    run_id: str = Field(min_length=1, max_length=128, pattern=r"^[A-Za-z0-9_.:-]+$")
+    submission_id: str | None = Field(default=None, max_length=256, pattern=r"^[0-9]+$")
+    submission: SubmissionContext | None = None
+    results: dict
+    files: dict[str, str | None]
+    reports: dict[str, dict] = Field(default_factory=dict)
+    symlink_dirs: list[str] = Field(default_factory=list)
+    glob_star_in_segment: bool = False
+    collection_error: bool = False
+    budget_seconds: float = Field(gt=0, le=295)
+
+    @model_validator(mode="after")
+    def uploaded_paths_and_submission(self):
+        if self.submission and self.submission.platform_submission_id != self.submission_id:
+            raise ValueError("submission identity does not match its metadata")
+        if len(self.files) + len(self.symlink_dirs) > local_client.MAX_GRADING_ENTRIES:
+            raise ValueError("submission contains too many entries")
+        for name in (*self.files, *self.symlink_dirs):
+            path = PurePosixPath(name)
+            if (not path.parts or path.is_absolute() or ".." in path.parts or str(path) != name
+                    or "\x00" in name):
+                raise ValueError("uploaded paths must be normalized relative POSIX paths")
+        for name in self.reports:
+            validate_relative_path(name)
+        return self
+
+
 TEST_RESULTS_MAX_BYTES = 2_097_152
+# The connector leaves five seconds to receive and write the final results.
+GRADING_REPLAY_GRACE_SECONDS = 2
+GRADING_HEARTBEAT_SECONDS = 5
+# One-byte heartbeats over the hook's entire 300-second lifetime.
+GRADING_HEARTBEAT_BYTES = 1 + 300 // GRADING_HEARTBEAT_SECONDS
+
+
+class ReplayVerificationTimeout(TimeoutError):
+    """The deadline passed before this target's existing outcome could be established."""
+
+
+@dataclass
+class GradingTargetAttempt:
+    record: dict
+    payload: FeedbackInput | None = None
+    response: dict | None = None
+    error: Exception | None = None
 
 
 class TestRow(BaseModel):
@@ -176,6 +226,42 @@ def assignment_revision(assignment) -> str:
                            PromptBuilder.functional_version]}
     canonical = json.dumps(content, sort_keys=True, separators=(",", ":"), ensure_ascii=False)
     return hashlib.sha256(canonical.encode("utf-8")).hexdigest()
+
+
+def collection_targets(assignment):
+    targets = {}
+    for target_id, target in assignment.targets.items():
+        analysis = asdict(target.analysis)
+        # On Python < 3.13 Path.glob("dir/**") only returns directories.
+        for key in ("source_globs", "context_globs"):
+            analysis[key] = [p + "/*" if p.rsplit("/", 1)[-1] == "**" else p for p in analysis[key]]
+        targets[target_id] = {
+            "identifier": target.identifier, "kind": target.kind,
+            "source_path": target.source_path, "max_score": target.max_score,
+            "analysis": {key: analysis[key] for key in (
+                "mode", "behavior", "functional_result_source", "source_globs", "context_globs",
+                "evidence_sources", "max_source_files",
+            )},
+        }
+        targets[target_id]["analysis"]["grading_items"] = [
+            {"id": item.id, "points": item.points, "label": grading_item_label(item.id, index)}
+            for index, item in enumerate(target.analysis.grading_items, 1)
+        ]
+    return targets
+
+
+def grading_response_room(records, targets, revision):
+    """Leave room for every configured row, even when later targets cannot run."""
+    # The cleaned functional results fit in the upload. Top-level scores, the
+    # appended notice and an optional final database diagnostic need additional space.
+    size = local_client.MAX_GRADING_BODY_BYTES + 8192 + GRADING_HEARTBEAT_BYTES
+    size += len(JSONResponse(records).body) + 512 * len(records)  # stamped run/submission IDs
+    for target_id, target in targets.items():
+        rows = gradescope.grading_rows(target_id, target, revision)
+        # Include every configured row, even if the target fails. Allow for the
+        # request ID, numeric scores and bounded error message added to each row.
+        size += len(JSONResponse(rows).body) + 512 * len(rows) + 2048
+    return local_client.MAX_GRADING_RESPONSE_BYTES - size
 
 
 def resolve_input(payload: FeedbackInput, target) -> ResolvedSource:
@@ -270,7 +356,9 @@ def create_feedback_router(state_path: str | Path, *, assignment_loader,
         runtime.provider_lock = threading.Lock()
         runtime.inflight = 0
         runtime.tasks = set()
-        runtime.jobs = set()
+        runtime.jobs = {}
+        runtime.grading_runs = set()
+        runtime.grading_outcome_locks = WeakValueDictionary()
         pool = ThreadPoolExecutor(max_workers=store.config.max_concurrency,
                                   thread_name_prefix="feedback")
         runtime.pool = pool
@@ -279,8 +367,10 @@ def create_feedback_router(state_path: str | Path, *, assignment_loader,
                 store.allow_pitt_models()
             yield
         finally:
+            if runtime.grading_runs:
+                await asyncio.gather(*list(runtime.grading_runs), return_exceptions=True)
             if runtime.jobs:
-                await asyncio.gather(*list(runtime.jobs), return_exceptions=True)
+                await asyncio.gather(*list(runtime.jobs.values()), return_exceptions=True)
             # A timed-out HTTP request may still have a running SDK call. Retain
             # its slot and worker lock until it exits; never start an extra call.
             if runtime.tasks:
@@ -343,6 +433,7 @@ def create_feedback_router(state_path: str | Path, *, assignment_loader,
             grading_repository.mark_target_failed(submission_id, target.identifier, message)
         except Exception:
             LOG.warning("feedback_failure_not_recorded", exc_info=True)
+
     def authenticate(request):
         headers = request.headers.getlist("authorization")
         if len(headers) != 1:
@@ -352,14 +443,17 @@ def create_feedback_router(state_path: str | Path, *, assignment_loader,
             raise StoreError("unauthorized", 401)
         return runtime.store.authenticate(token)
 
+    def check_assignment(assignment, assignment_id):
+        if assignment.id != assignment_id or not assignment.enabled:
+            raise StoreError("assignment_forbidden", 403)
+        if assignment.model not in runtime.store.config.allowed_models.get(assignment.engine, []):
+            raise StoreError("assignment_config_unavailable", 503)
+        return assignment
+
     async def load_assignment(assignment_id):
         try:
             assignment = await asyncio.to_thread(assignment_loader, assignment_id)
-            if assignment.id != assignment_id or not assignment.enabled:
-                raise StoreError("assignment_forbidden", 403)
-            if assignment.model not in runtime.store.config.allowed_models.get(assignment.engine, []):
-                raise StoreError("assignment_config_unavailable", 503)
-            return assignment
+            return check_assignment(assignment, assignment_id)
         except StoreError:
             raise
         except Exception:
@@ -372,26 +466,8 @@ def create_feedback_router(state_path: str | Path, *, assignment_loader,
             assignment = await load_assignment(authenticate(request))
         except StoreError as exc:
             return error(exc.code, exc.status_code)
-        targets = {}
-        for target_id, target in assignment.targets.items():
-            analysis = asdict(target.analysis)
-            # On Python < 3.13 Path.glob("dir/**") only returns directories.
-            for key in ("source_globs", "context_globs"):
-                analysis[key] = [p + "/*" if p.rsplit("/", 1)[-1] == "**" else p for p in analysis[key]]
-            targets[target_id] = {
-                "identifier": target.identifier, "kind": target.kind,
-                "source_path": target.source_path, "max_score": target.max_score,
-                "analysis": {key: analysis[key] for key in (
-                    "mode", "behavior", "functional_result_source", "source_globs", "context_globs",
-                    "evidence_sources", "max_source_files",
-                )},
-            }
-            targets[target_id]["analysis"]["grading_items"] = [
-                {"id": item.id, "points": item.points, "label": grading_item_label(item.id, index)}
-                for index, item in enumerate(target.analysis.grading_items, 1)
-            ]
         return JSONResponse({"assignment_id": assignment.id,
-                             "revision": assignment_revision(assignment), "targets": targets},
+                             "revision": assignment_revision(assignment), "targets": collection_targets(assignment)},
                             headers={"Cache-Control": "no-store"})
 
     async def read_body(request, limit):
@@ -525,18 +601,24 @@ def create_feedback_router(state_path: str | Path, *, assignment_loader,
             return error("invalid_request", 408)
         except Exception:
             return error("invalid_request", 400)
+        return await execute_target(assignment_id, payload, respond_async=respond_async)
+
+    async def execute_target(assignment_id, payload, *, assignment=None, respond_async=False, deadline=None,
+                             cached_only=False):
+        store = runtime.store
+        config = store.config
         rid = payload.request_id
         if (len(payload.code or "") + sum(len(source.content) for source in payload.files) > config.max_code_chars
                 or len(payload.guidance or "") > config.max_guidance_chars):
             return error("input_too_large", 413, rid)
         try:
-            assignment = await load_assignment(assignment_id)
-        except StoreError as exc:
-            return error(exc.code, exc.status_code, rid)
-        try:
+            if assignment is None:
+                assignment = await load_assignment(assignment_id)
             existing = store.get_request(assignment_id, rid)
         except StoreError as exc:
             return error(exc.code, exc.status_code, rid)
+        if cached_only and existing is None:
+            return None
         # A new stale request must refresh even if its target was removed.
         if (existing is None and payload.config_revision is not None
                 and payload.config_revision != assignment_revision(assignment)):
@@ -550,18 +632,9 @@ def create_feedback_router(state_path: str | Path, *, assignment_loader,
             if grading_repository is None:
                 return error("backend_error", 503, rid)
         if existing is None and payload.submission is not None and grading_repository is not None:
-            submission_id = await asyncio.to_thread(db_submission, assignment_id, payload.submission)
-            action = await asyncio.to_thread(grading_repository.get_ai_execution_action, submission_id)
-            if action == "deferred":
-                action = await asyncio.to_thread(
-                    grading_repository.defer_submission_target, submission_id, target.identifier,
-                )
-            if action != "execute":
-                return JSONResponse(
-                    {"request_id": rid, "status": action,
-                     "reason": "awaiting_nightly_authorization" if action == "deferred" else "inactive_submission"},
-                    headers={"Cache-Control": "no-store"},
-                )
+            skipped = await asyncio.to_thread(submission_skip, assignment_id, payload.submission, target.identifier)
+            if skipped:
+                return JSONResponse({"request_id": rid, **skipped}, headers={"Cache-Control": "no-store"})
         content = payload.model_dump(mode="json", exclude={"request_id", "run_id"})
         if payload.config_revision is None:
             content.pop("config_revision")
@@ -581,6 +654,8 @@ def create_feedback_router(state_path: str | Path, *, assignment_loader,
         # Current assignment/target authorization above still applies to replays.
         pitt_api_key = None
         if existing is None:
+            if deadline is not None and time.monotonic() >= deadline:
+                raise TimeoutError
             if target.analysis.behavior is not None and payload.config_revision is None:
                 return error("invalid_request", 422, rid)
             guidance = target.rubric.feedback_guidance
@@ -619,6 +694,8 @@ def create_feedback_router(state_path: str | Path, *, assignment_loader,
                     return error("backend_auth_unavailable", 503, rid)
         # No await between checking capacity, reserving quota and occupying it.
         # Replays must still work at full capacity and after quota exhaustion.
+        if existing is None and deadline is not None and time.monotonic() >= deadline:
+            raise TimeoutError
         try:
             if existing is None and runtime.inflight >= config.max_concurrency:
                 return error("busy", 429, rid)
@@ -630,6 +707,10 @@ def create_feedback_router(state_path: str | Path, *, assignment_loader,
         except Exception:
             return error("backend_error", 500, rid)
         if not created:
+            if record.status == "processing" and deadline is not None:
+                job = runtime.jobs.get((assignment_id, rid))
+                if job is not None:
+                    return await asyncio.wait_for(asyncio.shield(job), max(0, deadline - time.monotonic()))
             if record.status == "completed":
                 result = {"engine": record.engine, "provider": record.provider,
                           "requested_model": record.model, **record.result}
@@ -662,16 +743,18 @@ def create_feedback_router(state_path: str | Path, *, assignment_loader,
         job = asyncio.create_task(finish_feedback(
             future, assignment_id, rid, assignment, target, payload, config.timeout_seconds,
         ))
-        runtime.jobs.add(job)
+        runtime.jobs[assignment_id, rid] = job
 
         def forget_job(done):
-            runtime.jobs.discard(done)
+            runtime.jobs.pop((assignment_id, rid), None)
             if not done.cancelled() and done.exception() is not None:
                 LOG.error("feedback_job_failed")
 
         job.add_done_callback(forget_job)
         if respond_async:
             return processing_response(rid)
+        if deadline is not None:
+            return await asyncio.wait_for(asyncio.shield(job), max(0, deadline - time.monotonic()))
         return await asyncio.shield(job)
 
     @router.post("/v1/feedback")
@@ -684,18 +767,383 @@ def create_feedback_router(state_path: str | Path, *, assignment_loader,
             LOG.error("backend_error")
             return error("backend_error", 500)
 
+    async def record_outcome(assignment, payload):
+        if payload.completion_reason == "not_needed" and any(
+            target.rubric is not None
+            and target.analysis_config.get("behavior") != "functional_test_feedback"
+            for target in assignment.targets
+        ):
+            raise StoreError("invalid_request", 422)
+        submission_id = await asyncio.to_thread(db_submission, str(assignment.id), payload.submission)
+        if (payload.ai_status == "SUCCEEDED" and payload.completion_reason == "processed"
+                and assignment.grading_mode == "NIGHTLY"):
+            action = await asyncio.to_thread(grading_repository.get_ai_execution_action, submission_id)
+            if action == "deferred":
+                raise StoreError("ai_not_authorized", 409)
+        await asyncio.to_thread(grading_repository.set_submission_ai_status, submission_id, payload.ai_status)
+
+    async def record_tests(assignment, payload):
+        submission_id = await asyncio.to_thread(db_submission, str(assignment.id), payload.submission)
+        outcomes = map_outcomes(assignment.targets, [row.model_dump() for row in payload.tests], payload.visibility)
+        recorded = await asyncio.to_thread(grading_repository.record_test_run, submission_id, payload.run_id, outcomes)
+        return recorded, len(outcomes)
+
+    def submission_skip(assignment_id, submission, target_name):
+        submission_id = db_submission(assignment_id, submission)
+        action = grading_repository.get_ai_execution_action(submission_id)
+        if action == "deferred":
+            action = grading_repository.defer_submission_target(submission_id, target_name)
+        if action != "execute":
+            return {"status": action,
+                    "reason": "awaiting_nightly_authorization" if action == "deferred" else "inactive_submission"}
+        return None
+
+    async def wait_for_target(assignment, payload, deadline, *, cached_only=False):
+        # The legacy hook retries only temporary capacity errors. Keep this wait
+        # inside the run so Gradescope receives a single final response.
+        while True:
+            response = await execute_target(assignment.id, payload, assignment=assignment,
+                                            deadline=deadline, cached_only=cached_only)
+            if response is None:
+                return None
+            if response.status_code == 200:
+                return local_client.read_feedback_response(response.body, payload.request_id, None)
+            data = json.loads(response.body)
+            if data["error"]["code"] != "busy":
+                raise local_client._safe_http_error(
+                    response.status_code, accounting=data.get("accounting"),
+                    cost_unknown=data["error"]["code"] in {
+                        "model_error", "upstream_timeout", "processing", "interrupted", "backend_error",
+                    },
+                )
+            if time.monotonic() >= deadline:
+                raise TimeoutError
+            if runtime.tasks:
+                await asyncio.wait(tuple(runtime.tasks), timeout=max(0, deadline - time.monotonic()),
+                                   return_when=asyncio.FIRST_COMPLETED)
+
+    def prepare_target_input(run, base, blocked, target_id, analysis, revision, submission):
+        evidence = gradescope.collect_evidence(None, analysis, base, blocked, reports=run.reports)
+        files = gradescope.collect_uploaded_files(run.files, analysis, symlink_dirs=run.symlink_dirs,
+                                                 glob_star_in_segment=run.glob_star_in_segment)
+        rid = local_client.stable_request_id(
+            target_id, files=files, evidence=evidence,
+            namespace=f"{revision}:{run.submission_id or ''}:{run.run_id}",
+        )
+        # Apply the same JSON size and per-target validation as the original client request.
+        fields = {"request_id": rid, "run_id": run.run_id, "target_id": target_id,
+                  "guidance": "", "config_revision": revision, "files": files}
+        if evidence:
+            fields["evidence"] = evidence
+        if submission is not None:
+            fields["submission"] = submission
+        raw = json.dumps(fields, ensure_ascii=False).encode("utf-8")
+        return rid, raw
+
+    async def grade_targets(run, assignment, base, results, blocked, records, deadline, order_outcome):
+        revision = assignment_revision(assignment)
+        failed = False
+        deferred = None
+        submission = run.submission.model_dump(mode="json") if run.submission else None
+        verification_deadline = deadline + GRADING_REPLAY_GRACE_SECONDS
+        attempts = {}
+        checked_action = False
+
+        async def prepare(target_id, attempt):
+            remaining = verification_deadline - time.monotonic()
+            if remaining <= 0:
+                raise TimeoutError
+            async with asyncio.timeout(remaining):
+                rid, raw = await asyncio.to_thread(
+                    prepare_target_input, run, base, blocked, target_id, targets[target_id]["analysis"],
+                    revision, submission,
+                )
+            attempt.record["request_id"] = rid
+            if len(raw) > runtime.store.config.max_body_bytes:
+                raise local_client._safe_http_error(413)
+            try:
+                attempt.payload = FeedbackInput.model_validate_json(raw)
+            except ValueError:
+                raise local_client._safe_http_error(422) from None
+
+        async def check_skip(target_id):
+            nonlocal checked_action
+            if checked_action or run.submission is None:
+                return None
+            remaining = verification_deadline - time.monotonic()
+            if remaining <= 0:
+                raise ReplayVerificationTimeout
+            try:
+                async with asyncio.timeout(remaining):
+                    skipped = await asyncio.to_thread(submission_skip, assignment.id, run.submission,
+                                                      targets[target_id]["identifier"])
+            except TimeoutError:
+                raise ReplayVerificationTimeout from None
+            checked_action = True
+            return skipped
+
+        async def recover(retries):
+            nonlocal room
+            # SQL or collection can fail while a sibling completes this target. Order
+            # the last cache check with aggregate writes, after all normal model work.
+            try:
+                async with asyncio.timeout(max(0, verification_deadline - time.monotonic())):
+                    await order_outcome()
+            except TimeoutError:
+                for attempt in retries.values():
+                    attempt.error = ReplayVerificationTimeout()
+                return
+            accepted = runtime.store.accepted_run_targets(assignment.id, run.run_id)
+            for target_id, attempt in retries.items():
+                try:
+                    if attempt.payload is None and target_id in accepted:
+                        try:
+                            await prepare(target_id, attempt)
+                        except TimeoutError:
+                            raise ReplayVerificationTimeout from None
+                    if attempt.payload is not None:
+                        response = await wait_for_target(assignment, attempt.payload, 0, cached_only=True)
+                        if response is not None:
+                            if measure_responses:
+                                size = 2 * len(JSONResponse(response).body)
+                                if size > room:
+                                    raise local_client.ClientError("The remaining AI results exceed the Grading response limit.")
+                                room -= size
+                            attempt.response, attempt.error = response, None
+                            continue
+                    if isinstance(attempt.error, TimeoutError):
+                        skipped = await check_skip(target_id)
+                        if skipped:
+                            attempt.response, attempt.error = skipped, None
+                            break
+                except Exception as exc:
+                    attempt.error = exc.with_traceback(None)
+
+        targets = collection_targets(assignment)
+        room = grading_response_room(records, targets, revision)
+        if room < 0:
+            raise StoreError("input_too_large", 413)
+        # Provider text can appear in both a public grading row and private evidence.
+        # Only large configurations need to track the actual space used after each call.
+        max_target_bytes = 2 * local_client.MAX_RESPONSE_BYTES
+        measure_responses = not run.collection_error and len(targets) * max_target_bytes > room
+        retries = {}
+        for target_id in targets:
+            attempt = attempts[target_id] = GradingTargetAttempt({"target_id": target_id})
+            try:
+                if measure_responses and room < max_target_bytes:
+                    raise local_client.ClientError("The remaining AI results exceed the Grading response limit.")
+                if run.collection_error:
+                    attempt.response = await check_skip(target_id)
+                    if not attempt.response:
+                        raise local_client.ClientError("The submission could not be uploaded for AI grading.")
+                else:
+                    if time.monotonic() >= deadline:
+                        raise TimeoutError
+                    await prepare(target_id, attempt)
+                    attempt.response = await wait_for_target(
+                        assignment, attempt.payload, min(deadline, time.monotonic() + 270),
+                    )
+                    attempt.payload = None
+                if measure_responses:
+                    room -= 2 * len(JSONResponse(attempt.response).body)
+                if attempt.response.get("status") in {"deferred", "inactive"}:
+                    break
+            except Exception as exc:
+                attempt.error = exc.with_traceback(None)
+                if not run.collection_error and (attempt.payload is not None or isinstance(exc, TimeoutError)):
+                    retries[target_id] = attempt
+        if retries:
+            await recover(retries)
+
+        unverified = False
+        for target_id, target in targets.items():
+            if deferred:
+                results["tests"].extend(gradescope.grading_rows(target_id, target, revision, error=deferred))
+                continue
+            attempt = attempts[target_id]
+            record, response = attempt.record, attempt.response
+            try:
+                if attempt.error is not None:
+                    raise attempt.error
+                if response.get("status") in {"deferred", "inactive"}:
+                    deferred = ("AI grading is awaiting scheduled authorization."
+                                if response["status"] == "deferred" else
+                                "This submission is inactive; AI grading was not run.")
+                    rows = gradescope.grading_rows(target_id, target, revision, error=deferred)
+                else:
+                    rows = gradescope.grading_rows(target_id, target, revision, response)
+                record.update(response)
+            except Exception as exc:
+                if isinstance(exc, ReplayVerificationTimeout):
+                    unverified = True
+                else:
+                    failed = True
+                if isinstance(exc, ReplayVerificationTimeout):
+                    detail = "The time budget expired before the target's existing grading outcome could be verified."
+                elif isinstance(exc, TimeoutError):
+                    detail = "The AI time budget was exhausted."
+                    if "request_id" in record:
+                        accepted = runtime.store.get_request(assignment.id, record["request_id"])
+                        if accepted is not None:
+                            record["accounting"] = (accepted.accounting.model_dump(mode="json")
+                                                    if accepted.accounting else None)
+                elif isinstance(exc, local_client.ClientError):
+                    detail = str(exc)
+                    if exc.accounting is not None or exc.cost_unknown:
+                        record["accounting"] = exc.accounting
+                else:
+                    detail = "Could not collect or process the configured AI inputs."
+                record["error"] = detail
+                if response and "accounting" in response:
+                    record["accounting"] = response["accounting"]
+                rows = gradescope.grading_rows(target_id, target, revision, error=detail)
+            results["tests"].extend(rows)
+            records.append(record)
+        return failed, deferred, revision, unverified
+
+    @router.post("/v1/grading/run")
+    async def grading_run(request: Request):
+        started = time.monotonic()
+        try:
+            assignment_id = authenticate(request)
+            raw = await asyncio.wait_for(read_body(request, local_client.MAX_GRADING_BODY_BYTES),
+                                         timeout=runtime.store.config.timeout_seconds)
+            run = await asyncio.to_thread(GradingRunInput.model_validate_json, raw)
+            del raw
+            base, previous_ai, blocked, records = await asyncio.to_thread(gradescope.clean_results, run.results)
+        except StoreError as exc:
+            return error(exc.code, exc.status_code)
+        except OverflowError:
+            return error("input_too_large", 413)
+        except TimeoutError:
+            return error("invalid_request", 408)
+        except (TypeError, ValueError, KeyError, AttributeError):
+            return error("invalid_request", 422)
+        if grading_repository is None:
+            return error("backend_error", 503)
+        try:
+            snapshot = await asyncio.to_thread(read_active_assignment, grading_repository, assignment_id)
+        except StoreError as exc:
+            return error(exc.code, exc.status_code)
+        if snapshot.ai_mode != "GRADING":
+            return error("assignment_forbidden", 403)
+        if snapshot.grading_mode == "NIGHTLY" and run.submission is None:
+            return error("invalid_request", 422)
+        deadline = started + run.budget_seconds
+        job = asyncio.create_task(ordered_grading_run(run, snapshot, assignment_id, base, previous_ai,
+                                                      blocked, records, deadline))
+        # The HTTP stream can disconnect while later targets and the aggregate DB write still need to run.
+        runtime.grading_runs.add(job)
+        job.add_done_callback(runtime.grading_runs.discard)
+        # A normal upload reserves five seconds in the hook. Leave time to write
+        # results after replay checks and delivery. Collection failures have no reserve.
+        send_by = deadline if run.collection_error else deadline + GRADING_REPLAY_GRACE_SECONDS + 1
+        first_heartbeat = min(started + GRADING_HEARTBEAT_SECONDS, send_by)
+        await asyncio.wait({job}, timeout=max(0, first_heartbeat - time.monotonic()))
+        if job.done():
+            return job.result()
+        if time.monotonic() >= send_by:
+            return error("grading_response_timeout", 504)
+
+        async def stream_result():
+            while not job.done():
+                remaining = send_by - time.monotonic()
+                if remaining <= 0:
+                    yield error("grading_response_timeout", 504).body
+                    return
+                # Newlines are valid leading JSON whitespace. The stream contains one final JSON object.
+                yield b"\n"
+                await asyncio.wait({job}, timeout=min(GRADING_HEARTBEAT_SECONDS, remaining))
+            yield job.result().body
+
+        # cloudflared flushes this media type when the origin omits Content-Length.
+        return StreamingResponse(stream_result(), media_type="application/x-ndjson",
+                                 headers={"Cache-Control": "no-store, no-transform"})
+
+    async def ordered_grading_run(run, snapshot, assignment_id, base, previous_ai, blocked, records, deadline):
+        key = assignment_id, run.submission_id, run.run_id
+        lock = runtime.grading_outcome_locks.setdefault(key, asyncio.Lock())
+        async with AsyncExitStack() as scope:
+            ordered = False
+
+            async def order_outcome():
+                nonlocal ordered
+                if not ordered:
+                    await scope.enter_async_context(lock)
+                    ordered = True
+
+            try:
+                return await finish_grading_run(run, snapshot, assignment_id, base, previous_ai, blocked, records,
+                                                deadline, order_outcome)
+            except Exception:
+                LOG.error("grading_run_failed run_id=%s", run.run_id)
+                return error("backend_error", 500)
+
+    async def finish_grading_run(run, snapshot, assignment_id, base, previous_ai, blocked, records,
+                                 deadline, order_outcome):
+        failed = bool(records)
+        if run.submission is not None and (not run.collection_error or "tests" in run.results):
+            try:
+                report = local_client.grading_test_payload(run.run_id, run.submission.model_dump(mode="json"), base)
+                await record_tests(snapshot, TestResultsInput.model_validate({**report, "submission": run.submission}))
+            except Exception:
+                # Functional results remain available in Gradescope if dashboard recording fails.
+                records.append({"error": "Test results were not recorded in the grading database."})
+                LOG.warning("grading_run_test_results_failed run_id=%s", run.run_id)
+
+        revision = None
+        deferred = None
+        unverified = False
+        try:
+            assignment = check_assignment(feedback_assignment_config(snapshot), assignment_id)
+            if any(target.analysis.behavior != "ai_grading" for target in assignment.targets.values()):
+                raise StoreError("assignment_config_unavailable", 503)
+            # Evidence always sees the original functional rows while the result
+            # accumulates new grading rows in its own list.
+            results = {**base, "tests": list(base["tests"])}
+            target_failed, deferred, revision, unverified = await grade_targets(
+                run, assignment, base, results, blocked, records, deadline, order_outcome,
+            )
+            failed |= target_failed
+        except StoreError as exc:
+            failed = True
+            results = base
+            detail = ("The configured grading results exceed the response limit." if exc.code == "input_too_large"
+                      else "Could not load a valid assignment configuration.")
+            # A short failure response still has to fit if the input supplied
+            # many stale inline markers whose cleanup generated diagnostics.
+            if grading_response_room(records, {}, None) < 0:
+                records[:] = [{"error": f"Could not return all {len(records)} cleanup diagnostics."}]
+            records.append({"error": detail})
+            gradescope.restore_pending_rows(results, previous_ai, detail)
+        gradescope.finalize_grading(results, revision, unknown=revision is None)
+        for record in records:
+            record.update(run_id=run.run_id, submission_id=run.submission_id)
+        body = {"results": results, "ai_evidence": records}
+        if run.submission is not None and (failed or (not deferred and not unverified)):
+            no_work = not any(target.rubric is not None for target in snapshot.targets)
+            completion = AiCompleteInput(submission=run.submission,
+                                         ai_status="FAILED" if failed else "SUCCEEDED",
+                                         completion_reason="not_needed" if no_work and not failed else "processed")
+            try:
+                await order_outcome()
+                await record_outcome(snapshot, completion)
+            except Exception:
+                LOG.error("grading_run_completion_failed run_id=%s", run.run_id)
+                records.append({"run_id": run.run_id, "submission_id": run.submission_id,
+                                "error": "AI outcome was not recorded in the grading database."})
+        response = JSONResponse(body, headers={"Cache-Control": "no-store"})
+        if revision is None and len(response.body) + GRADING_HEARTBEAT_BYTES > local_client.MAX_GRADING_RESPONSE_BYTES:
+            return error("input_too_large", 413)
+        return response
+
     @router.post("/v1/submissions/{platform_submission_id}/ai-complete")
     async def ai_complete(platform_submission_id: str, request: Request):
         """Record the connector's aggregate outcome for this submission execution."""
         store = runtime.store
-        headers = request.headers.getlist("authorization")
-        if len(headers) != 1:
-            return error("unauthorized", 401)
-        scheme, _, token = headers[0].partition(" ")
-        if scheme.lower() != "bearer" or not token or len(token) > 256 or not token.isascii():
-            return error("unauthorized", 401)
         try:
-            assignment_id = store.authenticate(token)
+            assignment_id = authenticate(request)
             raw = await asyncio.wait_for(read_body(request, store.config.max_body_bytes),
                                          timeout=store.config.timeout_seconds)
             payload = AiCompleteInput.model_validate_json(raw)
@@ -709,26 +1157,8 @@ def create_feedback_router(state_path: str | Path, *, assignment_loader,
             return error("backend_error", 503)
         try:
             # Outcome reporting must still work when model or rubric configuration is invalid.
-            assignment = await asyncio.to_thread(
-                grading_repository.get_assignment_config, UUID(assignment_id),
-            )
-            if str(assignment.id) != assignment_id or not assignment.is_active:
-                return error("assignment_forbidden", 403)
-            if payload.completion_reason == "not_needed" and any(
-                target.rubric is not None
-                and target.analysis_config.get("behavior") != "functional_test_feedback"
-                for target in assignment.targets
-            ):
-                return error("invalid_request", 422)
-            submission_id = await asyncio.to_thread(db_submission, assignment_id, payload.submission)
-            if (payload.ai_status == "SUCCEEDED" and payload.completion_reason == "processed"
-                    and assignment.grading_mode == "NIGHTLY"):
-                action = await asyncio.to_thread(grading_repository.get_ai_execution_action, submission_id)
-                if action == "deferred":
-                    return error("ai_not_authorized", 409)
-            await asyncio.to_thread(
-                grading_repository.set_submission_ai_status, submission_id, payload.ai_status,
-            )
+            assignment = await asyncio.to_thread(read_active_assignment, grading_repository, assignment_id)
+            await record_outcome(assignment, payload)
         except StoreError as exc:
             return error(exc.code, exc.status_code)
         except Exception:
@@ -742,20 +1172,10 @@ def create_feedback_router(state_path: str | Path, *, assignment_loader,
 
     @router.post("/v1/submissions/{platform_submission_id}/test-results")
     async def test_results(platform_submission_id: str, request: Request):
-        """Record one run's test results and opt-outs for the instructor dashboard.
-
-        The hook sends results.json's rows once per run, before any AI call;
-        app.run_results maps them to targets. Repeats of a run_id add nothing.
-        """
+        """Record one run's test results and opt-outs for the instructor dashboard."""
         store = runtime.store
-        headers = request.headers.getlist("authorization")
-        if len(headers) != 1:
-            return error("unauthorized", 401)
-        scheme, _, token = headers[0].partition(" ")
-        if scheme.lower() != "bearer" or not token or len(token) > 256 or not token.isascii():
-            return error("unauthorized", 401)
         try:
-            assignment_id = store.authenticate(token)
+            assignment_id = authenticate(request)
             raw = await asyncio.wait_for(read_body(request, TEST_RESULTS_MAX_BYTES),
                                          timeout=store.config.timeout_seconds)
             payload = TestResultsInput.model_validate_json(raw)
@@ -770,18 +1190,8 @@ def create_feedback_router(state_path: str | Path, *, assignment_loader,
         if grading_repository is None:
             return error("backend_error", 503)
         try:
-            assignment = await asyncio.to_thread(
-                grading_repository.get_assignment_config, UUID(assignment_id),
-            )
-            if str(assignment.id) != assignment_id or not assignment.is_active:
-                return error("assignment_forbidden", 403)
-            submission_id = await asyncio.to_thread(db_submission, assignment_id, payload.submission)
-            outcomes = map_outcomes(
-                assignment.targets, [row.model_dump() for row in payload.tests], payload.visibility,
-            )
-            recorded = await asyncio.to_thread(
-                grading_repository.record_test_run, submission_id, payload.run_id, outcomes,
-            )
+            assignment = await asyncio.to_thread(read_active_assignment, grading_repository, assignment_id)
+            recorded, count = await record_tests(assignment, payload)
         except StoreError as exc:
             return error(exc.code, exc.status_code)
         except Exception:
@@ -789,7 +1199,7 @@ def create_feedback_router(state_path: str | Path, *, assignment_loader,
             return error("backend_error", 503)
         return JSONResponse(
             {"status": "recorded", "submission_id": platform_submission_id,
-             "recorded": recorded, "targets": len(outcomes)},
+             "recorded": recorded, "targets": count},
             headers={"Cache-Control": "no-store"},
         )
 

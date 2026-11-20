@@ -249,6 +249,12 @@ class JsonStore:
             record = self._state.requests.get(assignment_id, {}).get(request_id)
             return record.model_copy(deep=True) if record is not None else None
 
+    def accepted_run_targets(self, assignment_id: str, run_id: str) -> set[str]:
+        with self._mutex:
+            self._ensure_open()
+            return {record.target_id for record in self._state.requests.get(assignment_id, {}).values()
+                    if record.run_id == run_id}
+
     def record_usage(self, assignment_id: str, request_id: str, usage: TokenUsage,
                      model_name: str) -> RequestAccounting:
         """Keep usage even when grading fails or the HTTP wait has already timed out."""

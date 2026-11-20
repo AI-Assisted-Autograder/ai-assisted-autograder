@@ -24,6 +24,23 @@ from .feedback_store import StoreError
 MAX_CONFIG_BYTES = 1_048_576
 
 
+def connector_config(origin: str, assignment) -> dict[str, str | list[str]]:
+    """Package the transport mode and any extra local Gradescope report paths."""
+    config: dict[str, str | list[str]] = {"backend_url": origin}
+    if assignment.ai_mode is not None:
+        config["ai_mode"] = assignment.ai_mode
+    if assignment.ai_mode == "GRADING":
+        paths = {
+            source["path"]
+            for target in assignment.targets if target.rubric is not None
+            for source in target.analysis_config.get("evidence_sources", ())
+            if source["format"] == "gradescope" and source["path"] != "results/results.json"
+        }
+        if paths:
+            config["grading_report_paths"] = sorted(paths)
+    return config
+
+
 def _playwright_guidance(guidance: str) -> tuple[str, str]:
     """Move the prototype-aligned policy without rewriting its scoring language."""
     guidance = guidance.replace("\r\n", "\n").strip()
@@ -209,8 +226,8 @@ def primary_model_config(providers) -> dict[str, str]:
         raise StoreError("assignment_config_unavailable", 503) from None
 
 
-def read_assignment_config(repository, assignment_id: str) -> AssignmentConfig:
-    """Expose targets with a current rubric without writing grading data."""
+def read_active_assignment(repository, assignment_id: str):
+    """Read one active assignment snapshot, including targets without a rubric."""
     # Only the direct database path imports the SQL-backed repository package.
     from app.repository.base import NotFoundError
 
@@ -224,8 +241,13 @@ def read_assignment_config(repository, assignment_id: str) -> AssignmentConfig:
         raise StoreError("assignment_forbidden", 403) from None
     except Exception:
         raise StoreError("assignment_config_unavailable", 503) from None
-    if not assignment.is_active:
+    if not assignment.is_active or str(assignment.id) != assignment_id:
         raise StoreError("assignment_forbidden", 403)
+    return assignment
+
+
+def feedback_assignment_config(assignment) -> AssignmentConfig:
+    """Derive the selected model and currently gradable targets from one snapshot."""
     try:
         model_config = primary_model_config(assignment.providers)
         targets = {}
@@ -259,6 +281,10 @@ def read_assignment_config(repository, assignment_id: str) -> AssignmentConfig:
         )
     except (TypeError, ValueError):
         raise StoreError("assignment_config_unavailable", 503) from None
+
+
+def read_assignment_config(repository, assignment_id: str) -> AssignmentConfig:
+    return feedback_assignment_config(read_active_assignment(repository, assignment_id))
 
 
 class _NoRedirects(HTTPRedirectHandler):

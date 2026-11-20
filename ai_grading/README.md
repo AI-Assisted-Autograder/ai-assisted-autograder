@@ -10,29 +10,27 @@ For credentials, token setup and deployment, see the
 
 ## Current flow
 
-1. After functional grading, `gradescope_feedback.py` reads this assignment's
-   collection rules and configuration revision from `GET /v1/assignment/config`.
-2. The hook collects the configured source files and visible Gradescope evidence,
-   then sends each target to `POST /v1/feedback`. Evidence respects test visibility
-   and explicit pass/fail status; functional-test feedback selects failed rows only.
-3. The backend authenticates the assignment token, checks the configuration
-   revision and submission authorization. An unauthorized `NIGHTLY` submission
-   is registered for scheduled processing and returned as `deferred`, without
-   reserving quota or calling a model. Authorized and `IMMEDIATE` requests pass
-   input checks, reserve call quota, and invoke the DB-selected provider.
-4. AI grading adds one scored block per configured item. Functional-test feedback
-   appends explanations inside the original failed tests without changing scores;
-   when no eligible failures exist, the hook skips AI. Teacher evidence and errors
-   are retained in `results/ai_evidence.json` and logged only when Gradescope's
-   `stdout_visibility` is `hidden` (the default).
+- **Grading.** After functional grading, the hook sends one `POST /v1/grading/run`
+  containing the original results, submission-relative files, run metadata and any
+  configured additional Gradescope reports. Web records functional results, selects
+  files and visible evidence for each target using one assignment configuration
+  snapshot, grades the configured items and records the overall AI outcome. The
+  response contains the complete Gradescope `results` and private `ai_evidence`.
+- **Feedback.** The same hook reports functional results, fetches collection rules
+  from `GET /v1/assignment/config`, and calls `POST /v1/feedback` when visible
+  failed tests qualify. It appends explanations to those tests and reports completion.
+
+Both modes apply assignment-token authentication, submission authorization and
+per-target call quotas. Teacher evidence is written to `results/ai_evidence.json`.
+The hook prints diagnostic details when Gradescope's `stdout_visibility` is `hidden`.
 
 With submission metadata, PostgreSQL stores submission/target metadata, provider
-feedback and final AI outcomes. A normally deferred run reports neither success
-nor failure; scored items remain provisional until the authorized rerun. A run
+feedback, mapped functional results and final AI outcomes. A normally deferred run
+leaves the previous AI outcome in place until the authorized rerun. A run
 with no eligible feedback reports `SUCCEEDED` with `completion_reason=not_needed`.
 Automation authorizes each pending submission before triggering its rerun; the
-assignment stays `NIGHTLY`. Student source and functional test-result rows are
-not stored by this path. Backend JSON retains quota, replay and cost accounting.
+assignment stays `NIGHTLY`. Student files are processed for the run. Backend JSON
+retains quota, replay and cost accounting.
 
 | Engine | Backend credentials | Adapter |
 | --- | --- | --- |
@@ -68,11 +66,12 @@ Python CLASS/METHOD identifiers use [FileResolver](FileResolver.py)'s convention
 Explicit source patterns support custom layouts and other languages. Report paths
 are relative to `/autograder`.
 
-Backend-connected packages contain copies of `local_client.py` and
-`gradescope_feedback.py`, `config.json` with only `backend_url`, and a private
-`assignment.token`. They do not carry a duplicate `ai_feedback.json`. Instructors
-add the reusable files and hook to their functional grader; Web ZIP injection is
-not implemented. Keep credentials and generated upload ZIPs outside Git.
+Both modes use the same `local_client.py`, `gradescope_feedback.py` and hook.
+The assignment ZIP supplies `backend_url`, `ai_mode` and a private `assignment.token`.
+Grading packages list any additional Gradescope reports in `grading_report_paths`.
+Download an updated package when adding a new report path. Web reads current
+targets, rubrics and file globs on every run. Older packages without a mode
+continue to use the configuration and per-target endpoints.
 
 The connector generates a fresh run UUID each time it starts. Both a single
 submission rerun and Regrade All therefore create independent AI attempts for
@@ -123,7 +122,7 @@ the inputs. If configuration changed, fetch it again and prepare matching inputs
 Programmatic callers can use `get_assignment_config()` and pass the returned
 revision to `request_feedback()`.
 
-The client requests asynchronous processing and polls the same POST request after
+The per-target client requests asynchronous processing and polls the same POST request after
 HTTP 202 responses. Polling does not reserve another call. Default budgets are
 240 seconds for backend generation, 270 seconds per client request, and 300
 seconds for the entire hook. Backend request/output limits are initialized with

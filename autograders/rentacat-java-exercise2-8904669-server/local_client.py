@@ -29,6 +29,9 @@ DEFAULT_BACKEND_URL = "http://127.0.0.1:8001"
 MAX_RESPONSE_BYTES = 1024 * 1024
 MAX_CODE_BYTES = 64 * 1024
 MAX_FILES_BYTES = 256 * 1024
+MAX_GRADING_BODY_BYTES = 32 * 1024 * 1024
+MAX_GRADING_RESPONSE_BYTES = 256 * 1024 * 1024
+MAX_GRADING_ENTRIES = 100_000
 
 
 class ClientError(Exception):
@@ -210,6 +213,64 @@ def get_assignment_config(
         raise ClientError("Backend returned an invalid assignment configuration.") from None
 
 
+def encode_grading_upload(payload: dict, token: str, deadline: float) -> bytes:
+    reserve = 0 if payload.get("collection_error") else 5
+    budget = deadline - time.monotonic() - reserve
+    if budget <= 0:
+        raise ClientError("The total AI time budget was exhausted.")
+    payload = {**payload, "budget_seconds": min(295, budget)}
+    data = json.dumps(payload, ensure_ascii=False, separators=(",", ":"), allow_nan=False).encode("utf-8")
+    if len(data) > MAX_GRADING_BODY_BYTES:
+        raise ClientError("The submission exceeds the Grading upload limit.")
+    if token.encode("ascii") in data:
+        raise ClientError("The grading upload contains a private assignment credential.")
+    return data
+
+
+def request_grading_run(*, backend_url: str, token: str, data: bytes, deadline: float) -> dict:
+    """Send one prepared submission and wait for its complete Gradescope result."""
+    origin = validate_backend_url(backend_url)
+    request = Request(
+        origin + "/v1/grading/run", data=data, method="POST",
+        headers={"Authorization": "Bearer " + token, "Content-Type": "application/json",
+                 "Accept": "application/json, application/x-ndjson"},
+    )
+    try:
+        remaining = deadline - time.monotonic()
+        if remaining <= 0:
+            raise ClientError("The total AI time budget was exhausted.")
+        with build_opener(ProxyHandler({}), _NoRedirects()).open(request, timeout=remaining) as response:
+            raw = response.read(MAX_GRADING_RESPONSE_BYTES + 1)
+            if (response.getcode() != 200 or len(raw) > MAX_GRADING_RESPONSE_BYTES
+                    or token.encode("ascii") in raw):
+                raise ClientError("Backend returned an invalid Grading response.")
+    except HTTPError as error:
+        error.close()
+        raise _safe_http_error(error.code) from None
+    except (TimeoutError, socket.timeout):
+        raise ClientError("The Grading request timed out.") from None
+    except (URLError, OSError, ValueError, HTTPException):
+        raise ClientError("Cannot reach the backend. Check its address and running process.") from None
+    try:
+        result = json.loads(raw)
+        # A long response already sent its HTTP status with the first heartbeat.
+        if isinstance(result, dict) and isinstance(result.get("error"), dict):
+            code = result["error"].get("code")
+            if code == "grading_response_timeout":
+                raise ClientError("The Grading result was not ready within the hook time budget.")
+            if code == "input_too_large":
+                raise ClientError("The Grading result exceeds the backend response limit.")
+            raise ClientError("The backend could not complete the Grading run.")
+        if (not isinstance(result, dict) or not isinstance(result.get("results"), dict)
+                or not isinstance(result["results"].get("tests"), list)
+                or not isinstance(result.get("ai_evidence"), list)
+                or any(not isinstance(row, dict) for row in result["ai_evidence"])):
+            raise ValueError
+        return result
+    except (UnicodeError, ValueError, TypeError):
+        raise ClientError("Backend returned an invalid Grading response.") from None
+
+
 def request_feedback(
     *,
     backend_url: str,
@@ -352,6 +413,13 @@ def request_feedback(
             raise ClientError("Backend request timed out. Reuse this request ID to check its saved state.",
                               cost_unknown=request_accepted)
         time.sleep(min(max(1, min(delay, 5)), remaining))
+    return read_feedback_response(raw, identifier, evidence)
+
+
+def read_feedback_response(raw: bytes, identifier: str, evidence: list[dict] | None) -> dict:
+    """Validate one target result and keep the fields used by the Gradescope hook."""
+    if len(raw) > MAX_RESPONSE_BYTES:
+        raise ClientError("Backend returned an invalid response.", cost_unknown=True)
     accounting = None
     try:
         result = json.loads(raw)
@@ -561,6 +629,20 @@ def _test_rows(tests, output_limit: int) -> list[dict]:
     return rows
 
 
+def grading_test_payload(run_id: str, submission: dict, results: dict) -> dict:
+    """Prepare the dashboard's bounded functional-test snapshot for either transport."""
+    visibility = results.get("visibility", results.get("test_visibility"))
+    for output_limit in (4000, 500, 0):
+        payload = {
+            "submission": submission, "run_id": run_id,
+            "visibility": str(visibility) if visibility is not None else None,
+            "tests": _test_rows(results.get("tests"), output_limit),
+        }
+        if len(json.dumps(payload, ensure_ascii=False).encode("utf-8")) <= TEST_RESULTS_MAX_BYTES:
+            return payload
+    raise ClientError("Test results exceed the backend limit.")
+
+
 def report_test_results(
     *, backend_url: str, token_file: str | Path, platform_submission_id: str,
     submitted_at: str, run_id: str, results: dict, student_identifier: str | None = None,
@@ -575,25 +657,13 @@ def report_test_results(
         raise ClientError("Client timeout must be between 0 and 300 seconds.")
     origin = validate_backend_url(backend_url)
     token = read_assignment_token(token_file)
-    visibility = results.get("visibility", results.get("test_visibility"))
-    for output_limit in (4000, 500, 0):
-        payload = json.dumps({
-            "submission": {
-                "platform_submission_id": platform_submission_id,
-                "submitted_at": submitted_at,
-                "student_identifier": student_identifier,
-            },
-            "run_id": run_id,
-            "visibility": str(visibility) if visibility is not None else None,
-            "tests": _test_rows(results.get("tests"), output_limit),
-        }, ensure_ascii=False).encode("utf-8")
-        if len(payload) <= TEST_RESULTS_MAX_BYTES:
-            break
-    else:
-        raise ClientError("Test results exceed the backend limit.")
+    payload = grading_test_payload(run_id, {
+        "platform_submission_id": platform_submission_id, "submitted_at": submitted_at,
+        "student_identifier": student_identifier,
+    }, results)
     request = Request(
         origin + "/v1/submissions/" + quote(platform_submission_id, safe="") + "/test-results",
-        data=payload,
+        data=json.dumps(payload, ensure_ascii=False).encode("utf-8"),
         headers={"Authorization": "Bearer " + token, "Content-Type": "application/json",
                  "Accept": "application/json"},
         method="POST",
@@ -626,14 +696,15 @@ def _backend_from_config(path: Path) -> str:
     if not path.exists():
         return DEFAULT_BACKEND_URL
     try:
-        if path.stat().st_size > 4096:
+        if path.stat().st_size > MAX_GRADING_BODY_BYTES:
             raise ValueError
         config = json.loads(path.read_text(encoding="utf-8"))
-        if not isinstance(config, dict) or set(config) != {"backend_url"}:
+        if (not isinstance(config, dict) or "backend_url" not in config
+                or set(config) - {"backend_url", "ai_mode", "grading_report_paths"}):
             raise ValueError
         return validate_backend_url(config["backend_url"])
     except (OSError, UnicodeError, TypeError, ValueError):
-        raise ClientError("Client config must contain only a valid backend_url.") from None
+        raise ClientError("Client config must contain a valid backend_url.") from None
 
 
 def main(argv: list[str] | None = None) -> int:
