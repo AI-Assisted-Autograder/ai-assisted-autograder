@@ -78,6 +78,8 @@ class ProviderFeedback:
     confidence: Decimal | float | None = None
     input_tokens: int | None = None
     output_tokens: int | None = None
+    cache_digest: str | None = None
+    cached_result: dict | None = None
 
 
 @dataclass(frozen=True)
@@ -312,6 +314,7 @@ class TargetDetail:
     test_results: tuple[TestResultRecord, ...]
     # The selected response first, then by provider.
     feedback: tuple[FeedbackDetail, ...]
+    feedback_history_only: bool = False
 
 
 @dataclass(frozen=True)
@@ -532,6 +535,10 @@ def target_status(ai_needed: bool, completed_at: datetime | None, last_error: st
     return TargetStatus.FAILED if last_error is not None else TargetStatus.DONE
 
 
+def feedback_history_only(ai_needed: bool, analysis_config: dict) -> bool:
+    return not ai_needed and analysis_config.get("behavior") == "functional_test_feedback"
+
+
 def assignment_sort_key(a: AssignmentSummary) -> tuple:
     """Active assignments first, then by name, unnamed ones last.
 
@@ -749,6 +756,10 @@ class IGradingRepository(ABC):
     @abstractmethod
     def get_test_results(self, submission_id: uuid.UUID, target: str) -> list[TestResultRecord]:
         """A target's test results in recorded_at order, for the prompt (AD-10)."""
+
+    @abstractmethod
+    def get_cached_feedback(self, submission_id: uuid.UUID, target: str, digest: str) -> dict | None:
+        """Read the selected successful target response when its grading inputs match."""
 
     @abstractmethod
     def save_feedback(self, submission_id: uuid.UUID, target: str, result: FeedbackResult) -> None:

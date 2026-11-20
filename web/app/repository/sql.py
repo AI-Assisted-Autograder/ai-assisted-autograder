@@ -72,6 +72,7 @@ from app.repository.base import (
     check_target_fields,
     clean,
     derive_action,
+    feedback_history_only,
     feedback_sort_key,
     is_deduction,
     required,
@@ -272,6 +273,22 @@ class SqlGradingRepository(IGradingRepository):
             ).all()
             return [TestResultRecord(r.status, r.functional_test_feedback, r.recorded_at) for r in rows]
 
+    def get_cached_feedback(self, submission_id: uuid.UUID, target: str, digest: str) -> dict | None:
+        with self._sessions.begin() as s:
+            st = self._target(s, submission_id, target)
+            return s.scalar(
+                select(AiFeedback.cached_result)
+                .join(SubmissionTarget, SubmissionTarget.id == AiFeedback.submission_target_id)
+                .where(
+                    SubmissionTarget.id == st.id,
+                    SubmissionTarget.ai_needed,
+                    SubmissionTarget.completed_at.is_not(None),
+                    SubmissionTarget.last_error.is_(None),
+                    AiFeedback.is_selected,
+                    AiFeedback.cache_digest == digest,
+                )
+            )
+
     def save_feedback(self, submission_id: uuid.UUID, target: str, result: FeedbackResult) -> None:
         with self._sessions.begin() as s:
             st = self._target(s, submission_id, target, lock=True)
@@ -298,6 +315,8 @@ class SqlGradingRepository(IGradingRepository):
                         is_selected=i == result.selected_index,
                         input_tokens=r.input_tokens,
                         output_tokens=r.output_tokens,
+                        cache_digest=r.cache_digest,
+                        cached_result=r.cached_result,
                     )
                 )
             st.completed_at = func.now()
@@ -675,6 +694,7 @@ class SqlGradingRepository(IGradingRepository):
                         st.agreement_score,
                         tuple(tests[st.id]),
                         tuple(sorted(feedback[st.id], key=feedback_sort_key)),
+                        feedback_history_only=feedback_history_only(st.ai_needed, gt.analysis_config),
                     )
                     for st, gt in rows
                 ),
@@ -846,6 +866,8 @@ class SqlGradingRepository(IGradingRepository):
                     return None
                 test = latest.get(st.id)
                 score, body = selected.get(st.id, (None, None))
+                if feedback_history_only(st.ai_needed, gt.analysis_config):
+                    body = None
                 return ResultCell(
                     target_status(st.ai_needed, st.completed_at, st.last_error),
                     test, score, is_deduction(test, score, gt.max_score),

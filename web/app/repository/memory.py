@@ -4,6 +4,7 @@ Not thread-safe, and holds only the columns the implemented methods use.
 """
 
 import uuid
+from copy import deepcopy
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from decimal import Decimal
@@ -57,6 +58,7 @@ from app.repository.base import (
     check_target_fields,
     clean,
     derive_action,
+    feedback_history_only,
     feedback_sort_key,
     is_deduction,
     required,
@@ -171,6 +173,8 @@ class _AiFeedback:
     is_selected: bool
     input_tokens: int | None
     output_tokens: int | None
+    cache_digest: str | None
+    cached_result: dict | None
     id: uuid.UUID = field(default_factory=uuid.uuid4)
     generated_at: datetime = field(default_factory=lambda: _now())
 
@@ -380,6 +384,14 @@ class InMemoryRepository(IGradingRepository):
         )
         return [TestResultRecord(r.status, r.functional_test_feedback, r.recorded_at) for r in rows]
 
+    def get_cached_feedback(self, submission_id: uuid.UUID, target: str, digest: str) -> dict | None:
+        st = self._target(submission_id, target)
+        if st.ai_needed and st.completed_at is not None and st.last_error is None:
+            for feedback in self.ai_feedback:
+                if feedback.submission_target_id == st.id and feedback.is_selected and feedback.cache_digest == digest:
+                    return deepcopy(feedback.cached_result)
+        return None
+
     def save_feedback(self, submission_id: uuid.UUID, target: str, result: FeedbackResult) -> None:
         st = self._target(submission_id, target)
         check_gradable(target, st.ai_needed)
@@ -403,6 +415,8 @@ class InMemoryRepository(IGradingRepository):
                     i == result.selected_index,
                     r.input_tokens,
                     r.output_tokens,
+                    r.cache_digest,
+                    deepcopy(r.cached_result),
                 )
             )
         st.completed_at = _now()
@@ -655,6 +669,7 @@ class InMemoryRepository(IGradingRepository):
                     st.agreement_score,
                     tuple(TestResultRecord(r.status, r.functional_test_feedback, r.recorded_at) for r in tests),
                     tuple(feedback),
+                    feedback_history_only=feedback_history_only(st.ai_needed, gt.analysis_config),
                 )
             )
         return SubmissionDetail(
@@ -790,10 +805,11 @@ class InMemoryRepository(IGradingRepository):
                 None,
             )
             score = None if chosen is None else chosen.suggested_score
+            body = chosen.body if chosen and not feedback_history_only(st.ai_needed, gt.analysis_config) else None
             return ResultCell(
                 target_status(st.ai_needed, st.completed_at, st.last_error),
                 test, score, is_deduction(test, score, gt.max_score),
-                None if chosen is None else chosen.body, st.last_error,
+                body, st.last_error,
             )
 
         rows = [

@@ -278,7 +278,8 @@ class JsonStore:
             self._ensure_open()
             if assignment_id not in self._state.assignments:
                 return None
-            records = self._state.requests.get(assignment_id, {}).values()
+            records = [record for record in self._state.requests.get(assignment_id, {}).values()
+                       if not record.cache_hit]
             tracking_since = self._state.cost_tracking_started_at
             if tracking_since is not None:
                 if tracking_since.tzinfo is None:
@@ -378,7 +379,9 @@ class JsonStore:
 
     def reserve(self, assignment_id: str, request_id: str, digest: str,
                 target_id: str, model: str, *, engine: str = "vertex",
-                provider: str = "GOOGLE", run_id: str | None = None) -> tuple[RequestRecord, bool]:
+                provider: str = "GOOGLE", run_id: str | None = None,
+                cached_result: dict[str, Any] | None = None) -> tuple[RequestRecord, bool]:
+        """Bind a request ID and return whether it needs a new provider call."""
         with self._mutex:
             self._ensure_open()
             assignment = self.get_assignment(assignment_id)
@@ -389,20 +392,33 @@ class JsonStore:
                 if existing.digest != digest:
                     raise StoreError("request_conflict", 409)
                 return existing.model_copy(deep=True), False
-            if assignment.used_calls >= assignment.max_calls:
+            cache_hit = cached_result is not None
+            if not cache_hit and assignment.used_calls >= assignment.max_calls:
                 raise StoreError("quota_exceeded", 429)
             now = utc_now()
-            record = RequestRecord(request_id=request_id, target_id=target_id,
-                                   engine=engine, provider=provider, model=model, digest=digest,
-                                   status="processing", created_at=now, updated_at=now, run_id=run_id,
-                                   pricing=select_price(self._state.config.model_prices, engine, model, now.date()))
+            result = None
+            if cached_result is not None:
+                usage = TokenUsage(input_tokens=0, output_tokens=0, cached_input_tokens=0,
+                                   reasoning_tokens=0, cache_write_tokens=0)
+                accounting = RequestAccounting(model_name=cached_result["model_name"], usage=usage,
+                                               estimated_cost_usd=Decimal(0), pricing=None)
+                result = {**deepcopy(cached_result), "cache_hit": True, "request_id": request_id,
+                          "usage": {"input_tokens": 0, "output_tokens": 0},
+                          "accounting": accounting.model_dump(mode="json")}
+            record = RequestRecord(
+                request_id=request_id, target_id=target_id, engine=engine, provider=provider,
+                model=model, digest=digest, created_at=now, updated_at=now, run_id=run_id,
+                status="completed" if cache_hit else "processing", result=result,
+            )
             candidate = self._state.model_copy(deep=True)
-            candidate.assignments[assignment_id].used_calls += 1
+            if not cache_hit:
+                record.pricing = select_price(self._state.config.model_prices, engine, model, now.date())
+                candidate.assignments[assignment_id].used_calls += 1
             candidate.requests.setdefault(assignment_id, {})[request_id] = record
             # Never return authorization to call upstream before this durable write.
             self._persist(candidate)
             self._state = candidate
-            return record.model_copy(deep=True), True
+            return record.model_copy(deep=True), not cache_hit
 
     def _finish(self, assignment_id: str, request_id: str, *,
                 result: dict[str, Any] | None = None,

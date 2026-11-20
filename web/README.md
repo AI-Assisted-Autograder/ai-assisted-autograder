@@ -323,6 +323,14 @@ polling or replaying, subject to current assignment and target access.
 Legacy requests without a revision keep their original replay behavior; use a new
 request ID after changing their grading configuration.
 
+For submissions with a run ID and revision, both endpoints reuse a target's
+selected, complete SQL result when its grading inputs match. Failed targets and
+Grading targets with pending items run again. Migration `0014` adds the input
+digest and structured result to `ai_feedback`. Older feedback remains visible and
+is regenerated on its next eligible run. Cache hits consume zero tokens and quota.
+Rolling back to a pre-cache Web build after a hit also requires compatible request
+accounting state.
+
 The per-target client sends `Prefer: respond-async` and repeats the same
 POST after HTTP 202 until completion. Polling and completed-result replay consume
 no additional calls. Provider failures/timeouts retain their reserved calls.

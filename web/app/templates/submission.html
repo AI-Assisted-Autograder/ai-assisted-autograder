@@ -48,7 +48,9 @@
     {% endif %}
 
     <h3>AI feedback</h3>
-    {% if t.status.value == "OPTED_OUT" %}
+    {% if t.feedback_history_only %}
+    <p class="empty">This run had no visible failed tests requiring feedback.</p>
+    {% elif t.status.value == "OPTED_OUT" %}
     <p class="empty">The test suite opted this target out, so no feedback was requested.</p>
     {% elif t.status.value == "WAITING" %}
     <p class="empty">
@@ -66,7 +68,10 @@
     {% endif %}
 
     {% if t.feedback %}
-    {% if t.selection_reason or t.score_spread is not none or t.agreement_score is not none %}
+    {% if t.feedback_history_only %}
+    <details{% if review_error and review_error[0] in t.feedback | map(attribute='id') %} open{% endif %}>
+        <summary>Previous feedback</summary>
+    {% elif t.selection_reason or t.score_spread is not none or t.agreement_score is not none %}
     <p class="sub">
         {% if t.selection_reason %}Selected: {{ t.selection_reason }}.{% endif %}
         {% if t.score_spread is not none %}Score spread {{ t.score_spread | number }}.{% endif %}
@@ -75,11 +80,12 @@
     {% endif %}
     <div class="responses">
         {% for f in t.feedback %}
-        <article class="response{% if f.is_selected %} selected{% endif %}" id="feedback-{{ f.id }}">
+        {% set current_selection = f.is_selected and not t.feedback_history_only %}
+        <article class="response{% if current_selection %} selected{% endif %}" id="feedback-{{ f.id }}">
             <header>
                 <strong>{{ f.provider | title }}</strong>
                 <code>{{ f.model_name }}</code>
-                {% if f.is_selected %}<span class="badge done">Sent to student</span>{% endif %}
+                {% if current_selection %}<span class="badge done">Sent to student</span>{% endif %}
             </header>
             <p class="prose">{{ f.body or "(empty response)" }}</p>
             <dl class="facts">
@@ -127,6 +133,7 @@
         </article>
         {% endfor %}
     </div>
+    {% if t.feedback_history_only %}</details>{% endif %}
     {% endif %}
 </section>
 {% else %}

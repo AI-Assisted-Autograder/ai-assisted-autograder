@@ -346,8 +346,14 @@ class RequestRecord(StrictModel):
             raise ValueError("timestamps must include a timezone")
         return value
 
+    @property
+    def cache_hit(self) -> bool:
+        return self.result is not None and self.result.get("cache_hit") is True
+
     @model_validator(mode="after")
     def terminal_fields(self) -> "RequestRecord":
+        if self.cache_hit and (self.status != "completed" or self.pricing is not None or self.accounting is not None):
+            raise ValueError("cache hits require a completed result without a provider reservation")
         if self.status == "completed":
             if self.result is None or self.error_code is not None:
                 raise ValueError("completed requests require only a result")
@@ -369,7 +375,8 @@ class State(StrictModel):
     @model_validator(mode="after")
     def validate_relationships(self) -> "State":
         for assignment_id, assignment in self.assignments.items():
-            if assignment.used_calls < len(self.requests.get(assignment_id, {})):
+            reserved = sum(not record.cache_hit for record in self.requests.get(assignment_id, {}).values())
+            if assignment.used_calls < reserved:
                 raise ValueError("quota counter cannot be below reserved request count")
         for token in self.tokens.values():
             if token.assignment_id not in self.assignments:

@@ -73,9 +73,8 @@ Download an updated package when adding a new report path. Web reads current
 targets, rubrics and file globs on every run. Older packages without a mode
 continue to use the configuration and per-target endpoints.
 
-The connector generates a fresh run UUID each time it starts. Both a single
-submission rerun and Regrade All therefore create independent AI attempts for
-each eligible submission, without additional configuration. Request IDs include
+The connector generates a fresh run UUID for each execution, including a single
+submission rerun and Regrade All. Request IDs include
 this UUID, the submission ID when available, source content, grading-relevant
 observations and the configuration revision. Targets, configuration refreshes and
 HTTP polling share the same run UUID. `NIGHTLY` requests require valid submission
@@ -83,13 +82,20 @@ metadata to check authorization; `IMMEDIATE` local calls can omit it. Existing
 instructor diagnostics record the run and request IDs. Deferred or inactive
 responses end the hook's AI requests immediately, without polling or a model cost.
 
+On a rerun, Web reuses the selected PostgreSQL result for a target when the
+submission, target inputs and assignment revision match. A fully scored Grading
+target or a completed Feedback explanation can be reused. Failed targets and
+Grading targets with pending items get a fresh model call. The run still records
+its functional results and overall AI outcome.
+
 Use `gradescope_feedback.py --run-id ORIGINAL_RUN_ID` only to intentionally replay
 the same submission, inputs and configuration. Runtime metadata such as
 `execution_time` does not affect reuse. Rubric, analysis, model or prompt-version
 changes use a new revision without repackaging. New requests with a stale revision
 are rejected before reserving quota; accepted requests can still be polled or
 replayed after a configuration edit, subject to current assignment and target
-access. Independent attempts consume new calls; polling and replay do not.
+access. Only new provider calls consume quota. A reused result reports zero
+tokens and zero additional cost for the current request.
 
 ## Use the backend
 

@@ -218,14 +218,18 @@ def format_feedback_body(result: dict, evidence: list[Evidence]) -> str:
     return "\n\n".join(sections).replace("\x00", r"\x00")
 
 
+def json_digest(content: dict) -> str:
+    canonical = json.dumps(content, sort_keys=True, separators=(",", ":"), ensure_ascii=False)
+    return hashlib.sha256(canonical.encode("utf-8")).hexdigest()
+
+
 def assignment_revision(assignment) -> str:
     """Bind collected inputs and replay IDs to the grading configuration."""
     content = {"assignment": assignment.model_dump(mode="json"),
                "prompts": [PromptBuilder.version, PromptBuilder.extended_version,
                            PromptBuilder.per_test_version, PromptBuilder.grading_version,
                            PromptBuilder.functional_version]}
-    canonical = json.dumps(content, sort_keys=True, separators=(",", ":"), ensure_ascii=False)
-    return hashlib.sha256(canonical.encode("utf-8")).hexdigest()
+    return json_digest(content)
 
 
 def collection_targets(assignment):
@@ -398,20 +402,24 @@ def create_feedback_router(state_path: str | Path, *, assignment_loader,
         grading_repository.create_targets_default_needed(submission_id)
         return submission_id
 
-    def persist_feedback(assignment_id, assignment, payload, target, result):
+    def persist_feedback(submission_id, payload, target, result, cache_digest):
         """Write one successful provider response to the grading repository."""
-        if grading_repository is None or payload.submission is None:
-            return None
-        submission_id = db_submission(assignment_id, payload.submission)
         usage = result.get("usage") or {}
+        cached_result = None
+        if cache_digest is not None and result.get("grading_status") == "complete":
+            cached_result = {
+                key: value for key, value in result.items() if key not in ("request_id", "usage", "accounting")
+            }
         response = ProviderFeedback(
-            provider=result.get("provider", assignment.provider),
+            provider=result["provider"],
             model_name=result["model_name"],
             body=format_feedback_body(result, payload.evidence),
             prompt_version="v1",
             suggested_score=result.get("suggested_score"),
             input_tokens=usage.get("input_tokens"),
             output_tokens=usage.get("output_tokens"),
+            cache_digest=cache_digest if cached_result is not None else None,
+            cached_result=cached_result,
         )
         grading_repository.save_feedback(
             submission_id,
@@ -423,7 +431,6 @@ def create_feedback_router(state_path: str | Path, *, assignment_loader,
                 selection_reason="single configured provider response",
             ),
         )
-        return submission_id
 
     def persist_failure(assignment_id, assignment, payload, target, message):
         if grading_repository is None or payload.submission is None:
@@ -512,8 +519,9 @@ def create_feedback_router(state_path: str | Path, *, assignment_loader,
                      "Preference-Applied": "respond-async"},
         )
 
-    async def finish_feedback(future, assignment_id, rid, assignment, target, payload, timeout):
+    async def finish_feedback(future, assignment, target, payload, submission_id, cache_digest, timeout):
         store = runtime.store
+        assignment_id, rid = assignment.id, payload.request_id
         try:
             response = await asyncio.wait_for(asyncio.shield(future), timeout)
             if (target.max_score is not None and response.suggested_score is not None
@@ -538,9 +546,9 @@ def create_feedback_router(state_path: str | Path, *, assignment_loader,
             if target.max_score is not None:
                 result["suggested_score"] = response.suggested_score
                 result["max_score"] = target.max_score
-            if payload.submission is not None and grading_repository is not None:
+            if submission_id is not None:
                 await asyncio.to_thread(
-                    persist_feedback, assignment_id, assignment, payload, target, result,
+                    persist_feedback, submission_id, payload, target, result, cache_digest,
                 )
             store.complete(assignment_id, rid, result)
             return JSONResponse(result, headers={"Cache-Control": "no-store"})
@@ -631,8 +639,11 @@ def create_feedback_router(state_path: str | Path, *, assignment_loader,
                 return error("invalid_request", 422, rid)
             if grading_repository is None:
                 return error("backend_error", 503, rid)
+        submission_id = None
         if existing is None and payload.submission is not None and grading_repository is not None:
-            skipped = await asyncio.to_thread(submission_skip, assignment_id, payload.submission, target.identifier)
+            submission_id, skipped = await asyncio.to_thread(
+                submission_for_target, assignment_id, payload.submission, target.identifier,
+            )
             if skipped:
                 return JSONResponse({"request_id": rid, **skipped}, headers={"Cache-Control": "no-store"})
         content = payload.model_dump(mode="json", exclude={"request_id", "run_id"})
@@ -647,12 +658,12 @@ def create_feedback_router(state_path: str | Path, *, assignment_loader,
             content.pop("code")
         if not payload.functional_test_feedback:
             content.pop("functional_test_feedback")
-        canonical = json.dumps(content,
-                               sort_keys=True, separators=(",", ":"), ensure_ascii=False)
-        digest = hashlib.sha256(canonical.encode("utf-8")).hexdigest()
+        digest = json_digest(content)
         # An accepted request retains its configuration snapshot while polling.
         # Current assignment/target authorization above still applies to replays.
         pitt_api_key = None
+        cache_digest = None
+        cached_result = None
         if existing is None:
             if deadline is not None and time.monotonic() >= deadline:
                 raise TimeoutError
@@ -678,7 +689,14 @@ def create_feedback_router(state_path: str | Path, *, assignment_loader,
                 PromptBuilder().prepare(grading_request)
             except ValueError:
                 return error("input_too_large", 413, rid)
-            if assignment.engine == "pitt":
+            if (submission_id is not None and payload.run_id and payload.config_revision
+                    and target.analysis.behavior is not None):
+                # The SQL lookup already identifies the submission. Its metadata may vary between runs.
+                cache_digest = json_digest({key: value for key, value in content.items() if key != "submission"})
+                cached_result = await asyncio.to_thread(
+                    grading_repository.get_cached_feedback, submission_id, target.identifier, cache_digest,
+                )
+            if cached_result is None and assignment.engine == "pitt":
                 try:
                     if pitt_key_resolver is not None:
                         pitt_api_key = await asyncio.to_thread(pitt_key_resolver, assignment)
@@ -697,11 +715,12 @@ def create_feedback_router(state_path: str | Path, *, assignment_loader,
         if existing is None and deadline is not None and time.monotonic() >= deadline:
             raise TimeoutError
         try:
-            if existing is None and runtime.inflight >= config.max_concurrency:
+            if existing is None and cached_result is None and runtime.inflight >= config.max_concurrency:
                 return error("busy", 429, rid)
             record, created = store.reserve(assignment_id, rid, digest, payload.target_id,
                                             assignment.model, engine=assignment.engine,
-                                            provider=assignment.provider, run_id=payload.run_id)
+                                            provider=assignment.provider, run_id=payload.run_id,
+                                            cached_result=cached_result)
         except StoreError as exc:
             return error(exc.code, exc.status_code, rid)
         except Exception:
@@ -741,7 +760,7 @@ def create_feedback_router(state_path: str | Path, *, assignment_loader,
 
         future.add_done_callback(release)
         job = asyncio.create_task(finish_feedback(
-            future, assignment_id, rid, assignment, target, payload, config.timeout_seconds,
+            future, assignment, target, payload, submission_id, cache_digest, config.timeout_seconds,
         ))
         runtime.jobs[assignment_id, rid] = job
 
@@ -788,15 +807,17 @@ def create_feedback_router(state_path: str | Path, *, assignment_loader,
         recorded = await asyncio.to_thread(grading_repository.record_test_run, submission_id, payload.run_id, outcomes)
         return recorded, len(outcomes)
 
-    def submission_skip(assignment_id, submission, target_name):
+    def submission_for_target(assignment_id, submission, target_name):
         submission_id = db_submission(assignment_id, submission)
         action = grading_repository.get_ai_execution_action(submission_id)
         if action == "deferred":
             action = grading_repository.defer_submission_target(submission_id, target_name)
         if action != "execute":
-            return {"status": action,
-                    "reason": "awaiting_nightly_authorization" if action == "deferred" else "inactive_submission"}
-        return None
+            return submission_id, {
+                "status": action,
+                "reason": "awaiting_nightly_authorization" if action == "deferred" else "inactive_submission",
+            }
+        return submission_id, None
 
     async def wait_for_target(assignment, payload, deadline, *, cached_only=False):
         # The legacy hook retries only temporary capacity errors. Keep this wait
@@ -875,8 +896,8 @@ def create_feedback_router(state_path: str | Path, *, assignment_loader,
                 raise ReplayVerificationTimeout
             try:
                 async with asyncio.timeout(remaining):
-                    skipped = await asyncio.to_thread(submission_skip, assignment.id, run.submission,
-                                                      targets[target_id]["identifier"])
+                    _, skipped = await asyncio.to_thread(submission_for_target, assignment.id, run.submission,
+                                                         targets[target_id]["identifier"])
             except TimeoutError:
                 raise ReplayVerificationTimeout from None
             checked_action = True

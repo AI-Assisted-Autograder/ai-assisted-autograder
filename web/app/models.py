@@ -27,7 +27,7 @@ from sqlalchemy import (
     true,
 )
 from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column
-from sqlalchemy.dialects.postgresql import JSONB
+from sqlalchemy.dialects.postgresql import JSON, JSONB
 
 # Deterministic constraint names, so Alembic migrations can refer to them.
 NAMING_CONVENTION = {
@@ -329,6 +329,9 @@ class AiFeedback(Base):
     is_selected: Mapped[bool] = mapped_column(server_default=false())
     input_tokens: Mapped[int | None] = mapped_column(Integer)
     output_tokens: Mapped[int | None] = mapped_column(Integer)
+    cache_digest: Mapped[str | None] = mapped_column(Text)
+    # JSON preserves escaped U+0000 in provider output, which JSONB rejects.
+    cached_result: Mapped[dict | None] = mapped_column(JSON(none_as_null=True), deferred=True)
     generated_at: Mapped[datetime] = created_now()
 
 
